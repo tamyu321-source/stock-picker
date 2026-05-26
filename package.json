@@ -1,0 +1,20 @@
+{
+  "name": "stock-picker",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "4.6.2",
+    "vite": "4.5.3",
+    "vue": "3.4.38"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "vue-tsc": "2.0.29"
+  }
+}
