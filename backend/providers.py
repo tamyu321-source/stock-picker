@@ -244,6 +244,21 @@ LOCAL_COMPANY_NAMES = {
 }
 
 COMPANY_SEARCH_ALIASES = {
+    "AAPL": ["Apple", "Apple Inc"],
+    "MSFT": ["Microsoft"],
+    "NVDA": ["Nvidia", "NVIDIA"],
+    "AMZN": ["Amazon"],
+    "GOOGL": ["Alphabet", "Google"],
+    "META": ["Meta Platforms", "Facebook"],
+    "TSLA": ["Tesla"],
+    "AVGO": ["Broadcom"],
+    "AMD": ["Advanced Micro Devices", "AMD"],
+    "JPM": ["JPMorgan", "JP Morgan"],
+    "V": ["Visa"],
+    "LLY": ["Eli Lilly"],
+    "UNH": ["UnitedHealth", "UnitedHealth Group"],
+    "XOM": ["Exxon Mobil", "ExxonMobil"],
+    "COST": ["Costco"],
     "600519.SS": ["贵州茅台", "Kweichow Moutai"],
     "300750.SZ": ["宁德时代", "CATL"],
     "002594.SZ": ["比亚迪", "BYD"],
@@ -268,6 +283,30 @@ COMPANY_SEARCH_ALIASES = {
     "2318.HK": ["中国平安", "中國平安", "Ping An Insurance"],
     "1024.HK": ["快手", "Kuaishou"],
     "1810.HK": ["小米集团", "小米集團", "Xiaomi"],
+    "2330.TW": ["台積電", "台积电", "TSMC"],
+    "2317.TW": ["鴻海", "鸿海", "Foxconn", "Hon Hai"],
+    "2454.TW": ["聯發科", "联发科", "MediaTek"],
+    "2308.TW": ["台達電", "台达电", "Delta Electronics"],
+    "2412.TW": ["中華電", "中华电", "Chunghwa Telecom"],
+    "2881.TW": ["富邦金", "Fubon Financial"],
+    "2882.TW": ["國泰金", "国泰金", "Cathay Financial"],
+    "2303.TW": ["聯電", "联电", "UMC"],
+    "3711.TW": ["日月光投控", "ASE"],
+    "2382.TW": ["廣達", "广达", "Quanta"],
+    "2891.TW": ["中信金", "CTBC"],
+    "2886.TW": ["兆豐金", "Mega Financial"],
+    "D05.SI": ["DBS", "DBS Group"],
+    "O39.SI": ["OCBC"],
+    "U11.SI": ["UOB", "United Overseas Bank"],
+    "Z74.SI": ["Singtel", "Singapore Telecommunications"],
+    "A17U.SI": ["CapitaLand Ascendas REIT", "Ascendas REIT"],
+    "C38U.SI": ["CapitaLand Integrated Commercial Trust", "CICT"],
+    "C6L.SI": ["Singapore Airlines", "SIA"],
+    "S68.SI": ["Singapore Exchange", "SGX"],
+    "BN4.SI": ["Keppel"],
+    "F34.SI": ["Wilmar"],
+    "G13.SI": ["Genting Singapore"],
+    "Y92.SI": ["Thai Beverage", "ThaiBev"],
 }
 
 KNOWN_SECTORS = {
@@ -447,7 +486,7 @@ class YahooHttpMarketDataProvider:
             change=round(change, 2),
             currency=meta.get("currency") or _raw(price_info.get("currency")) or "",
             closes=closes[-130:],
-            info=self._fundamentals(info),
+            info=self._fundamentals(info, meta),
         )
 
     def _json(self, url: str) -> dict:
@@ -456,7 +495,7 @@ class YahooHttpMarketDataProvider:
             return json.loads(response.read().decode("utf-8"))
 
     def _quote_summary(self, symbol: str) -> dict:
-        modules = "price,summaryProfile,defaultKeyStatistics,financialData,summaryDetail"
+        modules = "price,summaryProfile,defaultKeyStatistics,financialData,summaryDetail,calendarEvents,earningsTrend"
         url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{quote(symbol)}?modules={modules}"
         try:
             payload = self._json(url)
@@ -465,10 +504,12 @@ class YahooHttpMarketDataProvider:
         except Exception:
             return {}
 
-    def _fundamentals(self, info: dict) -> dict[str, Any]:
+    def _fundamentals(self, info: dict, meta: dict | None = None) -> dict[str, Any]:
+        meta = meta or {}
         stats = info.get("defaultKeyStatistics", {})
         financial = info.get("financialData", {})
         detail = info.get("summaryDetail", {})
+        price_info = info.get("price", {})
         return {
             "trailingPE": _raw(detail.get("trailingPE")),
             "forwardPE": _raw(stats.get("forwardPE")),
@@ -476,6 +517,22 @@ class YahooHttpMarketDataProvider:
             "returnOnEquity": _raw(financial.get("returnOnEquity")),
             "profitMargins": _raw(stats.get("profitMargins")),
             "debtToEquity": _raw(financial.get("debtToEquity")),
+            "revenueGrowth": _raw(financial.get("revenueGrowth")),
+            "earningsGrowth": _raw(financial.get("earningsGrowth")),
+            "grossMargins": _raw(financial.get("grossMargins")),
+            "operatingMargins": _raw(financial.get("operatingMargins")),
+            "currentRatio": _raw(financial.get("currentRatio")),
+            "freeCashflow": _raw(financial.get("freeCashflow")),
+            "targetMeanPrice": _raw(financial.get("targetMeanPrice")),
+            "recommendationMean": _raw(financial.get("recommendationMean")),
+            "recommendationKey": _raw(financial.get("recommendationKey")),
+            "numberOfAnalystOpinions": _raw(financial.get("numberOfAnalystOpinions")),
+            "marketCap": _raw(price_info.get("marketCap")),
+            "dividendYield": _raw(detail.get("dividendYield")),
+            "fiftyTwoWeekHigh": _raw(detail.get("fiftyTwoWeekHigh")) or meta.get("fiftyTwoWeekHigh"),
+            "fiftyTwoWeekLow": _raw(detail.get("fiftyTwoWeekLow")) or meta.get("fiftyTwoWeekLow"),
+            "regularMarketVolume": meta.get("regularMarketVolume"),
+            "earningsDate": _raw(info.get("calendarEvents", {}).get("earnings", {}).get("earningsDate")),
         }
 
 

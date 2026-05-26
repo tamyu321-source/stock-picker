@@ -39,6 +39,119 @@ export interface ReasonCode {
   params: Record<string, string | number>;
 }
 
+export interface ScoreComponent {
+  factor: keyof StrategyWeights;
+  score: number;
+  weight: number;
+  contribution: number;
+}
+
+export interface DecisionPoint {
+  key:
+    | 'buySummary'
+    | 'watchSummary'
+    | 'sellSummary'
+    | 'newsSupport'
+    | 'newsPressure'
+    | 'insufficientNews'
+    | 'freshNews'
+    | 'momentumSupport'
+    | 'weakMomentum'
+    | 'watchBreakout'
+    | 'valuationSupport'
+    | 'expensiveValuation'
+    | 'watchValuation'
+    | 'riskControlled'
+    | 'riskHigh'
+    | 'watchRisk'
+    | 'qualitySupport'
+    | 'weakQuality'
+    | 'watchNewsFlow'
+    | 'newsBullishSummary'
+    | 'newsBearishSummary'
+    | 'newsMixedSummary'
+    | 'newsNoEvidence'
+    | 'financialStrongSummary'
+    | 'financialWeakSummary'
+    | 'financialMixedSummary'
+    | 'financialDataMissing'
+    | 'financialValuationReasonable'
+    | 'financialValuationRich'
+    | 'financialWatchValuation'
+    | 'financialGrowthSupport'
+    | 'financialGrowthWeak'
+    | 'financialWatchNextReport'
+    | 'financialProfitabilitySupport'
+    | 'financialProfitabilityWeak'
+    | 'financialDebtControlled'
+    | 'financialDebtRisk'
+    | 'financialAnalystUpside'
+    | 'financialAnalystDownside'
+    | 'financialDividendSupport'
+    | 'financialWatchHighRange'
+    | 'financialWatchLowRange'
+    | 'actionAccumulate'
+    | 'actionReduceOrExit'
+    | 'actionWait'
+    | 'actionBuyInBatches'
+    | 'actionWaitNewsConfirmation'
+    | 'actionUseSmallPosition'
+    | 'actionReduceExposure'
+    | 'actionDoNotAverageDown'
+    | 'actionSetExitReview'
+    | 'actionNoChase'
+    | 'actionWatchNewsCatalyst'
+    | 'actionWatchFinancialRepair'
+    | 'actionWatchMomentumTurn'
+    | 'actionRespectRisk'
+    | 'actionRequireNewsEvidence';
+  params: Record<string, string | number>;
+}
+
+export interface DecisionDetails {
+  summary: DecisionPoint;
+  positives: DecisionPoint[];
+  negatives: DecisionPoint[];
+  watchItems: DecisionPoint[];
+}
+
+export interface NewsEvent {
+  key: string;
+  impact: 'positive' | 'negative' | 'neutral';
+  title: string;
+  source: string;
+  ageHours: number;
+  weight: number;
+}
+
+export interface NewsAnalysis {
+  summary: DecisionPoint;
+  positiveCount: number;
+  negativeCount: number;
+  events: NewsEvent[];
+}
+
+export interface FinancialMetric {
+  key: string;
+  value: string;
+  score: number;
+}
+
+export interface FinancialAnalysis {
+  summary: DecisionPoint;
+  metrics: FinancialMetric[];
+  positives: DecisionPoint[];
+  negatives: DecisionPoint[];
+  watchItems: DecisionPoint[];
+}
+
+export interface ActionPlan {
+  summary: DecisionPoint;
+  steps: DecisionPoint[];
+  watchItems: DecisionPoint[];
+  riskControls: DecisionPoint[];
+}
+
 export interface Pick {
   symbol: string;
   name: string;
@@ -54,6 +167,11 @@ export interface Pick {
   reasonCodes?: ReasonCode[];
   signals: Signal[];
   metrics: StrategyWeights;
+  scoreBreakdown?: ScoreComponent[];
+  decision?: DecisionDetails;
+  newsAnalysis?: NewsAnalysis;
+  financialAnalysis?: FinancialAnalysis;
+  actionPlan?: ActionPlan;
 }
 
 export interface AnalysisResponse {

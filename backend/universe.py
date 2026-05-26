@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import json
+import re
 import ssl
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS
-from backend.providers import LOCAL_COMPANY_NAMES, infer_market, local_company_name
+from backend.providers import (
+    COMPANY_SEARCH_ALIASES,
+    LOCAL_COMPANY_NAMES,
+    Article,
+    RssNewsCrawler,
+    google_news_url,
+    infer_market,
+    is_recent_article,
+    local_company_name,
+    recency_weight,
+)
 
 FALLBACK_SEARCH_TERMS = {
     "CN": [
@@ -67,6 +79,23 @@ FALLBACK_SEARCH_TERMS = {
 }
 
 CURATED_FALLBACK_SYMBOLS = {
+    "US": [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "AMZN",
+        "GOOGL",
+        "META",
+        "TSLA",
+        "AVGO",
+        "AMD",
+        "JPM",
+        "V",
+        "LLY",
+        "UNH",
+        "XOM",
+        "COST",
+    ],
     "CN": [
         "600519.SS",
         "300750.SZ",
@@ -111,6 +140,40 @@ CURATED_FALLBACK_SYMBOLS = {
     ],
 }
 
+MARKET_NEWS_QUERIES = {
+    "CN": [
+        "A股 公司 财报 业绩 股价",
+        "A股 上市公司 公告 增持 减持",
+        "A股 龙虎榜 资金 流入 个股",
+        "site:finance.eastmoney.com A股 公司 业绩",
+        "site:stcn.com A股 上市公司",
+    ],
+    "HK": [
+        "港股 公司 業績 股價 公告",
+        "港股 目標價 盈喜 盈警 個股",
+        "site:aastocks.com 港股 業績",
+        "site:etnet.com.hk 港股 公司",
+    ],
+    "TW": [
+        "台股 公司 營收 財報 股價",
+        "台股 法說 目標價 個股",
+        "site:cnyes.com 台股 營收",
+        "site:moneydj.com 台股 公司",
+    ],
+    "SG": [
+        "Singapore stocks earnings results dividend SGX",
+        "Singapore market company results shares",
+        "site:businesstimes.com.sg SGX results stocks",
+        "site:channelnewsasia.com Singapore company shares",
+    ],
+    "US": [
+        "US stocks earnings revenue upgrade downgrade",
+        "Wall Street stocks analyst rating earnings",
+        "site:reuters.com stocks earnings shares",
+        "site:finance.yahoo.com stocks earnings",
+    ],
+}
+
 
 @dataclass(frozen=True)
 class DiscoveredSymbol:
@@ -118,6 +181,9 @@ class DiscoveredSymbol:
     name: str
     market: str
     source: str
+    news_score: float = 0.0
+    news_hits: int = 0
+    evidence: tuple[Article, ...] = ()
 
 
 class MarketUniverseProvider:
@@ -128,19 +194,13 @@ class MarketUniverseProvider:
         errors: list[dict] = []
         for market in markets:
             try:
-                market_symbols = self._discover_market(market, limit_per_market)
+                market_symbols = self._discover_market_news(market, limit_per_market)
             except Exception as exc:
-                errors.append({"market": market, "source": "market-universe", "error": str(exc)})
-                market_symbols = self._discover_fallback_search(market, limit_per_market)
+                errors.append({"market": market, "source": "market-news", "error": str(exc)})
+                market_symbols = []
 
             if not market_symbols:
-                market_symbols = self._discover_fallback_search(market, limit_per_market)
-
-            if not market_symbols:
-                market_symbols = [
-                    DiscoveredSymbol(symbol=symbol, name=symbol, market=market, source="fallback-default-symbol")
-                    for symbol in DEFAULT_SYMBOLS.get(market, [])
-                ]
+                errors.append({"market": market, "source": "market-news", "error": "No recent company mentions were extracted from market news."})
             symbols.extend(market_symbols[:limit_per_market])
 
         seen = set()
@@ -150,6 +210,116 @@ class MarketUniverseProvider:
                 deduped.append(item)
                 seen.add(item.symbol)
         return deduped, errors
+
+    def _discover_market_news(self, market: str, limit: int) -> list[DiscoveredSymbol]:
+        crawler = RssNewsCrawler()
+        articles = []
+        for query in MARKET_NEWS_QUERIES.get(market, []):
+            try:
+                articles.extend(crawler._parse_feed(google_news_url(_market_locale_symbol(market), query)))
+            except Exception:
+                continue
+        return self._symbols_from_news_articles(market, articles, limit)
+
+    def _symbols_from_news_articles(self, market: str, articles: list[Article], limit: int) -> list[DiscoveredSymbol]:
+        index = _news_symbol_index(market)
+        now = datetime.now(timezone.utc)
+        scores: dict[str, float] = {}
+        hits: dict[str, int] = {}
+        symbol_names: dict[str, str] = {}
+        evidence: dict[str, list[Article]] = {}
+        unresolved_terms: dict[str, float] = {}
+        term_evidence: dict[str, list[Article]] = {}
+        for article in articles:
+            if not is_recent_article(article, now):
+                continue
+            text = f"{article.title} {article.summary}".lower()
+            display_text = f"{article.title} {article.summary}"
+            article_weight = article.credibility * recency_weight(article, now) * (0.35 + abs(article.sentiment))
+            for symbol, alias_names in index.items():
+                if any(_alias_in_text(alias, text) for alias in alias_names):
+                    scores[symbol] = scores.get(symbol, 0.0) + article_weight
+                    hits[symbol] = hits.get(symbol, 0) + 1
+                    symbol_names[symbol] = local_company_name(symbol, symbol)
+                    evidence.setdefault(symbol, []).append(article)
+            for symbol in _symbols_from_code_mentions(text, market):
+                if infer_market(symbol) == market and is_common_equity_symbol(symbol, market):
+                    scores[symbol] = scores.get(symbol, 0.0) + article_weight
+                    hits[symbol] = hits.get(symbol, 0) + 1
+                    symbol_names[symbol] = local_company_name(symbol, symbol)
+                    evidence.setdefault(symbol, []).append(article)
+            for term in _company_terms_from_article(display_text, market):
+                unresolved_terms[term] = unresolved_terms.get(term, 0.0) + article_weight
+                term_evidence.setdefault(term, []).append(article)
+        for term, term_score in sorted(unresolved_terms.items(), key=lambda item: item[1], reverse=True)[:12]:
+            if len(scores) >= limit * 2:
+                break
+            resolved = self._search_eastmoney_term(term, market) if market in {"CN", "HK"} else []
+            if not resolved:
+                resolved = self._search_yahoo_term(term, market)
+            for item in resolved[:2]:
+                if item.symbol in scores:
+                    continue
+                scores[item.symbol] = term_score
+                hits[item.symbol] = 1
+                symbol_names[item.symbol] = item.name
+                evidence[item.symbol] = term_evidence.get(term, [])
+        ranked_symbols = sorted(scores, key=lambda symbol: (scores[symbol], hits[symbol]), reverse=True)
+        return [
+            DiscoveredSymbol(
+                symbol=symbol,
+                name=symbol_names.get(symbol) or local_company_name(symbol, symbol),
+                market=market,
+                source="market-news",
+                news_score=round(scores[symbol], 4),
+                news_hits=hits[symbol],
+                evidence=tuple(_dedupe_articles(evidence.get(symbol, []))[:4]),
+            )
+            for symbol in ranked_symbols[:limit]
+        ]
+
+    def _search_yahoo_term(self, term: str, market: str) -> list[DiscoveredSymbol]:
+        try:
+            payload = self._json(f"https://query1.finance.yahoo.com/v1/finance/search?q={quote_plus(term)}&quotesCount=6&newsCount=0")
+        except Exception:
+            return []
+        output = []
+        for quote in payload.get("quotes", []):
+            symbol = str(quote.get("symbol") or "").upper()
+            if not symbol or infer_market(symbol) != market or not is_common_equity_symbol(symbol, market):
+                continue
+            if quote.get("quoteType") and quote.get("quoteType") != "EQUITY":
+                continue
+            name = local_company_name(symbol, quote.get("shortname") or quote.get("longname") or quote.get("name") or term)
+            output.append(DiscoveredSymbol(symbol=symbol, name=name, market=market, source=f"market-news-search:{term}"))
+        return output
+
+    def _search_eastmoney_term(self, term: str, market: str) -> list[DiscoveredSymbol]:
+        try:
+            payload = self._json(f"https://searchapi.eastmoney.com/api/suggest/get?input={quote_plus(term)}&type=14&token=")
+        except Exception:
+            return []
+        rows = payload.get("QuotationCodeTable", {}).get("Data") or []
+        output = []
+        for row in rows:
+            code = str(row.get("Code") or row.get("UnifiedCode") or "").strip()
+            classify = str(row.get("Classify") or "").upper()
+            jys = str(row.get("JYS") or "").upper()
+            symbol = ""
+            if market == "HK" and (classify == "HK" or jys == "HK") and code.isdigit():
+                symbol = f"{int(code):04d}.HK"
+            elif market == "CN" and code.isdigit() and is_common_equity_symbol(f"{code}.SS" if code.startswith('6') else f"{code}.SZ", "CN"):
+                symbol = f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
+            if symbol:
+                output.append(
+                    DiscoveredSymbol(
+                        symbol=symbol,
+                        name=local_company_name(symbol, str(row.get("Name") or term)),
+                        market=market,
+                        source=f"market-news-eastmoney:{term}",
+                    )
+                )
+        return output
 
     def _discover_market(self, market: str, limit: int) -> list[DiscoveredSymbol]:
         if market == "US":
@@ -337,3 +507,89 @@ def is_common_equity_symbol(symbol: str, market: str) -> bool:
 
 def configured_markets() -> list[str]:
     return [market["id"] for market in MARKETS]
+
+
+def _market_locale_symbol(market: str) -> str:
+    return {
+        "CN": "600519.SS",
+        "HK": "0700.HK",
+        "TW": "2330.TW",
+        "SG": "D05.SI",
+        "US": "AAPL",
+    }.get(market, "AAPL")
+
+
+def _news_symbol_index(market: str) -> dict[str, list[str]]:
+    symbols = set(CURATED_FALLBACK_SYMBOLS.get(market, []))
+    symbols.update(symbol for symbol in LOCAL_COMPANY_NAMES if infer_market(symbol) == market)
+    symbols.update(symbol for symbol in COMPANY_SEARCH_ALIASES if infer_market(symbol) == market)
+    index: dict[str, list[str]] = {}
+    for symbol in symbols:
+        names = [local_company_name(symbol, symbol), *COMPANY_SEARCH_ALIASES.get(symbol, [])]
+        if not symbol.split(".")[0].isdigit() and len(symbol.split(".")[0]) > 1:
+            names.append(symbol.split(".")[0])
+        index[symbol] = list(dict.fromkeys(name for name in names if name and name.upper() != symbol.upper()))
+    return index
+
+
+def _alias_in_text(alias: str, text: str) -> bool:
+    alias = alias.strip().lower()
+    if not alias:
+        return False
+    if any("\u3400" <= char <= "\u9fff" for char in alias):
+        return alias in text
+    if len(alias) <= 2:
+        return re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", text) is not None
+    return alias in text
+
+
+def _symbols_from_code_mentions(text: str, market: str) -> list[str]:
+    if market == "CN":
+        return [f"{code}.SS" if code.startswith("6") else f"{code}.SZ" for code in re.findall(r"(?<!\d)([036]\d{5})(?!\d)", text)]
+    if market == "HK":
+        return [f"{int(code):04d}.HK" for code in re.findall(r"(?<!\d)(\d{4,5})\.?hk(?![a-z0-9])", text)]
+    if market == "TW":
+        return [f"{code}.TW" for code in re.findall(r"(?<!\d)(\d{4})\.?tw(?![a-z0-9])", text)]
+    if market == "SG":
+        return [f"{code.upper()}.SI" for code in re.findall(r"(?<![a-z0-9])([a-z0-9]{3,4})\.?si(?![a-z0-9])", text)]
+    return []
+
+
+def _company_terms_from_article(text: str, market: str) -> list[str]:
+    if market not in {"CN", "HK", "TW"}:
+        return []
+    terms = []
+    patterns = [
+        r"([\u4e00-\u9fffA-Za-z0-9]{2,8}?)(?:等\d*股|披露|擬|拟|增持|減持|减持|漲停|涨停|復牌|复牌|業績|业绩|股價|股价|股份|公司)",
+        r"(?:公告|掘金|異動|异动|焦點|焦点)[|丨：:\s]+([\u4e00-\u9fffA-Za-z0-9]{2,12})",
+        r"(?:抢筹|搶籌|狂买|狂買|买入|買入|增持)([\u4e00-\u9fffA-Za-z0-9]{2,8})",
+    ]
+    for pattern in patterns:
+        terms.extend(re.findall(pattern, text))
+    for separator in ["，", ",", "；", ";", "、"]:
+        for part in text.split(separator):
+            match = re.search(r"([\u4e00-\u9fffA-Za-z0-9]{2,12})(?:等\d*股|披露|增持|減持|减持|漲停|涨停)", part)
+            if match:
+                terms.append(match.group(1))
+    stop_terms = {"公司", "上市公司", "港股", "台股", "股票", "個股", "个股", "業績", "业绩", "公告", "財報", "财报"}
+    deduped = []
+    seen = set()
+    for term in terms:
+        cleaned = str(term).strip(" 「」“”：《》()（）[]【】")
+        cleaned = re.sub(r"^\d+月\d+日?", "", cleaned)
+        cleaned = re.sub(r"(?:等\d*股|披露|擬|拟|增持|減持|减持).*$", "", cleaned)
+        if len(cleaned) >= 2 and "月" not in cleaned and cleaned not in stop_terms and cleaned not in seen:
+            deduped.append(cleaned)
+            seen.add(cleaned)
+    return deduped[:8]
+
+
+def _dedupe_articles(articles: list[Article]) -> list[Article]:
+    output = []
+    seen = set()
+    for article in articles:
+        key = article.link or article.title
+        if key not in seen:
+            output.append(article)
+            seen.add(key)
+    return output

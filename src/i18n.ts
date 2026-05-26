@@ -34,6 +34,16 @@ type MessageKey =
   | 'backendStatus'
   | 'allMarkets'
   | 'reasonTitle'
+  | 'scoreDetail'
+  | 'positiveReasons'
+  | 'negativeReasons'
+  | 'watchItems'
+  | 'actionPlan'
+  | 'newsEvents'
+  | 'financialReview'
+  | 'riskControls'
+  | 'weight'
+  | 'contribution'
   | 'liveData'
   | 'failures'
   | 'sectorUnavailable';
@@ -73,6 +83,16 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     backendStatus: 'Python AI scoring API',
     allMarkets: 'China, Hong Kong, Singapore, United States, Taiwan',
     reasonTitle: 'Decision factors',
+    scoreDetail: '100-point score detail',
+    positiveReasons: 'Supports investment',
+    negativeReasons: 'Exit / risk reasons',
+    watchItems: 'What to watch',
+    actionPlan: 'Suggested action',
+    newsEvents: 'News event analysis',
+    financialReview: 'Financial report check',
+    riskControls: 'Risk controls',
+    weight: 'Weight',
+    contribution: 'Contribution',
     liveData: 'Live market data and RSS crawling',
     failures: 'Data issues',
     sectorUnavailable: 'Sector unavailable'
@@ -111,6 +131,16 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     backendStatus: 'Python AI 评分 API',
     allMarkets: '中国、香港、新加坡、美国、台湾',
     reasonTitle: '判断依据',
+    scoreDetail: '100 分评分明细',
+    positiveReasons: '支持投资的理由',
+    negativeReasons: '需要抛售/风险理由',
+    watchItems: '重点观察什么',
+    actionPlan: '建议操作',
+    newsEvents: '新闻事件解析',
+    financialReview: '财报/基本面检查',
+    riskControls: '风险控制',
+    weight: '权重',
+    contribution: '贡献分',
     liveData: '真实行情与 RSS 爬文',
     failures: '数据问题',
     sectorUnavailable: '行业资料暂缺'
@@ -149,6 +179,16 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     backendStatus: 'Python AI 評分 API',
     allMarkets: '中國、香港、新加坡、美國、台灣',
     reasonTitle: '判斷依據',
+    scoreDetail: '100 分評分明細',
+    positiveReasons: '支持投資的理由',
+    negativeReasons: '需要拋出/風險理由',
+    watchItems: '重點觀察什麼',
+    actionPlan: '建議操作',
+    newsEvents: '新聞事件解析',
+    financialReview: '財報/基本面檢查',
+    riskControls: '風險控制',
+    weight: '權重',
+    contribution: '貢獻分',
     liveData: '真實行情與 RSS 爬文',
     failures: '資料問題',
     sectorUnavailable: '產業資料暫缺'

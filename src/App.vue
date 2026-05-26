@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
-import { analyzeStocks, fetchConfig, type AppConfig, type Market, type Pick, type ReasonCode, type Strategy, type StrategyWeights } from './api';
+import { analyzeStocks, fetchConfig, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 
 const locale = ref<Locale>('zh-CN');
@@ -99,6 +99,337 @@ function reasonLabel(reason: ReasonCode) {
 
 function reasonLabels(pick: Pick) {
   return pick.reasonCodes?.length ? pick.reasonCodes.map(reasonLabel) : pick.reasons;
+}
+
+function pointLabel(point: DecisionPoint) {
+  const p = point.params;
+  const score = p.score !== undefined ? Number(p.score).toFixed(1) : '';
+  const count = p.count ?? 0;
+  const hours = p.hours ?? 0;
+  const text: Record<DecisionPoint['key'], Record<Locale, string>> = {
+    buySummary: {
+      en: `Worth buying: total score ${p.score}/100, with enough relative strength under the selected news-led strategy.`,
+      'zh-CN': `值得投资：总分 ${p.score}/100，在当前新闻权重策略下具备相对优势。`,
+      'zh-TW': `值得投資：總分 ${p.score}/100，在目前新聞權重策略下具備相對優勢。`
+    },
+    watchSummary: {
+      en: `Watch closely: total score ${p.score}/100, but confirmation is still incomplete.`,
+      'zh-CN': `重点观察：总分 ${p.score}/100，但进场或离场确认还不完整。`,
+      'zh-TW': `重點觀察：總分 ${p.score}/100，但進場或離場確認還不完整。`
+    },
+    sellSummary: {
+      en: `Exit risk: total score ${p.score}/100, with weak risk/reward under this strategy.`,
+      'zh-CN': `需要抛出：总分 ${p.score}/100，当前策略下风险报酬偏弱。`,
+      'zh-TW': `需要拋出：總分 ${p.score}/100，目前策略下風險報酬偏弱。`
+    },
+    newsSupport: {
+      en: `News sentiment is supportive at ${score}/100 across ${count} recent signals.`,
+      'zh-CN': `新闻情绪 ${score}/100，来自 ${count} 条近期信号，对投资判断有支撑。`,
+      'zh-TW': `新聞情緒 ${score}/100，來自 ${count} 則近期訊號，對投資判斷有支撐。`
+    },
+    newsPressure: {
+      en: `News sentiment is weak at ${score}/100 across ${count} recent signals.`,
+      'zh-CN': `新闻情绪偏弱，仅 ${score}/100，且已有 ${count} 条相关信号。`,
+      'zh-TW': `新聞情緒偏弱，僅 ${score}/100，且已有 ${count} 則相關訊號。`
+    },
+    insufficientNews: {
+      en: 'There is not enough recent news evidence, so confidence should be capped.',
+      'zh-CN': '近期新闻证据不足，不能只靠行情分数做高信心判断。',
+      'zh-TW': '近期新聞證據不足，不能只靠行情分數做高信心判斷。'
+    },
+    freshNews: {
+      en: `Latest relevant news is fresh, about ${hours} hours old.`,
+      'zh-CN': `最新相关新闻约 ${hours} 小时前，时效性较强。`,
+      'zh-TW': `最新相關新聞約 ${hours} 小時前，時效性較強。`
+    },
+    momentumSupport: {
+      en: `Price momentum is supportive at ${score}/100.`,
+      'zh-CN': `价格动能 ${score}/100，对上涨延续有帮助。`,
+      'zh-TW': `價格動能 ${score}/100，對上漲延續有幫助。`
+    },
+    weakMomentum: {
+      en: `Momentum is weak at ${score}/100; avoid chasing before price confirms.`,
+      'zh-CN': `动能偏弱，仅 ${score}/100，价格确认前不宜追高。`,
+      'zh-TW': `動能偏弱，僅 ${score}/100，價格確認前不宜追高。`
+    },
+    watchBreakout: {
+      en: `Watch whether momentum can improve above 60/100.`,
+      'zh-CN': `观察动能能否提升到 60/100 以上。`,
+      'zh-TW': `觀察動能能否提升到 60/100 以上。`
+    },
+    valuationSupport: {
+      en: `Valuation score is healthy at ${score}/100.`,
+      'zh-CN': `估值分 ${score}/100，价格相对没有明显过贵。`,
+      'zh-TW': `估值分 ${score}/100，價格相對沒有明顯過貴。`
+    },
+    expensiveValuation: {
+      en: `Valuation is stretched at ${score}/100.`,
+      'zh-CN': `估值偏贵，只有 ${score}/100，需要防止利好兑现后回落。`,
+      'zh-TW': `估值偏貴，只有 ${score}/100，需要防止利多兌現後回落。`
+    },
+    watchValuation: {
+      en: 'Watch valuation change after the next earnings or guidance update.',
+      'zh-CN': '观察下一次财报或指引后，估值是否重新变得合理。',
+      'zh-TW': '觀察下一次財報或指引後，估值是否重新變得合理。'
+    },
+    riskControlled: {
+      en: `Risk score is controlled at ${score}/100.`,
+      'zh-CN': `风险控制 ${score}/100，波动和 beta 暂时可接受。`,
+      'zh-TW': `風險控制 ${score}/100，波動和 beta 暫時可接受。`
+    },
+    riskHigh: {
+      en: `Risk score is low at ${score}/100; downside protection is weak.`,
+      'zh-CN': `风险分仅 ${score}/100，下行保护偏弱。`,
+      'zh-TW': `風險分僅 ${score}/100，下行保護偏弱。`
+    },
+    watchRisk: {
+      en: 'Watch volatility and whether drawdowns stabilize.',
+      'zh-CN': '观察波动率和回撤是否收敛。',
+      'zh-TW': '觀察波動率和回撤是否收斂。'
+    },
+    qualitySupport: {
+      en: `Quality score is strong at ${score}/100.`,
+      'zh-CN': `基本面质量 ${score}/100，对中期持有有支撑。`,
+      'zh-TW': `基本面品質 ${score}/100，對中期持有有支撐。`
+    },
+    weakQuality: {
+      en: `Quality score is weak at ${score}/100.`,
+      'zh-CN': `基本面质量偏弱，仅 ${score}/100。`,
+      'zh-TW': `基本面品質偏弱，僅 ${score}/100。`
+    },
+    watchNewsFlow: {
+      en: `News sentiment is neutral at ${score}/100; watch whether new articles turn positive or negative.`,
+      'zh-CN': `新闻情绪 ${score}/100，暂属中性；重点看后续新闻转正还是转负。`,
+      'zh-TW': `新聞情緒 ${score}/100，暫屬中性；重點看後續新聞轉正還是轉負。`
+    },
+    newsBullishSummary: {
+      en: `News is net positive: ${p.positive} positive vs ${p.negative} negative events from ${p.total} recent articles.`,
+      'zh-CN': `新闻净偏多：${p.positive} 个正面事件、${p.negative} 个负面事件，来自 ${p.total} 条近期新闻。`,
+      'zh-TW': `新聞淨偏多：${p.positive} 個正面事件、${p.negative} 個負面事件，來自 ${p.total} 則近期新聞。`
+    },
+    newsBearishSummary: {
+      en: `News is net negative: ${p.negative} negative events outweigh ${p.positive} positive events.`,
+      'zh-CN': `新闻净偏空：${p.negative} 个负面事件多于 ${p.positive} 个正面事件。`,
+      'zh-TW': `新聞淨偏空：${p.negative} 個負面事件多於 ${p.positive} 個正面事件。`
+    },
+    newsMixedSummary: {
+      en: `News is mixed, with ${p.positive} positive and ${p.negative} negative events.`,
+      'zh-CN': `新闻多空混合：${p.positive} 个正面事件、${p.negative} 个负面事件。`,
+      'zh-TW': `新聞多空混合：${p.positive} 個正面事件、${p.negative} 個負面事件。`
+    },
+    newsNoEvidence: {
+      en: 'No usable recent news evidence was found.',
+      'zh-CN': '没有找到可用的近期新闻证据。',
+      'zh-TW': '沒有找到可用的近期新聞證據。'
+    },
+    financialStrongSummary: {
+      en: `Financial report check is strong across ${p.count} available metrics.`,
+      'zh-CN': `财报/基本面检查偏强，覆盖 ${p.count} 个可用指标。`,
+      'zh-TW': `財報/基本面檢查偏強，涵蓋 ${p.count} 個可用指標。`
+    },
+    financialWeakSummary: {
+      en: `Financial report check is weak across ${p.count} available metrics.`,
+      'zh-CN': `财报/基本面检查偏弱，覆盖 ${p.count} 个可用指标。`,
+      'zh-TW': `財報/基本面檢查偏弱，涵蓋 ${p.count} 個可用指標。`
+    },
+    financialMixedSummary: {
+      en: `Financial report check is mixed across ${p.count} available metrics.`,
+      'zh-CN': `财报/基本面检查多空混合，覆盖 ${p.count} 个可用指标。`,
+      'zh-TW': `財報/基本面檢查多空混合，涵蓋 ${p.count} 個可用指標。`
+    },
+    financialDataMissing: {
+      en: 'Financial report data is limited; wait for more complete disclosure.',
+      'zh-CN': '财报数据不足，需等待更完整的披露或数据源。',
+      'zh-TW': '財報資料不足，需等待更完整的揭露或資料源。'
+    },
+    financialValuationReasonable: {
+      en: `Valuation is reasonable with PE around ${p.value}.`,
+      'zh-CN': `估值相对合理，PE 约 ${p.value}。`,
+      'zh-TW': `估值相對合理，PE 約 ${p.value}。`
+    },
+    financialValuationRich: {
+      en: `Valuation is rich with PE around ${p.value}; avoid paying for fully priced optimism.`,
+      'zh-CN': `估值偏贵，PE 约 ${p.value}，避免为已兑现的乐观预期付太高价格。`,
+      'zh-TW': `估值偏貴，PE 約 ${p.value}，避免為已兌現的樂觀預期付太高價格。`
+    },
+    financialWatchValuation: {
+      en: `Valuation is neutral with PE around ${p.value}; watch earnings upgrades or price pullback.`,
+      'zh-CN': `估值中性，PE 约 ${p.value}；观察盈利上修或价格回调。`,
+      'zh-TW': `估值中性，PE 約 ${p.value}；觀察獲利上修或價格回檔。`
+    },
+    financialGrowthSupport: {
+      en: `Growth metrics support the case, scoring ${p.score}/100.`,
+      'zh-CN': `成长指标有支撑，评分 ${p.score}/100。`,
+      'zh-TW': `成長指標有支撐，評分 ${p.score}/100。`
+    },
+    financialGrowthWeak: {
+      en: `Growth metrics are weak, scoring ${p.score}/100.`,
+      'zh-CN': `成长指标偏弱，评分 ${p.score}/100。`,
+      'zh-TW': `成長指標偏弱，評分 ${p.score}/100。`
+    },
+    financialWatchNextReport: {
+      en: 'Watch the next financial report for revenue and EPS confirmation.',
+      'zh-CN': '重点观察下一份财报的营收与 EPS 是否确认改善。',
+      'zh-TW': '重點觀察下一份財報的營收與 EPS 是否確認改善。'
+    },
+    financialProfitabilitySupport: {
+      en: `Profitability is supportive at ${p.score}/100.`,
+      'zh-CN': `盈利能力有支撑，评分 ${p.score}/100。`,
+      'zh-TW': `獲利能力有支撐，評分 ${p.score}/100。`
+    },
+    financialProfitabilityWeak: {
+      en: `Profitability is weak at ${p.score}/100.`,
+      'zh-CN': `盈利能力偏弱，评分 ${p.score}/100。`,
+      'zh-TW': `獲利能力偏弱，評分 ${p.score}/100。`
+    },
+    financialDebtControlled: {
+      en: `Debt risk looks controlled, scoring ${p.score}/100.`,
+      'zh-CN': `负债风险相对可控，评分 ${p.score}/100。`,
+      'zh-TW': `負債風險相對可控，評分 ${p.score}/100。`
+    },
+    financialDebtRisk: {
+      en: `Debt pressure is elevated, scoring ${p.score}/100.`,
+      'zh-CN': `负债压力偏高，评分 ${p.score}/100。`,
+      'zh-TW': `負債壓力偏高，評分 ${p.score}/100。`
+    },
+    financialAnalystUpside: {
+      en: `Analyst target implies about ${p.upside}% upside across ${p.count} opinions.`,
+      'zh-CN': `分析师目标价隐含约 ${p.upside}% 上行空间，来自 ${p.count} 个意见。`,
+      'zh-TW': `分析師目標價隱含約 ${p.upside}% 上行空間，來自 ${p.count} 個意見。`
+    },
+    financialAnalystDownside: {
+      en: `Analyst target implies about ${p.upside}% downside.`,
+      'zh-CN': `分析师目标价隐含约 ${p.upside}% 下行空间。`,
+      'zh-TW': `分析師目標價隱含約 ${p.upside}% 下行空間。`
+    },
+    financialDividendSupport: {
+      en: `Dividend yield around ${p.yield}% adds shareholder-return support.`,
+      'zh-CN': `股息率约 ${p.yield}%，提供股东回报支撑。`,
+      'zh-TW': `股息率約 ${p.yield}%，提供股東回報支撐。`
+    },
+    financialWatchHighRange: {
+      en: `Price is near the upper part of its 52-week range at ${p.position}%; watch for pullback risk.`,
+      'zh-CN': `价格位于 52 周区间较高位置（${p.position}%），观察回调风险。`,
+      'zh-TW': `價格位於 52 週區間較高位置（${p.position}%），觀察回檔風險。`
+    },
+    financialWatchLowRange: {
+      en: `Price is near the lower part of its 52-week range at ${p.position}%; watch whether fundamentals explain the discount.`,
+      'zh-CN': `价格位于 52 周区间较低位置（${p.position}%），观察是否基本面恶化导致折价。`,
+      'zh-TW': `價格位於 52 週區間較低位置（${p.position}%），觀察是否基本面惡化導致折價。`
+    },
+    actionAccumulate: {
+      en: `Suggested action: accumulate carefully while the score remains ${p.score}/100.`,
+      'zh-CN': `建议操作：在总分维持 ${p.score}/100 时，可考虑谨慎分批布局。`,
+      'zh-TW': `建議操作：在總分維持 ${p.score}/100 時，可考慮謹慎分批布局。`
+    },
+    actionReduceOrExit: {
+      en: `Suggested action: reduce or exit unless the score recovers from ${p.score}/100.`,
+      'zh-CN': `建议操作：除非总分从 ${p.score}/100 明显修复，否则考虑降低仓位或退出。`,
+      'zh-TW': `建議操作：除非總分從 ${p.score}/100 明顯修復，否則考慮降低倉位或退出。`
+    },
+    actionWait: {
+      en: `Suggested action: wait for confirmation; current score is ${p.score}/100.`,
+      'zh-CN': `建议操作：等待确认，目前总分 ${p.score}/100。`,
+      'zh-TW': `建議操作：等待確認，目前總分 ${p.score}/100。`
+    },
+    actionBuyInBatches: {
+      en: 'Use batches rather than a single full-position entry.',
+      'zh-CN': '用分批方式，不要一次性满仓买入。',
+      'zh-TW': '用分批方式，不要一次性滿倉買入。'
+    },
+    actionWaitNewsConfirmation: {
+      en: 'Wait for another positive news or earnings confirmation before increasing size.',
+      'zh-CN': '加仓前等待下一条正面新闻或财报确认。',
+      'zh-TW': '加碼前等待下一則正面新聞或財報確認。'
+    },
+    actionUseSmallPosition: {
+      en: `Keep position size small because risk score is only ${p.risk}/100.`,
+      'zh-CN': `风险分只有 ${p.risk}/100，仓位应保持较小。`,
+      'zh-TW': `風險分只有 ${p.risk}/100，倉位應保持較小。`
+    },
+    actionReduceExposure: {
+      en: `Reduce exposure because the research score is only ${p.score}/100.`,
+      'zh-CN': `研究评分只有 ${p.score}/100，应考虑降低风险暴露。`,
+      'zh-TW': `研究評分只有 ${p.score}/100，應考慮降低風險暴露。`
+    },
+    actionDoNotAverageDown: {
+      en: 'Do not average down while negative news events dominate.',
+      'zh-CN': '负面新闻事件占优时，不建议越跌越买摊平。',
+      'zh-TW': '負面新聞事件占優時，不建議越跌越買攤平。'
+    },
+    actionSetExitReview: {
+      en: 'Set a near-term exit review after the next major disclosure.',
+      'zh-CN': '在下一次重大公告或财报后重新评估是否继续持有。',
+      'zh-TW': '在下一次重大公告或財報後重新評估是否繼續持有。'
+    },
+    actionNoChase: {
+      en: `Do not chase; current conviction is only ${p.score}/100.`,
+      'zh-CN': `不要追高，目前信心度只到 ${p.score}/100。`,
+      'zh-TW': `不要追高，目前信心度只到 ${p.score}/100。`
+    },
+    actionWatchNewsCatalyst: {
+      en: 'Watch for a new catalyst: earnings beat, guidance raise, upgrade, buyback, or fund inflow.',
+      'zh-CN': '观察是否出现新催化：财报超预期、指引上修、评级上调、回购或资金流入。',
+      'zh-TW': '觀察是否出現新催化：財報優於預期、指引上修、評級上調、回購或資金流入。'
+    },
+    actionWatchFinancialRepair: {
+      en: `Watch whether ${p.count} weak financial item(s) start to repair.`,
+      'zh-CN': `观察 ${p.count} 个偏弱财务项是否开始修复。`,
+      'zh-TW': `觀察 ${p.count} 個偏弱財務項是否開始修復。`
+    },
+    actionWatchMomentumTurn: {
+      en: 'Watch for price momentum to turn up before adding exposure.',
+      'zh-CN': '加仓前观察价格动能是否转强。',
+      'zh-TW': '加碼前觀察價格動能是否轉強。'
+    },
+    actionRespectRisk: {
+      en: `Respect downside risk because risk score is ${p.risk}/100.`,
+      'zh-CN': `风险分 ${p.risk}/100，必须优先控制下行风险。`,
+      'zh-TW': `風險分 ${p.risk}/100，必須優先控制下行風險。`
+    },
+    actionRequireNewsEvidence: {
+      en: 'Require fresh company-specific news before making a strong call.',
+      'zh-CN': '需要新的公司级新闻证据，才适合做高信心判断。',
+      'zh-TW': '需要新的公司級新聞證據，才適合做高信心判斷。'
+    }
+  };
+  return text[point.key][locale.value];
+}
+
+function eventLabel(event: NewsEvent) {
+  const labels: Record<string, Record<Locale, string>> = {
+    earningsPositive: { en: 'Positive earnings/report event', 'zh-CN': '正面财报/业绩事件', 'zh-TW': '正面財報/業績事件' },
+    earningsNegative: { en: 'Negative earnings/report event', 'zh-CN': '负面财报/业绩事件', 'zh-TW': '負面財報/業績事件' },
+    guidancePositive: { en: 'Guidance raised or outlook improved', 'zh-CN': '指引上修或展望改善', 'zh-TW': '指引上修或展望改善' },
+    guidanceNegative: { en: 'Guidance cut or outlook weakened', 'zh-CN': '指引下修或展望转弱', 'zh-TW': '指引下修或展望轉弱' },
+    analystPositive: { en: 'Analyst upgrade / target raised', 'zh-CN': '分析师上调评级/目标价', 'zh-TW': '分析師上調評級/目標價' },
+    analystNegative: { en: 'Analyst downgrade / target cut', 'zh-CN': '分析师下调评级/目标价', 'zh-TW': '分析師下調評級/目標價' },
+    capitalReturn: { en: 'Buyback/dividend shareholder return', 'zh-CN': '回购/分红股东回报', 'zh-TW': '回購/配息股東回報' },
+    shareholderSale: { en: 'Shareholder or insider selling pressure', 'zh-CN': '股东/内部人减持压力', 'zh-TW': '股東/內部人減持壓力' },
+    legalRegulatoryRisk: { en: 'Legal or regulatory risk', 'zh-CN': '法律或监管风险', 'zh-TW': '法律或監管風險' },
+    demandPositive: { en: 'Demand/order catalyst', 'zh-CN': '需求/订单催化', 'zh-TW': '需求/訂單催化' },
+    demandNegative: { en: 'Demand/order weakness', 'zh-CN': '需求/订单转弱', 'zh-TW': '需求/訂單轉弱' },
+    fundFlowPositive: { en: 'Capital inflow / institutional buying', 'zh-CN': '资金流入/机构买入', 'zh-TW': '資金流入/機構買入' },
+    fundFlowNegative: { en: 'Capital outflow / institutional selling', 'zh-CN': '资金流出/机构卖出', 'zh-TW': '資金流出/機構賣出' },
+    generalPositiveNews: { en: 'Broadly positive news tone', 'zh-CN': '整体新闻语气偏正面', 'zh-TW': '整體新聞語氣偏正面' },
+    generalNegativeNews: { en: 'Broadly negative news tone', 'zh-CN': '整体新闻语气偏负面', 'zh-TW': '整體新聞語氣偏負面' }
+  };
+  return labels[event.key]?.[locale.value] ?? event.key;
+}
+
+function financialMetricLabel(metric: FinancialMetric) {
+  const labels: Record<string, Record<Locale, string>> = {
+    pe: { en: 'PE', 'zh-CN': '市盈率', 'zh-TW': '本益比' },
+    revenueGrowth: { en: 'Revenue growth', 'zh-CN': '营收增长', 'zh-TW': '營收成長' },
+    earningsGrowth: { en: 'Earnings growth', 'zh-CN': '利润增长', 'zh-TW': '獲利成長' },
+    returnOnEquity: { en: 'ROE', 'zh-CN': '净资产收益率', 'zh-TW': '股東權益報酬率' },
+    profitMargins: { en: 'Profit margin', 'zh-CN': '利润率', 'zh-TW': '利潤率' },
+    debtToEquity: { en: 'Debt/equity', 'zh-CN': '负债权益比', 'zh-TW': '負債權益比' },
+    analystTargetUpside: { en: 'Analyst target upside', 'zh-CN': '分析师目标价空间', 'zh-TW': '分析師目標價空間' },
+    dividendYield: { en: 'Dividend yield', 'zh-CN': '股息率', 'zh-TW': '股息率' },
+    fiftyTwoWeekPosition: { en: '52-week position', 'zh-CN': '52 周区间位置', 'zh-TW': '52 週區間位置' }
+  };
+  return labels[metric.key]?.[locale.value] ?? metric.key;
 }
 
 function sectorLabel(pick: Pick) {
@@ -252,10 +583,101 @@ onMounted(async () => {
             </div>
 
             <div class="reason-block">
+              <strong>{{ pick.decision ? pointLabel(pick.decision.summary) : t.reasonTitle }}</strong>
+            </div>
+
+            <div v-if="pick.scoreBreakdown?.length" class="score-breakdown">
+              <strong>{{ t.scoreDetail }}</strong>
+              <div v-for="item in pick.scoreBreakdown" :key="item.factor" class="score-line">
+                <span>{{ factorLabel(item.factor) }}</span>
+                <b>{{ item.score }}</b>
+                <small>{{ t.weight }} {{ item.weight }}% · {{ t.contribution }} {{ item.contribution }}</small>
+              </div>
+            </div>
+
+            <div class="reason-block">
               <strong>{{ t.reasonTitle }}</strong>
               <ul>
                 <li v-for="reason in reasonLabels(pick)" :key="reason">{{ reason }}</li>
               </ul>
+            </div>
+
+            <div v-if="pick.decision" class="decision-grid">
+              <div>
+                <strong>{{ t.positiveReasons }}</strong>
+                <ul>
+                  <li v-for="item in pick.decision.positives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+              </div>
+              <div>
+                <strong>{{ t.negativeReasons }}</strong>
+                <ul>
+                  <li v-for="item in pick.decision.negatives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+              </div>
+              <div>
+                <strong>{{ t.watchItems }}</strong>
+                <ul>
+                  <li v-for="item in pick.decision.watchItems" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+              </div>
+            </div>
+
+            <div v-if="pick.actionPlan" class="research-panel action-panel">
+              <strong>{{ t.actionPlan }} · {{ pointLabel(pick.actionPlan.summary) }}</strong>
+              <div class="research-columns">
+                <ul>
+                  <li v-for="item in pick.actionPlan.steps" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+                <ul>
+                  <li v-for="item in pick.actionPlan.watchItems" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+                <ul>
+                  <li v-for="item in pick.actionPlan.riskControls" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+              </div>
+            </div>
+
+            <div v-if="pick.newsAnalysis" class="research-panel">
+              <strong>{{ t.newsEvents }} · {{ pointLabel(pick.newsAnalysis.summary) }}</strong>
+              <div class="event-list">
+                <div v-for="event in pick.newsAnalysis.events" :key="event.title + event.key" class="event-line" :class="event.impact">
+                  <span>{{ eventLabel(event) }}</span>
+                  <p>{{ event.title }}</p>
+                  <small>{{ event.source }} · {{ event.ageHours }}{{ t.hoursAgo }}</small>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="pick.financialAnalysis" class="research-panel">
+              <strong>{{ t.financialReview }} · {{ pointLabel(pick.financialAnalysis.summary) }}</strong>
+              <div class="financial-grid">
+                <div v-for="metric in pick.financialAnalysis.metrics" :key="metric.key">
+                  <span>{{ financialMetricLabel(metric) }}</span>
+                  <b>{{ metric.value }}</b>
+                  <small>{{ t.score }} {{ metric.score }}</small>
+                </div>
+              </div>
+              <div class="decision-grid compact">
+                <div>
+                  <strong>{{ t.positiveReasons }}</strong>
+                  <ul>
+                    <li v-for="item in pick.financialAnalysis.positives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                  </ul>
+                </div>
+                <div>
+                  <strong>{{ t.negativeReasons }}</strong>
+                  <ul>
+                    <li v-for="item in pick.financialAnalysis.negatives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                  </ul>
+                </div>
+                <div>
+                  <strong>{{ t.watchItems }}</strong>
+                  <ul>
+                    <li v-for="item in pick.financialAnalysis.watchItems" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                  </ul>
+                </div>
+              </div>
             </div>
           </article>
         </div>

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from backend.app import create_app
 from backend.providers import Article, MarketSnapshot, RssNewsCrawler, is_recent_article, local_company_name, news_queries, news_query
-from backend.universe import DiscoveredSymbol, MarketUniverseProvider
+from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _symbols_from_code_mentions
 
 
 class FakeMarketProvider:
@@ -18,6 +18,22 @@ class FakeMarketProvider:
             currency="TWD" if symbol.endswith(".TW") else "USD",
             closes=[80 + index * 0.2 for index in range(130)],
             info={"trailingPE": 20, "beta": 1.05, "returnOnEquity": 0.18, "profitMargins": 0.22, "debtToEquity": 30},
+        )
+
+
+class LowRiskFakeMarketProvider(FakeMarketProvider):
+    def fetch(self, symbol):
+        snapshot = super().fetch(symbol)
+        return MarketSnapshot(
+            symbol=snapshot.symbol,
+            name=snapshot.name,
+            market=snapshot.market,
+            sector=snapshot.sector,
+            price=snapshot.price,
+            change=snapshot.change,
+            currency=snapshot.currency,
+            closes=[100 + (index % 3) * 0.05 for index in range(130)],
+            info={**snapshot.info, "beta": 1.0},
         )
 
 
@@ -154,15 +170,50 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(symbols[0].name, "DBS Group")
 
 
-    def test_blank_symbols_trigger_default_market_scan(self):
+    def test_blank_symbols_trigger_news_led_market_scan(self):
         response = self.client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["picks"])
         self.assertTrue(all(pick["market"] == "TW" for pick in payload["picks"]))
-        self.assertEqual(payload["scan"]["source"], "market-universe")
+        self.assertEqual(payload["scan"]["source"], "market-news")
         self.assertEqual({pick["symbol"] for pick in payload["picks"]}, {"8888.TW", "9999.TW"})
         self.assertNotIn("2330.TW", {pick["symbol"] for pick in payload["picks"]})
+
+    def test_news_universe_extracts_symbols_from_market_articles(self):
+        article = Article(
+            source="Market RSS",
+            title="台積電營收創高，聯發科同步受惠",
+            summary="台股焦點集中在半導體族群。",
+            link="https://example.com/tw-market",
+            published_at=datetime.now(timezone.utc),
+            sentiment=0.4,
+            credibility=0.8,
+            relevance=1.0,
+        )
+        symbols = MarketUniverseProvider()._symbols_from_news_articles("TW", [article], 5)
+        self.assertEqual({item.symbol for item in symbols}, {"2330.TW", "2454.TW"})
+        self.assertTrue(all(item.source == "market-news" for item in symbols))
+
+    def test_news_universe_does_not_fallback_to_default_symbols_without_news_mentions(self):
+        symbols = MarketUniverseProvider()._symbols_from_news_articles("TW", [], 5)
+        self.assertEqual(symbols, [])
+
+    def test_us_news_scan_does_not_treat_common_words_as_tickers(self):
+        text = "Yahoo Finance says the stock is after the bell and what to buy on Wall Street"
+        self.assertEqual(_symbols_from_code_mentions(text.lower(), "US"), [])
+        article = Article(
+            source="Market RSS",
+            title="Yahoo Finance asks what to buy after the Wall Street rally",
+            summary="The stock market is watching earnings and the Fed.",
+            link="https://example.com/us-market",
+            published_at=datetime.now(timezone.utc),
+            sentiment=0.1,
+            credibility=0.7,
+            relevance=1.0,
+        )
+        symbols = MarketUniverseProvider()._symbols_from_news_articles("US", [article], 10)
+        self.assertEqual(symbols, [])
 
     def test_custom_weights_are_accepted(self):
         response = self.client.post(
@@ -179,10 +230,29 @@ class ApiTestCase(unittest.TestCase):
         self.assertTrue(payload["picks"])
 
     def test_scan_produces_relative_buy_candidates(self):
-        response = self.client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
+        client = create_app(LowRiskFakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertIn("buy", {pick["verdict"] for pick in payload["picks"]})
+
+    def test_response_contains_detailed_100_point_scoring_and_actions(self):
+        response = self.client.post("/api/analyze", json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        self.assertIn("scoreBreakdown", pick)
+        self.assertEqual({item["factor"] for item in pick["scoreBreakdown"]}, {"sentiment", "momentum", "value", "risk", "quality"})
+        self.assertAlmostEqual(sum(item["contribution"] for item in pick["scoreBreakdown"]), pick["score"], delta=0.5)
+        self.assertIn("decision", pick)
+        self.assertIn("summary", pick["decision"])
+        self.assertIn("watchItems", pick["decision"])
+        self.assertIn("newsAnalysis", pick)
+        self.assertEqual(pick["newsAnalysis"]["positiveCount"], 1)
+        self.assertEqual(pick["newsAnalysis"]["events"][0]["key"], "earningsPositive")
+        self.assertIn("financialAnalysis", pick)
+        self.assertTrue(pick["financialAnalysis"]["metrics"])
+        self.assertIn("actionPlan", pick)
+        self.assertIn("steps", pick["actionPlan"])
 
 
 if __name__ == "__main__":
