@@ -87,6 +87,8 @@ export interface DecisionPoint {
     | 'financialProfitabilityWeak'
     | 'financialDebtControlled'
     | 'financialDebtRisk'
+    | 'financialLiquiditySupport'
+    | 'financialLiquidityRisk'
     | 'financialAnalystUpside'
     | 'financialAnalystDownside'
     | 'financialDividendSupport'

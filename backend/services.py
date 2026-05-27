@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import json
+from math import log10
 from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
@@ -417,15 +418,41 @@ def _metric_availability(snapshot: MarketSnapshot, articles: list[Article]) -> d
     info = snapshot.info
     has_quality = any(
         _metric_number(info.get(key)) is not None
-        for key in ["returnOnEquity", "profitMargins", "revenueGrowth", "earningsGrowth", "debtToEquity"]
+        for key in ["returnOnEquity", "profitMargins", "revenueGrowth", "earningsGrowth", "debtToEquity", "marketCap", "regularMarketVolume"]
+    )
+    has_value = any(
+        _metric_number(info.get(key)) is not None
+        for key in ["trailingPE", "forwardPE", "priceToBook", "fiftyTwoWeekHigh", "fiftyTwoWeekLow"]
     )
     return {
         "sentiment": bool(articles),
         "momentum": len(snapshot.closes) >= 22,
-        "value": _metric_number(info.get("trailingPE") or info.get("forwardPE")) is not None,
+        "value": has_value,
         "risk": len(snapshot.closes) >= 22 or _metric_number(info.get("beta")) is not None,
         "quality": has_quality,
     }
+
+
+def _range_position(snapshot: MarketSnapshot) -> float | None:
+    high_52 = _metric_number(snapshot.info.get("fiftyTwoWeekHigh"))
+    low_52 = _metric_number(snapshot.info.get("fiftyTwoWeekLow"))
+    if high_52 is None or low_52 is None or high_52 <= low_52:
+        return None
+    return (snapshot.price - low_52) / (high_52 - low_52) * 100
+
+
+def _liquidity_score(info: dict) -> float | None:
+    volume = _metric_number(info.get("regularMarketVolume"))
+    amount = _metric_number(info.get("turnoverValue"))
+    market_cap = _metric_number(info.get("marketCap"))
+    scores = []
+    if volume and volume > 0:
+        scores.append(_clamp_score(20 + log10(volume) * 8))
+    if amount and amount > 0:
+        scores.append(_clamp_score(12 + log10(amount) * 7))
+    if market_cap and market_cap > 0:
+        scores.append(_clamp_score(45 + log10(market_cap / 1_000_000_000) * 8))
+    return mean(scores) if scores else None
 
 
 def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, float]:
@@ -433,7 +460,16 @@ def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, flo
     momentum = _momentum_score(closes)
 
     pe = _metric_number(snapshot.info.get("trailingPE") or snapshot.info.get("forwardPE"))
-    value = 55 if pe is None else _clamp_score(100 - abs(pe - 18) * 2.2)
+    pb = _metric_number(snapshot.info.get("priceToBook"))
+    range_position = _range_position(snapshot)
+    value_parts = []
+    if pe is not None:
+        value_parts.append(_clamp_score(100 - abs(pe - 18) * 2.2))
+    if pb is not None:
+        value_parts.append(_clamp_score(100 - abs(pb - 2.2) * 12))
+    if range_position is not None:
+        value_parts.append(_clamp_score(82 - range_position * 0.45))
+    value = mean(value_parts) if value_parts else 55
 
     beta = _metric_number(snapshot.info.get("beta"))
     beta_score = 65 if beta is None else _clamp_score(100 - abs(beta - 1) * 42)
@@ -444,20 +480,30 @@ def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, flo
     revenue_growth = _metric_number(snapshot.info.get("revenueGrowth"))
     earnings_growth = _metric_number(snapshot.info.get("earningsGrowth"))
     debt = _metric_number(snapshot.info.get("debtToEquity"))
-    quality_parts = [
-        50 if roe is None else _clamp_score(roe * 260),
-        50 if margin is None else _clamp_score(45 + margin * 180),
-        50 if revenue_growth is None else _clamp_score(50 + revenue_growth * 180),
-        50 if earnings_growth is None else _clamp_score(50 + earnings_growth * 140),
-        62 if debt is None else _clamp_score(100 - debt / 2),
-    ]
+    quality_parts = []
+    if roe is not None:
+        quality_parts.append(_clamp_score(roe * 260))
+    if margin is not None:
+        quality_parts.append(_clamp_score(45 + margin * 180))
+    if revenue_growth is not None:
+        quality_parts.append(_clamp_score(50 + revenue_growth * 180))
+    if earnings_growth is not None:
+        quality_parts.append(_clamp_score(50 + earnings_growth * 140))
+    if debt is not None:
+        quality_parts.append(_clamp_score(100 - debt / 2))
+    if not quality_parts:
+        liquidity = _liquidity_score(snapshot.info)
+        if liquidity is not None:
+            quality_parts.append(liquidity)
+        quality_parts.append(volatility_score(closes))
+        quality_parts.append(_clamp_score(100 - _max_drawdown(closes, 120) * 145))
 
     return {
         "momentum": round(momentum, 1),
         "value": round(value, 1),
         "sentiment": round(_sentiment_score(articles), 1),
         "risk": risk,
-        "quality": round(mean(quality_parts), 1),
+        "quality": round(mean(quality_parts), 1) if quality_parts else 50,
     }
 
 
@@ -484,6 +530,7 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
     info = snapshot.info
     price = snapshot.price
     pe = _number(info.get("trailingPE") or info.get("forwardPE"))
+    pb = _number(info.get("priceToBook"))
     roe = _number(info.get("returnOnEquity"))
     margin = _number(info.get("profitMargins"))
     revenue_growth = _number(info.get("revenueGrowth"))
@@ -494,6 +541,7 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
     dividend = _number(info.get("dividendYield"))
     high_52 = _number(info.get("fiftyTwoWeekHigh"))
     low_52 = _number(info.get("fiftyTwoWeekLow"))
+    liquidity = _liquidity_score(info)
 
     metrics = []
     positives = []
@@ -509,6 +557,10 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
             negatives.append({"key": "financialValuationRich", "params": {"value": round(pe, 1)}})
         else:
             watch_items.append({"key": "financialWatchValuation", "params": {"value": round(pe, 1)}})
+
+    if pb is not None:
+        score = _clamp_score(100 - abs(pb - 2.2) * 12)
+        metrics.append({"key": "priceToBook", "value": _plain_value(pb), "score": round(score, 1)})
 
     growth_scores = []
     for key, value in [("revenueGrowth", revenue_growth), ("earningsGrowth", earnings_growth)]:
@@ -555,11 +607,18 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
         if dividend >= 0.03:
             positives.append({"key": "financialDividendSupport", "params": {"yield": round(dividend * 100, 1)}})
 
+    if liquidity is not None:
+        metrics.append({"key": "liquidityQuality", "value": _plain_value(liquidity, "/100"), "score": round(liquidity, 1)})
+        if liquidity >= 65:
+            positives.append({"key": "financialLiquiditySupport", "params": {"score": round(liquidity, 1)}})
+        elif liquidity <= 40:
+            negatives.append({"key": "financialLiquidityRisk", "params": {"score": round(liquidity, 1)}})
+
     if high_52 is not None and low_52 is not None and high_52 > low_52:
         position = (price - low_52) / (high_52 - low_52) * 100
         metrics.append({"key": "fiftyTwoWeekPosition", "value": f"{position:.1f}%", "score": round(max(0, min(100, 100 - abs(position - 55) * 1.1)), 1)})
         if position >= 88:
-            watch_items.append({"key": "financialWatchHighRange", "params": {"position": round(position, 1)}})
+            negatives.append({"key": "financialWatchHighRange", "params": {"position": round(position, 1)}})
         elif position <= 20:
             watch_items.append({"key": "financialWatchLowRange", "params": {"position": round(position, 1)}})
 
@@ -570,10 +629,16 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
         average_score = mean(metric["score"] for metric in metrics)
         if average_score >= 62:
             summary_key = "financialStrongSummary"
+            if not positives:
+                positives.append({"key": "financialStrongSummary", "params": {"count": len(metrics)}})
         elif average_score <= 45:
             summary_key = "financialWeakSummary"
+            if not negatives:
+                negatives.append({"key": "financialWeakSummary", "params": {"count": len(metrics)}})
         else:
             summary_key = "financialMixedSummary"
+            if not positives and not negatives:
+                watch_items.append({"key": "financialMixedSummary", "params": {"count": len(metrics)}})
 
     return {
         "summary": {"key": summary_key, "params": {"count": len(metrics)}},

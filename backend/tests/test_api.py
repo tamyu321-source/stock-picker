@@ -1,10 +1,10 @@
 import json
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from backend.app import create_app
-from backend.providers import Article, MarketSnapshot, RssNewsCrawler, is_recent_article, local_company_name, news_queries, news_query
-from backend.services import _score_breakdown, _sentiment_score
+from backend.providers import Article, MarketSnapshot, RssNewsCrawler, _parse_eastmoney_datetime, is_recent_article, local_company_name, news_queries, news_query
+from backend.services import _financial_analysis, _metric_availability, _metrics, _score_breakdown, _sentiment_score
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _symbols_from_code_mentions
 
 
@@ -161,6 +161,53 @@ class ApiTestCase(unittest.TestCase):
             relevance=1.0,
         )
         self.assertEqual(crawler._relevance(article, "C6L.SI", "Singapore Airlines"), 0.0)
+
+    def test_china_news_uses_eastmoney_fallback_when_rss_empty(self):
+        class EastmoneyFallbackCrawler(RssNewsCrawler):
+            def __init__(self):
+                self.keywords = []
+
+            def _parse_feed(self, url):
+                return []
+
+            def _fetch_eastmoney_keyword_news(self, keyword, limit=10):
+                self.keywords.append(keyword)
+                if keyword != "605589":
+                    return []
+                return [
+                    Article(
+                        source="Eastmoney",
+                        title="\u5723\u6cc9\u96c6\u56e2\u53d1\u5e03\u4e1a\u7ee9\u589e\u957f\u516c\u544a",
+                        summary="\u5723\u6cc9\u96c6\u56e2\u6536\u5165\u548c\u5229\u6da6\u6539\u5584",
+                        link="https://finance.eastmoney.com/a/test.html",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.2,
+                        credibility=0.76,
+                        relevance=1.0,
+                    )
+                ]
+
+        crawler = EastmoneyFallbackCrawler()
+        articles = crawler.fetch("605589.SS", "\u5723\u6cc9\u96c6\u56e2", limit=3)
+        self.assertIn("605589", crawler.keywords)
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].source, "Eastmoney")
+
+    def test_eastmoney_news_datetime_is_recent_in_china_timezone(self):
+        published_at = _parse_eastmoney_datetime("2026-05-27 16:46:00")
+        self.assertIsNotNone(published_at)
+        self.assertEqual(published_at.utcoffset(), timedelta(hours=8))
+        article = Article(
+            source="Eastmoney",
+            title="Recent story",
+            summary="",
+            link="https://finance.eastmoney.com/a/test.html",
+            published_at=published_at,
+            sentiment=0,
+            credibility=0.76,
+            relevance=1.0,
+        )
+        self.assertTrue(is_recent_article(article, datetime(2026, 5, 27, 23, 0, tzinfo=timezone(timedelta(hours=8)))))
 
     def test_old_news_is_filtered(self):
         old_article = Article(
@@ -358,6 +405,35 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(next(item for item in breakdown if item["factor"] == "sentiment")["weight"], 0)
         self.assertAlmostEqual(sum(item["weight"] for item in breakdown), 100, delta=0.2)
         self.assertGreater(next(item for item in breakdown if item["factor"] == "momentum")["weight"], 20)
+
+    def test_price_proxy_keeps_value_and_quality_active_when_fundamentals_are_sparse(self):
+        snapshot = MarketSnapshot(
+            symbol="605589.SS",
+            name="\u5723\u6cc9\u96c6\u56e2",
+            market="CN",
+            sector="Materials",
+            price=100,
+            change=1.2,
+            currency="CNY",
+            closes=[80 + index * 0.2 for index in range(130)],
+            info={
+                "fiftyTwoWeekHigh": 120,
+                "fiftyTwoWeekLow": 80,
+                "regularMarketVolume": 5_000_000,
+                "marketCap": 20_000_000_000,
+            },
+        )
+        metrics = _metrics(snapshot, [])
+        availability = _metric_availability(snapshot, [])
+        weights = {"sentiment": 0.4, "momentum": 0.2, "value": 0.15, "risk": 0.1, "quality": 0.15}
+        breakdown = _score_breakdown(metrics, weights, availability)
+        self.assertGreater(next(item for item in breakdown if item["factor"] == "value")["weight"], 0)
+        self.assertGreater(next(item for item in breakdown if item["factor"] == "quality")["weight"], 0)
+        self.assertGreater(next(item for item in breakdown if item["factor"] == "value")["contribution"], 0)
+        self.assertGreater(next(item for item in breakdown if item["factor"] == "quality")["contribution"], 0)
+
+        financials = _financial_analysis(snapshot)
+        self.assertTrue(financials["positives"] or financials["negatives"] or financials["watchItems"])
 
     def test_scan_produces_relative_buy_candidates(self):
         client = create_app(LowRiskFakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()

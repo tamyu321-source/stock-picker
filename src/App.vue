@@ -335,6 +335,16 @@ function pointLabel(point: DecisionPoint) {
       'zh-CN': `负债压力偏高，评分 ${p.score}/100。`,
       'zh-TW': `負債壓力偏高，評分 ${p.score}/100。`
     },
+    financialLiquiditySupport: {
+      en: `Liquidity and market-size proxy are supportive at ${p.score}/100.`,
+      'zh-CN': `流动性和市值规模代理指标有支撑，评分 ${p.score}/100。`,
+      'zh-TW': `流動性和市值規模代理指標有支撐，評分 ${p.score}/100。`
+    },
+    financialLiquidityRisk: {
+      en: `Liquidity and market-size proxy are weak at ${p.score}/100.`,
+      'zh-CN': `流动性和市值规模代理指标偏弱，评分 ${p.score}/100。`,
+      'zh-TW': `流動性和市值規模代理指標偏弱，評分 ${p.score}/100。`
+    },
     financialAnalystUpside: {
       en: `Analyst target implies about ${p.upside}% upside across ${p.count} opinions.`,
       'zh-CN': `分析师目标价隐含约 ${p.upside}% 上行空间，来自 ${p.count} 个意见。`,
@@ -463,6 +473,7 @@ function eventLabel(event: NewsEvent) {
 function financialMetricLabel(metric: FinancialMetric) {
   const labels: Record<string, Record<Locale, string>> = {
     pe: { en: 'PE', 'zh-CN': '市盈率', 'zh-TW': '本益比' },
+    priceToBook: { en: 'PB', 'zh-CN': '市净率', 'zh-TW': '股價淨值比' },
     revenueGrowth: { en: 'Revenue growth', 'zh-CN': '营收增长', 'zh-TW': '營收成長' },
     earningsGrowth: { en: 'Earnings growth', 'zh-CN': '利润增长', 'zh-TW': '獲利成長' },
     returnOnEquity: { en: 'ROE', 'zh-CN': '净资产收益率', 'zh-TW': '股東權益報酬率' },
@@ -470,6 +481,7 @@ function financialMetricLabel(metric: FinancialMetric) {
     debtToEquity: { en: 'Debt/equity', 'zh-CN': '负债权益比', 'zh-TW': '負債權益比' },
     analystTargetUpside: { en: 'Analyst target upside', 'zh-CN': '分析师目标价空间', 'zh-TW': '分析師目標價空間' },
     dividendYield: { en: 'Dividend yield', 'zh-CN': '股息率', 'zh-TW': '股息率' },
+    liquidityQuality: { en: 'Liquidity/size proxy', 'zh-CN': '流动性/规模代理', 'zh-TW': '流動性/規模代理' },
     fiftyTwoWeekPosition: { en: '52-week position', 'zh-CN': '52 周区间位置', 'zh-TW': '52 週區間位置' }
   };
   return labels[metric.key]?.[locale.value] ?? metric.key;

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import html
 import json
 import re
 from math import sqrt
 from typing import Any
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
@@ -451,6 +451,7 @@ class YFinanceMarketDataProvider:
             info = dict(ticker.get_info())
         except Exception:
             info = {}
+        info = _merge_market_fundamentals(symbol, info)
 
         price = closes[-1]
         previous = closes[-2] if len(closes) > 1 else price
@@ -489,6 +490,7 @@ class YahooHttpMarketDataProvider:
             raise ValueError(f"No closing prices returned for {symbol}.")
 
         info = self._quote_summary(symbol)
+        fundamentals = _merge_market_fundamentals(symbol, self._fundamentals(info, meta))
         price = float(meta.get("regularMarketPrice") or closes[-1])
         previous = closes[-2] if len(closes) > 1 else price
         change = ((price - previous) / previous * 100) if previous else 0
@@ -504,7 +506,7 @@ class YahooHttpMarketDataProvider:
             change=round(change, 2),
             currency=meta.get("currency") or _raw(price_info.get("currency")) or "",
             closes=closes[-130:],
-            info=self._fundamentals(info, meta),
+            info=fundamentals,
         )
 
     def _json(self, url: str) -> dict:
@@ -560,14 +562,17 @@ class RssNewsCrawler:
     def fetch(self, symbol: str, name: str, limit: int = 8) -> list[Article]:
         name = local_company_name(symbol, name)
         articles: list[Article] = []
+        market = infer_market(symbol)
         urls = [google_news_url(symbol, query) for query in news_queries(symbol, name)]
-        if infer_market(symbol) == "US":
+        if market == "US":
             urls.append(RSS_FEEDS[0].format(symbol=quote_plus(symbol), query=quote_plus(news_query(symbol, name))))
         for url in urls:
             try:
                 articles.extend(self._parse_feed(url))
             except Exception:
                 continue
+        if market in {"CN", "HK", "TW"}:
+            articles.extend(self._fetch_eastmoney_stock_news(symbol, name, max(limit * 2, 10)))
 
         unique: dict[str, Article] = {}
         now = datetime.now(timezone.utc)
@@ -657,6 +662,91 @@ class RssNewsCrawler:
             )
         return articles
 
+    def _fetch_eastmoney_stock_news(self, symbol: str, name: str, limit: int = 10) -> list[Article]:
+        articles: list[Article] = []
+        for keyword in self._eastmoney_news_keywords(symbol, name):
+            try:
+                articles.extend(self._fetch_eastmoney_keyword_news(keyword, limit))
+            except Exception:
+                continue
+        return articles
+
+    def _eastmoney_news_keywords(self, symbol: str, name: str) -> list[str]:
+        keywords = [symbol.split(".")[0]]
+        keywords.extend(company_search_names(symbol, name)[:2])
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for keyword in keywords:
+            cleaned = str(keyword or "").strip()
+            key = cleaned.lower()
+            if cleaned and key not in seen:
+                deduped.append(cleaned)
+                seen.add(key)
+        return deduped
+
+    def _fetch_eastmoney_keyword_news(self, keyword: str, limit: int = 10) -> list[Article]:
+        callback = "jQuery351_stock_picker"
+        inner_param = {
+            "uid": "",
+            "keyword": keyword,
+            "type": ["cmsArticleWebOld"],
+            "client": "web",
+            "clientType": "web",
+            "clientVersion": "curr",
+            "param": {
+                "cmsArticleWebOld": {
+                    "searchScope": "default",
+                    "sort": "default",
+                    "pageIndex": 1,
+                    "pageSize": limit,
+                    "preTag": "",
+                    "postTag": "",
+                }
+            },
+        }
+        params = {
+            "cb": callback,
+            "param": json.dumps(inner_param, ensure_ascii=False),
+            "_": str(int(datetime.now(timezone.utc).timestamp() * 1000)),
+        }
+        url = f"https://search-api-web.eastmoney.com/search/jsonp?{urlencode(params)}"
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": f"https://so.eastmoney.com/news/s?keyword={quote_plus(keyword)}",
+            },
+        )
+        with urlopen(request, timeout=8) as response:
+            text = response.read().decode("utf-8-sig", errors="replace")
+        payload = _parse_jsonp(text)
+        rows = payload.get("result", {}).get("cmsArticleWebOld", [])
+        articles: list[Article] = []
+        for row in rows[:limit]:
+            title = clean_summary(str(row.get("title") or ""))
+            summary = clean_summary(str(row.get("content") or ""))
+            if not title and not summary:
+                continue
+            link = str(row.get("url") or "")
+            if not link and row.get("code"):
+                link = f"http://finance.eastmoney.com/a/{row.get('code')}.html"
+            source = str(row.get("mediaName") or "Eastmoney")
+            articles.append(
+                Article(
+                    source=source,
+                    title=title,
+                    summary=summary,
+                    link=link,
+                    published_at=_parse_eastmoney_datetime(row.get("date")),
+                    sentiment=sentiment(f"{title} {summary}"),
+                    credibility=source_credibility(source, link),
+                    relevance=1.0,
+                )
+            )
+        return articles
+
 
 def xml_text(node: ElementTree.Element | None, tag: str, default: str) -> str:
     if node is None:
@@ -672,10 +762,92 @@ def clean_summary(value: str) -> str:
     return text[:500]
 
 
+def _parse_jsonp(text: str) -> dict[str, Any]:
+    start = text.find("(")
+    end = text.rfind(")")
+    if start >= 0 and end > start:
+        text = text[start + 1 : end]
+    payload = json.loads(text)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_eastmoney_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    china_tz = timezone(timedelta(hours=8))
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text, pattern).replace(tzinfo=china_tz)
+        except ValueError:
+            continue
+    return parse_datetime(text)
+
+
 def _raw(value: Any) -> Any:
     if isinstance(value, dict) and "raw" in value:
         return value["raw"]
     return value
+
+
+def _merge_market_fundamentals(symbol: str, info: dict[str, Any]) -> dict[str, Any]:
+    fallback = _eastmoney_cn_fundamentals(symbol)
+    if not fallback:
+        return info
+    merged = dict(fallback)
+    merged.update({key: value for key, value in info.items() if value not in (None, "", "-")})
+    return merged
+
+
+def _eastmoney_cn_fundamentals(symbol: str) -> dict[str, Any]:
+    market = infer_market(symbol)
+    if market != "CN":
+        return {}
+
+    upper = symbol.upper()
+    code = upper.split(".")[0]
+    secid_prefix = "1" if upper.endswith(".SS") else "0"
+    fields = "f57,f58,f47,f48,f116,f117,f162,f167,f168,f170"
+    url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid_prefix}.{quote(code)}&fields={fields}"
+    try:
+        request = Request(url, headers={"User-Agent": YahooHttpMarketDataProvider.user_agent, "Accept": "application/json,text/plain,*/*"})
+        with urlopen(request, timeout=8) as response:
+            data = json.loads(response.read().decode("utf-8-sig")).get("data") or {}
+    except Exception:
+        return {}
+
+    pe = _eastmoney_scaled(data.get("f162"))
+    pb = _eastmoney_scaled(data.get("f167"))
+    turnover = _eastmoney_scaled(data.get("f168"))
+    change = _eastmoney_scaled(data.get("f170"))
+    volume = _eastmoney_number(data.get("f47"))
+    return {
+        "shortName": data.get("f58"),
+        "trailingPE": pe if pe and pe > 0 else None,
+        "priceToBook": pb if pb and pb > 0 else None,
+        "turnoverRate": turnover / 100 if turnover is not None else None,
+        "regularMarketChangePercent": change / 100 if change is not None else None,
+        "regularMarketVolume": volume * 100 if volume else None,
+        "turnoverValue": _eastmoney_number(data.get("f48")),
+        "marketCap": _eastmoney_number(data.get("f116")),
+        "floatMarketCap": _eastmoney_number(data.get("f117")),
+    }
+
+
+def _eastmoney_scaled(value: Any) -> float | None:
+    number = _eastmoney_number(value)
+    if number in (None, 0):
+        return None
+    return number / 100
+
+
+def _eastmoney_number(value: Any) -> float | None:
+    try:
+        if value in (None, "", "-"):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_datetime(value: str | None) -> datetime | None:
