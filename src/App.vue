@@ -649,15 +649,17 @@ onUnmounted(stopLoadingFeedback);
           <p class="strategy-copy">{{ t.symbolsHint }}</p>
         </div>
 
-        <button class="primary-action" :disabled="loading" @click="runAnalysis">
-          <span v-if="loading" class="spinner" aria-hidden="true"></span>
-          {{ loading ? t.loading : t.analyze }}
-        </button>
-        <div v-if="loading" class="analysis-inline" role="status" aria-live="polite">
-          <span>{{ activeAnalysisStep }}</span>
-          <strong>{{ loadingElapsedLabel }}</strong>
+        <div class="control-actions">
+          <button class="primary-action" :disabled="loading" @click="runAnalysis">
+            <span v-if="loading" class="spinner" aria-hidden="true"></span>
+            {{ loading ? t.loading : t.analyze }}
+          </button>
+          <div v-if="loading" class="analysis-inline" role="status" aria-live="polite">
+            <span>{{ activeAnalysisStep }}</span>
+            <strong>{{ loadingElapsedLabel }}</strong>
+          </div>
+          <p v-if="error" class="error">{{ error }}</p>
         </div>
-        <p v-if="error" class="error">{{ error }}</p>
       </aside>
 
       <section class="results">
