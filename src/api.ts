@@ -189,6 +189,7 @@ export interface AnalysisResponse {
     source: string;
     requested: number;
     succeeded: number;
+    displayed?: number;
     failed: number;
     discoveryErrors: Array<{ market: string; source?: string; query?: string; error: string }>;
   };
@@ -214,6 +215,7 @@ export type AnalysisStreamEvent =
   | {
       type: 'pick';
       pick: Pick;
+      picks?: Pick[];
       rank: number;
       scan: AnalysisScan;
     }

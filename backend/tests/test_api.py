@@ -442,6 +442,193 @@ class ApiTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertIn("buy", {pick["verdict"] for pick in payload["picks"]})
 
+    def test_blank_market_scan_curates_investment_first_results(self):
+        class BroadUniverseProvider:
+            def discover(self, markets, limit_per_market=18):
+                symbols = []
+                for prefix, count in [("7", 12), ("6", 8), ("5", 8)]:
+                    for index in range(count):
+                        symbol = f"{prefix}{index:03d}.TW"
+                        symbols.append(DiscoveredSymbol(symbol, f"{prefix} Corp {index}", "TW", "test-broad"))
+                return symbols, []
+
+        class BroadMarketProvider:
+            def fetch(self, symbol):
+                if symbol.startswith("7"):
+                    closes = [80 + index * 0.45 for index in range(130)]
+                    info = {
+                        "trailingPE": 18,
+                        "priceToBook": 2.1,
+                        "beta": 1.0,
+                        "returnOnEquity": 0.28,
+                        "profitMargins": 0.24,
+                        "revenueGrowth": 0.22,
+                        "earningsGrowth": 0.20,
+                        "debtToEquity": 18,
+                        "regularMarketVolume": 8_000_000,
+                        "marketCap": 80_000_000_000,
+                        "fiftyTwoWeekHigh": 150,
+                        "fiftyTwoWeekLow": 70,
+                    }
+                elif symbol.startswith("6"):
+                    closes = [130 - index * 0.35 for index in range(130)]
+                    info = {
+                        "trailingPE": 55,
+                        "priceToBook": 7,
+                        "beta": 2.3,
+                        "returnOnEquity": 0.02,
+                        "profitMargins": 0.01,
+                        "revenueGrowth": -0.20,
+                        "earningsGrowth": -0.30,
+                        "debtToEquity": 220,
+                        "regularMarketVolume": 200_000,
+                        "marketCap": 300_000_000,
+                        "fiftyTwoWeekHigh": 150,
+                        "fiftyTwoWeekLow": 70,
+                    }
+                else:
+                    closes = [100 + (index % 5) * 0.2 for index in range(130)]
+                    info = {
+                        "trailingPE": 26,
+                        "priceToBook": 3.5,
+                        "beta": 1.2,
+                        "returnOnEquity": 0.10,
+                        "profitMargins": 0.08,
+                        "revenueGrowth": 0.04,
+                        "earningsGrowth": 0.03,
+                        "debtToEquity": 80,
+                        "regularMarketVolume": 1_000_000,
+                        "marketCap": 5_000_000_000,
+                        "fiftyTwoWeekHigh": 140,
+                        "fiftyTwoWeekLow": 80,
+                    }
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name=symbol,
+                    market="TW",
+                    sector="Technology",
+                    price=100,
+                    change=1,
+                    currency="TWD",
+                    closes=closes,
+                    info=info,
+                )
+
+        class BroadNewsCrawler:
+            def fetch(self, symbol, name):
+                if symbol.startswith("7"):
+                    return [
+                        Article(
+                            source="Test RSS",
+                            title=f"{name} earnings beat with strong demand",
+                            summary="Revenue growth and analyst upgrade",
+                            link=f"https://example.com/{symbol}",
+                            published_at=datetime.now(timezone.utc),
+                            sentiment=0.8,
+                            credibility=0.9,
+                            relevance=1.0,
+                        )
+                    ]
+                if symbol.startswith("6"):
+                    return [
+                        Article(
+                            source="Test RSS",
+                            title=f"{name} profit warning and downgrade",
+                            summary="Weak demand and target price cut",
+                            link=f"https://example.com/{symbol}",
+                            published_at=datetime.now(timezone.utc),
+                            sentiment=-0.8,
+                            credibility=0.9,
+                            relevance=1.0,
+                        )
+                    ]
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} mixed results",
+                        summary="Stable but limited growth",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.0,
+                        credibility=0.7,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(BroadMarketProvider(), BroadNewsCrawler(), BroadUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        verdicts = [pick["verdict"] for pick in payload["picks"]]
+        priority = {"buy": 0, "sell": 1, "watch": 2}
+
+        self.assertLess(len(payload["picks"]), payload["scan"]["requested"])
+        self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
+        self.assertEqual(payload["scan"]["displayed"], len(payload["picks"]))
+        self.assertEqual(verdicts, sorted(verdicts, key=priority.get))
+        self.assertEqual(verdicts.count("buy"), 10)
+        self.assertEqual(verdicts.count("sell"), 5)
+        self.assertLessEqual(verdicts.count("watch"), 4)
+
+    def test_blank_market_scan_does_not_promote_mediocre_best_names(self):
+        class MediocreUniverseProvider:
+            def discover(self, markets, limit_per_market=18):
+                return [
+                    DiscoveredSymbol(f"5{index:03d}.TW", f"Mediocre Corp {index}", "TW", "test-mediocre")
+                    for index in range(8)
+                ], []
+
+        class MediocreMarketProvider:
+            def fetch(self, symbol):
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name=symbol,
+                    market="TW",
+                    sector="Technology",
+                    price=100,
+                    change=0.2,
+                    currency="TWD",
+                    closes=[100 + (index % 5) * 0.2 for index in range(130)],
+                    info={
+                        "trailingPE": 26,
+                        "priceToBook": 3.5,
+                        "beta": 1.2,
+                        "returnOnEquity": 0.10,
+                        "profitMargins": 0.08,
+                        "revenueGrowth": 0.04,
+                        "earningsGrowth": 0.03,
+                        "debtToEquity": 80,
+                        "regularMarketVolume": 1_000_000,
+                        "marketCap": 5_000_000_000,
+                        "fiftyTwoWeekHigh": 140,
+                        "fiftyTwoWeekLow": 80,
+                    },
+                )
+
+        class NeutralNewsCrawler:
+            def fetch(self, symbol, name):
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} mixed results",
+                        summary="Stable but limited growth",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.0,
+                        credibility=0.7,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(MediocreMarketProvider(), NeutralNewsCrawler(), MediocreUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+
+        self.assertEqual({pick["verdict"] for pick in payload["picks"]}, {"watch"})
+        self.assertLessEqual(len(payload["picks"]), 4)
+        self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
+
     def test_response_contains_detailed_100_point_scoring_and_actions(self):
         response = self.client.post("/api/analyze", json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "balanced"})
         self.assertEqual(response.status_code, 200)

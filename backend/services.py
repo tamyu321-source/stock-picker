@@ -12,6 +12,11 @@ from backend.universe import DiscoveredSymbol, MarketUniverseProvider
 
 
 FACTOR_ORDER = ["sentiment", "momentum", "value", "risk", "quality"]
+AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET = 30
+AUTO_SCAN_RESULT_LIMIT = 18
+AUTO_SCAN_BUY_LIMIT = 10
+AUTO_SCAN_SELL_LIMIT = 5
+AUTO_SCAN_WATCH_LIMIT = 4
 
 
 def get_config() -> dict:
@@ -226,22 +231,167 @@ def _relative_verdicts(picks: list[dict]) -> None:
         return
     sorted_scores = sorted([pick["score"] for pick in picks], reverse=True)
     buy_cutoff = sorted_scores[max(0, min(len(sorted_scores) - 1, round(len(sorted_scores) * 0.18) - 1))]
-    sell_cutoff = sorted_scores[min(len(sorted_scores) - 1, max(0, round(len(sorted_scores) * 0.72)))]
     bought = 0
     for index, pick in enumerate(picks):
         risk = pick["metrics"]["risk"]
+        pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
         if pick["score"] >= max(55, buy_cutoff) and risk >= 42 and bought < max(1, round(len(picks) * 0.18)):
             pick["verdict"] = "buy"
             bought += 1
             pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}]
-            if not any(reason["key"] == "rankedTopOpportunity" for reason in pick["reasonCodes"]):
-                pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index + 1}})
-        elif pick["score"] < min(52, sell_cutoff) or risk < 25:
+            pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index + 1}})
+        elif _is_exit_candidate(pick):
             pick["verdict"] = "sell"
         else:
             pick["verdict"] = "watch"
         pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"])
         pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
+
+
+def _investment_priority(pick: dict) -> float:
+    metrics = pick["metrics"]
+    return round(
+        pick["score"] * 0.52
+        + metrics["quality"] * 0.18
+        + metrics["momentum"] * 0.12
+        + metrics["value"] * 0.10
+        + metrics["risk"] * 0.08,
+        3,
+    )
+
+
+def _sell_priority(pick: dict) -> float:
+    metrics = pick["metrics"]
+    return round(
+        (100 - pick["score"]) * 0.45
+        + (100 - metrics["risk"]) * 0.25
+        + (100 - metrics["sentiment"]) * 0.15
+        + (100 - metrics["momentum"]) * 0.10
+        + (100 - metrics["quality"]) * 0.05,
+        3,
+    )
+
+
+def _is_exit_candidate(pick: dict) -> bool:
+    metrics = pick["metrics"]
+    return pick["score"] < 52 or metrics["risk"] < 42
+
+
+def _is_urgent_exit_candidate(pick: dict) -> bool:
+    metrics = pick["metrics"]
+    return (
+        pick["score"] <= 48
+        or metrics["risk"] < 35
+        or metrics["sentiment"] <= 35
+        or metrics["momentum"] <= 35
+        or metrics["quality"] <= 35
+    )
+
+
+def _investable_factor_count(metrics: dict[str, float]) -> int:
+    return sum(
+        [
+            metrics["quality"] >= 58,
+            metrics["risk"] >= 48,
+            metrics["sentiment"] >= 54,
+            metrics["momentum"] >= 56,
+            metrics["value"] >= 50,
+        ]
+    )
+
+
+def _is_quality_investment_candidate(pick: dict) -> bool:
+    metrics = pick["metrics"]
+    return (
+        pick["score"] >= 62
+        and _investment_priority(pick) >= 64
+        and metrics["quality"] >= 58
+        and metrics["risk"] >= 48
+        and _investable_factor_count(metrics) >= 4
+        and (metrics["sentiment"] >= 54 or metrics["momentum"] >= 62)
+    )
+
+
+def _is_watch_candidate(pick: dict) -> bool:
+    metrics = pick["metrics"]
+    return (
+        not _is_exit_candidate(pick)
+        and (
+            pick["score"] >= 55
+            or _investment_priority(pick) >= 58
+            or _investable_factor_count(metrics) >= 3
+        )
+    )
+
+
+def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
+    for pick in picks:
+        pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
+        if _is_quality_investment_candidate(pick):
+            pick["verdict"] = "buy"
+            pick["reasonCodes"] = [
+                reason
+                for reason in pick["reasonCodes"]
+                if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}
+            ]
+        elif _is_urgent_exit_candidate(pick):
+            pick["verdict"] = "sell"
+        else:
+            pick["verdict"] = "watch"
+        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"])
+        pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
+
+    for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
+        pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index}})
+
+
+def _display_priority_key(pick: dict) -> tuple[int, float]:
+    if pick["verdict"] == "buy":
+        return (0, -_investment_priority(pick))
+    if pick["verdict"] == "sell":
+        return (1, -_sell_priority(pick))
+    return (2, -_investment_priority(pick))
+
+
+def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
+    if len(picks) <= 2:
+        return sorted(picks, key=_display_priority_key)
+
+    buy_candidates = sorted(
+        [pick for pick in picks if _is_quality_investment_candidate(pick)],
+        key=_investment_priority,
+        reverse=True,
+    )
+    urgent_sell_candidates = sorted(
+        [pick for pick in picks if _is_urgent_exit_candidate(pick)],
+        key=_sell_priority,
+        reverse=True,
+    )
+    watch_candidates = sorted(
+        [pick for pick in picks if _is_watch_candidate(pick) and not _is_quality_investment_candidate(pick)],
+        key=_investment_priority,
+        reverse=True,
+    )
+
+    selected: list[dict] = []
+    selected.extend(buy_candidates[:AUTO_SCAN_BUY_LIMIT])
+    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+    if remaining > 0:
+        selected.extend(urgent_sell_candidates[: min(AUTO_SCAN_SELL_LIMIT, remaining)])
+    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+    if remaining > 0:
+        selected.extend(watch_candidates[: min(AUTO_SCAN_WATCH_LIMIT, remaining)])
+
+    if not selected:
+        selected = sorted(picks, key=_investment_priority, reverse=True)[: min(6, len(picks))]
+
+    seen = set()
+    unique_selected = []
+    for pick in selected:
+        if pick["symbol"] not in seen:
+            unique_selected.append(pick)
+            seen.add(pick["symbol"])
+    return sorted(unique_selected, key=_display_priority_key)
 
 
 def _reason_codes(metrics: dict[str, float], score: float, sentiment_delta: float) -> list[dict]:
@@ -352,14 +502,14 @@ def _symbols_from_payload(payload: dict, universe_provider=None) -> tuple[list[D
         return [DiscoveredSymbol(symbol=symbol, name=symbol, market=infer_market(symbol), source="manual") for symbol in symbols[:25]], [], "manual"
     markets = payload.get("markets") or [market["id"] for market in MARKETS]
     provider = universe_provider or MarketUniverseProvider()
-    discovered, discovery_errors = provider.discover(markets)
+    discovered, discovery_errors = provider.discover(markets, limit_per_market=AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET)
     seen = set()
     deduped = []
     for item in discovered:
         if item.symbol not in seen:
             deduped.append(item)
             seen.add(item.symbol)
-    return deduped[:75], discovery_errors, "market-news"
+    return deduped[: AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET * max(1, len(markets))], discovery_errors, "market-news"
 
 
 def _price_return(closes: list[float], lookback: int) -> float:
@@ -759,17 +909,24 @@ def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
         "auto": context["auto_scan"],
         "source": context["universe_source"],
         "requested": len(context["symbols"]),
-        "succeeded": len(picks),
+        "succeeded": context.get("evaluated", len(picks)),
+        "displayed": len(picks),
         "failed": len(errors),
         "discoveryErrors": context["discovery_errors"],
     }
 
 
-def _finish_picks(picks: list[dict]) -> None:
+def _finish_picks(picks: list[dict], auto_scan: bool = False) -> list[dict]:
     picks.sort(key=lambda item: item["score"], reverse=True)
-    _relative_verdicts(picks)
-    for pick in picks:
+    if auto_scan:
+        _apply_auto_scan_search_algorithm(picks)
+        display_picks = _curated_auto_scan_picks(picks)
+    else:
+        _relative_verdicts(picks)
+        display_picks = sorted(picks, key=_display_priority_key)
+    for pick in display_picks:
         pick["reasons"] = _english_reasons(pick["reasonCodes"])
+    return display_picks
 
 
 def analyze(payload: dict, market_provider=None, news_crawler=None, universe_provider=None) -> dict:
@@ -792,14 +949,15 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
             except Exception as exc:
                 errors.append({"symbol": symbol, "error": str(exc)})
 
-    _finish_picks(picks)
+    context["evaluated"] = len(picks)
+    display_picks = _finish_picks(picks, context["auto_scan"])
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "markets": MARKETS,
         "strategy": strategy,
-        "picks": picks,
+        "picks": display_picks,
         "errors": errors,
-        "scan": _scan_state(context, picks, errors),
+        "scan": _scan_state(context, display_picks, errors),
     }
 
 
@@ -832,21 +990,25 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
             try:
                 pick = future.result()
                 picks.append(pick)
-                picks.sort(key=lambda item: item["score"], reverse=True)
-                yield event("pick", pick=pick, rank=picks.index(pick) + 1, scan=_scan_state(context, picks, errors))
+                context["evaluated"] = len(picks)
+                display_picks = _finish_picks(picks, context["auto_scan"])
+                rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
+                yield event("pick", pick=pick, picks=display_picks, rank=rank, scan=_scan_state(context, display_picks, errors))
             except Exception as exc:
                 errors.append({"symbol": symbol, "error": str(exc)})
-                yield event("error", symbol=symbol, error=str(exc), scan=_scan_state(context, picks, errors))
+                display_picks = _finish_picks(picks, context["auto_scan"])
+                yield event("error", symbol=symbol, error=str(exc), scan=_scan_state(context, display_picks, errors))
 
-    _finish_picks(picks)
+    context["evaluated"] = len(picks)
+    display_picks = _finish_picks(picks, context["auto_scan"])
     yield event(
         "complete",
         generatedAt=generated_at,
         markets=MARKETS,
         strategy=strategy,
-        picks=picks,
+        picks=display_picks,
         errors=errors,
-        scan=_scan_state(context, picks, errors),
+        scan=_scan_state(context, display_picks, errors),
     )
 
 

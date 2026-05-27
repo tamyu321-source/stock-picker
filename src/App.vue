@@ -37,7 +37,12 @@ const flattenedSignals = computed(() => picks.value.flatMap((pick) => pick.signa
 const symbols = computed(() => symbolText.value.split(/[\s,;]+/).map((symbol) => symbol.trim()).filter(Boolean));
 const isAutoScan = computed(() => symbols.value.length === 0);
 const scanLabel = computed(() => {
-  if (!scanInfo.value) return isAutoScan.value ? t.value.autoScan : `${symbols.value.length}`;
+  if (!scanInfo.value) {
+    if (isAutoScan.value) return t.value.autoScan;
+    if (locale.value === 'en') return `${symbols.value.length} narrowed`;
+    if (locale.value === 'zh-CN') return `限定 ${symbols.value.length} 只`;
+    return `限定 ${symbols.value.length} 檔`;
+  }
   if (locale.value === 'en') return `${scanInfo.value.succeeded}/${scanInfo.value.requested} scanned`;
   if (locale.value === 'zh-CN') return `已扫 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
   return `已掃 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
@@ -46,10 +51,10 @@ const analysisSteps = computed(() => {
   if (locale.value === 'en') {
     return isAutoScan.value
       ? [
-          'Waiting for local finance news sources',
-          'Cross-checking supplemental news feeds',
+          'Discovering candidates across selected markets',
+          'Cross-checking local finance news sources',
           'Loading price and fundamentals data',
-          'Scoring candidates and preparing decisions'
+          'Ranking quality investment candidates'
         ]
       : [
           'Loading recent company news',
@@ -60,11 +65,11 @@ const analysisSteps = computed(() => {
   }
   if (locale.value === 'zh-CN') {
     return isAutoScan.value
-      ? ['正在等待当地财经新闻源', '正在交叉补充新闻信号', '正在拉取行情与基本面', '正在计算评分与投资判断']
+      ? ['正在直接扫描所选市场', '正在交叉检查当地财经新闻源', '正在拉取行情与基本面', '正在排序优质投资候选']
       : ['正在拉取个股近期新闻', '正在获取行情与基本面', '正在计算策略评分', '正在整理判断与风险提示'];
   }
   return isAutoScan.value
-    ? ['正在等待當地財經新聞源', '正在交叉補充新聞訊號', '正在拉取行情與基本面', '正在計算評分與投資判斷']
+    ? ['正在直接掃描所選市場', '正在交叉檢查當地財經新聞源', '正在拉取行情與基本面', '正在排序優質投資候選']
     : ['正在拉取個股近期新聞', '正在取得行情與基本面', '正在計算策略評分', '正在整理判斷與風險提示'];
 });
 const activeAnalysisStep = computed(() => analysisSteps.value[Math.min(loadingStepIndex.value, analysisSteps.value.length - 1)]);
@@ -531,7 +536,11 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
     return;
   }
   if (event.type === 'pick') {
-    upsertStreamingPick(event.pick);
+    if (event.picks) {
+      picks.value = event.picks;
+    } else {
+      upsertStreamingPick(event.pick);
+    }
     scanInfo.value = event.scan;
     loadingStepIndex.value = Math.max(loadingStepIndex.value, 2);
     return;
@@ -657,8 +666,15 @@ onUnmounted(stopLoadingFeedback);
             <h2>{{ t.symbols }}</h2>
             <span class="mode-pill">{{ scanLabel }}</span>
           </div>
-          <textarea v-model="symbolText" rows="5" spellcheck="false"></textarea>
-          <p class="strategy-copy">{{ t.symbolsHint }}</p>
+          <div class="scan-purpose">
+            <strong>{{ t.symbolsBlank }}</strong>
+            <span>{{ t.scanPurpose }}</span>
+          </div>
+          <details class="optional-symbols">
+            <summary>{{ t.optionalSymbols }}</summary>
+            <textarea v-model="symbolText" rows="4" spellcheck="false" :placeholder="t.symbolsPlaceholder"></textarea>
+            <p class="strategy-copy">{{ t.symbolsHint }}</p>
+          </details>
         </div>
 
         <div class="control-actions">

@@ -1,6 +1,6 @@
 # Open Stock Picker
 
-Open Stock Picker is a multilingual AI-assisted stock research web app. It connects to live market data, crawls RSS/news feeds, and scores a configurable watchlist across China, Hong Kong, Singapore, the United States, and Taiwan.
+Open Stock Picker is a multilingual AI-assisted stock research web app. Its primary workflow is no-code market scanning: choose markets and a strategy, then let the backend discover, score, and rank suitable higher-quality stocks for investment research across China, Hong Kong, Singapore, the United States, and Taiwan.
 
 It is designed for real research workflows, not a static portfolio mockup. The app does not execute trades and does not store broker credentials.
 
@@ -8,8 +8,9 @@ It is designed for real research workflows, not a static portfolio mockup. The a
 
 - Vue 3 + Vite web interface with English, Simplified Chinese, and Traditional Chinese UI.
 - Python Flask backend with live data providers and explainable scoring.
-- Real ticker input using Yahoo Finance symbols, including `AAPL`, `0700.HK`, `D05.SI`, `2330.TW`, `600519.SS`, and `300750.SZ`.
-- Blank ticker input triggers automatic market-universe discovery instead of a hard-coded stock list.
+- Direct market scanning without requiring users to enter stock codes first.
+- Optional ticker or company-name input for narrowing a scan when the user already has a specific stock in mind.
+- Automatic market-universe discovery instead of a hard-coded stock list.
 - Live price history through Yahoo Finance chart endpoints, with optional `yfinance` support when installed.
 - Market-specific RSS/news crawling through Google News and local source filters, using company names and article summaries when available.
 - Default strategies for balanced, growth, and defensive value investing.
@@ -60,7 +61,18 @@ npm run dev
 
 Open `http://127.0.0.1:5173`.
 
-## Ticker Format
+## No-Code Market Scan
+
+The main user flow is to leave the optional stock field empty. The backend then discovers candidates at request time and ranks them as investment research ideas:
+
+- United States: Yahoo Finance predefined screeners such as most active and day gainers.
+- Taiwan: TWSE open data sorted by trading value.
+- Singapore: SGX securities API sorted by trading volume.
+- China A-shares and Hong Kong: Eastmoney dynamic market lists when reachable, with explicit fallback metadata if the source refuses the request.
+
+The API response includes `scan.source`, `scan.requested`, `scan.succeeded`, `scan.failed`, and `scan.discoveryErrors` so the UI can show whether a scan came from live universe discovery or a fallback.
+
+## Optional Ticker Format
 
 The default provider follows Yahoo Finance ticker suffixes:
 
@@ -70,16 +82,7 @@ The default provider follows Yahoo Finance ticker suffixes:
 - Singapore: `D05.SI`, `C38U.SI`
 - Taiwan: `2330.TW`, `2317.TW`
 
-## Automatic Market Discovery
-
-When the ticker box is blank, the backend discovers candidates at request time:
-
-- United States: Yahoo Finance predefined screeners such as most active and day gainers.
-- Taiwan: TWSE open data sorted by trading value.
-- Singapore: SGX securities API sorted by trading volume.
-- China A-shares and Hong Kong: Eastmoney dynamic market lists when reachable, with explicit fallback metadata if the source refuses the request.
-
-The API response includes `scan.source`, `scan.requested`, `scan.succeeded`, `scan.failed`, and `scan.discoveryErrors` so the UI can show whether a scan came from live universe discovery or a fallback.
+Ticker input is optional. Use it only to narrow a scan to known companies such as `AAPL`, `0700.HK`, `D05.SI`, `2330.TW`, `600519.SS`, and `300750.SZ`.
 
 ## Scoring Model
 
