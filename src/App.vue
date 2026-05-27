@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { analyzeStocksStream, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 
-const locale = ref<Locale>('zh-CN');
+const locale = ref<Locale>('en');
 const config = ref<AppConfig | null>(null);
 const selectedMarkets = ref<Market[]>(['US', 'CN', 'HK', 'SG', 'TW']);
 const selectedStrategyId = ref('balanced');
@@ -21,6 +21,19 @@ const loadingStepIndex = ref(0);
 let loadingTimer: number | undefined;
 let loadingRunId = 0;
 
+const SETTINGS_STORAGE_KEY = 'open-stock-picker.settings.v1';
+const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'SG', 'TW'];
+const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
+
+type PersistedSettings = {
+  locale?: Locale;
+  selectedMarkets?: Market[];
+  selectedStrategyId?: string;
+  useCustom?: boolean;
+  customWeights?: Partial<StrategyWeights>;
+  symbolText?: string;
+};
+
 const customWeights = reactive<StrategyWeights>({
   momentum: 24,
   value: 20,
@@ -33,7 +46,7 @@ const t = computed(() => messages[locale.value]);
 const strategies = computed<Strategy[]>(() => config.value?.strategies ?? []);
 const selectedStrategy = computed(() => strategies.value.find((item) => item.id === selectedStrategyId.value));
 const marketOptions = computed(() => config.value?.markets ?? []);
-const flattenedSignals = computed(() => picks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))).slice(0, 8));
+const flattenedSignals = computed(() => picks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
 const symbols = computed(() => symbolText.value.split(/[\s,;]+/).map((symbol) => symbol.trim()).filter(Boolean));
 const isAutoScan = computed(() => symbols.value.length === 0);
 const scanLabel = computed(() => {
@@ -78,6 +91,79 @@ const loadingElapsedLabel = computed(() => {
   if (locale.value === 'zh-CN') return `已等待 ${loadingElapsedSeconds.value} 秒`;
   return `已等待 ${loadingElapsedSeconds.value} 秒`;
 });
+
+function isLocale(value: unknown): value is Locale {
+  return value === 'en' || value === 'zh-CN' || value === 'zh-TW';
+}
+
+function isMarket(value: unknown): value is Market {
+  return defaultMarkets.includes(value as Market);
+}
+
+function normalizeWeight(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(40, Math.max(0, value)) : null;
+}
+
+function persistSettings() {
+  const settings: PersistedSettings = {
+    locale: locale.value,
+    selectedMarkets: selectedMarkets.value,
+    selectedStrategyId: selectedStrategyId.value,
+    useCustom: useCustom.value,
+    customWeights: { ...customWeights },
+    symbolText: symbolText.value
+  };
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Ignore storage failures so the scanner remains usable in private or restricted contexts.
+  }
+}
+
+function restoreSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return;
+
+    const settings = JSON.parse(raw) as PersistedSettings;
+    if (isLocale(settings.locale)) {
+      locale.value = settings.locale;
+    }
+    if (Array.isArray(settings.selectedMarkets)) {
+      selectedMarkets.value = settings.selectedMarkets.filter(isMarket);
+    }
+    if (typeof settings.selectedStrategyId === 'string' && settings.selectedStrategyId) {
+      selectedStrategyId.value = settings.selectedStrategyId;
+    }
+    if (typeof settings.useCustom === 'boolean') {
+      useCustom.value = settings.useCustom;
+    }
+    if (settings.customWeights && typeof settings.customWeights === 'object') {
+      weightKeys.forEach((key) => {
+        const value = normalizeWeight(settings.customWeights?.[key]);
+        if (value !== null) {
+          customWeights[key] = value;
+        }
+      });
+    }
+    if (typeof settings.symbolText === 'string') {
+      symbolText.value = settings.symbolText;
+    }
+  } catch {
+    try {
+      localStorage.removeItem(SETTINGS_STORAGE_KEY);
+    } catch {
+      // Ignore storage failures so the scanner remains usable in private or restricted contexts.
+    }
+  }
+}
+
+function normalizeStrategySelection() {
+  if (!strategies.value.length) return;
+  if (!strategies.value.some((strategy) => strategy.id === selectedStrategyId.value)) {
+    selectedStrategyId.value = strategies.value[0].id;
+  }
+}
 
 function toggleMarket(market: Market) {
   if (selectedMarkets.value.includes(market)) {
@@ -523,6 +609,13 @@ function stopLoadingFeedback() {
   loading.value = false;
 }
 
+async function keepOptionalSymbolsVisible(event: Event) {
+  const details = event.target as HTMLDetailsElement;
+  if (!details.open) return;
+  await nextTick();
+  details.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'smooth' });
+}
+
 function upsertStreamingPick(pick: Pick) {
   const existing = picks.value.filter((item) => item.symbol !== pick.symbol);
   picks.value = [...existing, pick].sort((left, right) => right.score - left.score);
@@ -568,7 +661,7 @@ async function runAnalysis() {
   generatedAt.value = '';
   try {
     await analyzeStocksStream({
-      markets: selectedMarkets.value.length ? selectedMarkets.value : ['US', 'CN', 'HK', 'SG', 'TW'],
+      markets: selectedMarkets.value.length ? selectedMarkets.value : defaultMarkets,
       symbols: symbols.value,
       strategyId: useCustom.value ? undefined : selectedStrategyId.value,
       customWeights: useCustom.value ? { ...customWeights } : undefined
@@ -580,9 +673,23 @@ async function runAnalysis() {
   }
 }
 
+watch(
+  () => ({
+    locale: locale.value,
+    selectedMarkets: selectedMarkets.value,
+    selectedStrategyId: selectedStrategyId.value,
+    useCustom: useCustom.value,
+    customWeights: { ...customWeights },
+    symbolText: symbolText.value
+  }),
+  persistSettings,
+  { deep: true }
+);
+
 onMounted(async () => {
+  restoreSettings();
   config.value = await fetchConfig();
-  await runAnalysis();
+  normalizeStrategySelection();
 });
 
 onUnmounted(stopLoadingFeedback);
@@ -621,60 +728,62 @@ onUnmounted(stopLoadingFeedback);
 
     <section class="workspace">
       <aside class="control-panel">
-        <div class="panel-section">
-          <h2>{{ t.marketCoverage }}</h2>
-          <div class="market-grid">
-            <button
-              v-for="market in marketOptions"
-              :key="market.id"
-              :class="{ active: selectedMarkets.includes(market.id) }"
-              @click="toggleMarket(market.id)"
-            >
-              <strong>{{ market.id }}</strong>
-              <span>{{ market.label }}</span>
-            </button>
-          </div>
-        </div>
-
-        <div class="panel-section">
-          <div class="section-row">
-            <h2>{{ t.strategy }}</h2>
-            <label class="switch">
-              <input v-model="useCustom" type="checkbox" />
-              <span>{{ t.customWeights }}</span>
-            </label>
+        <div class="control-scroll">
+          <div class="panel-section">
+            <h2>{{ t.marketCoverage }}</h2>
+            <div class="market-grid">
+              <button
+                v-for="market in marketOptions"
+                :key="market.id"
+                :class="{ active: selectedMarkets.includes(market.id) }"
+                @click="toggleMarket(market.id)"
+              >
+                <strong>{{ market.id }}</strong>
+                <span>{{ market.label }}</span>
+              </button>
+            </div>
           </div>
 
-          <select v-model="selectedStrategyId" :disabled="useCustom">
-            <option v-for="strategy in strategies" :key="strategy.id" :value="strategy.id">
-              {{ strategyName(strategy) }}
-            </option>
-          </select>
-          <p class="strategy-copy">{{ strategyDescription(selectedStrategy) }}</p>
+          <div class="panel-section">
+            <div class="section-row">
+              <h2>{{ t.strategy }}</h2>
+              <label class="switch">
+                <input v-model="useCustom" type="checkbox" />
+                <span>{{ t.customWeights }}</span>
+              </label>
+            </div>
 
-          <div class="weight-list">
-            <label v-for="(_, key) in customWeights" :key="key">
-              <span>{{ t[key] }}</span>
-              <input v-model.number="customWeights[key]" :disabled="!useCustom" type="range" min="0" max="40" />
-              <strong>{{ customWeights[key] }}</strong>
-            </label>
-          </div>
-        </div>
+            <select v-model="selectedStrategyId" :disabled="useCustom">
+              <option v-for="strategy in strategies" :key="strategy.id" :value="strategy.id">
+                {{ strategyName(strategy) }}
+              </option>
+            </select>
+            <p class="strategy-copy">{{ strategyDescription(selectedStrategy) }}</p>
 
-        <div class="panel-section">
-          <div class="section-row">
-            <h2>{{ t.symbols }}</h2>
-            <span class="mode-pill">{{ scanLabel }}</span>
+            <div class="weight-list">
+              <label v-for="(_, key) in customWeights" :key="key">
+                <span>{{ t[key] }}</span>
+                <input v-model.number="customWeights[key]" :disabled="!useCustom" type="range" min="0" max="40" />
+                <strong>{{ customWeights[key] }}</strong>
+              </label>
+            </div>
           </div>
-          <div class="scan-purpose">
-            <strong>{{ t.symbolsBlank }}</strong>
-            <span>{{ t.scanPurpose }}</span>
+
+          <div class="panel-section">
+            <div class="section-row">
+              <h2>{{ t.symbols }}</h2>
+              <span class="mode-pill">{{ scanLabel }}</span>
+            </div>
+            <div class="scan-purpose">
+              <strong>{{ t.symbolsBlank }}</strong>
+              <span>{{ t.scanPurpose }}</span>
+            </div>
+            <details class="optional-symbols" @toggle="keepOptionalSymbolsVisible">
+              <summary>{{ t.optionalSymbols }}</summary>
+              <textarea v-model="symbolText" rows="4" spellcheck="false" :placeholder="t.symbolsPlaceholder"></textarea>
+              <p class="strategy-copy">{{ t.symbolsHint }}</p>
+            </details>
           </div>
-          <details class="optional-symbols">
-            <summary>{{ t.optionalSymbols }}</summary>
-            <textarea v-model="symbolText" rows="4" spellcheck="false" :placeholder="t.symbolsPlaceholder"></textarea>
-            <p class="strategy-copy">{{ t.symbolsHint }}</p>
-          </details>
         </div>
 
         <div class="control-actions">
@@ -707,6 +816,11 @@ onUnmounted(stopLoadingFeedback);
         </div>
 
         <div class="pick-list">
+          <article v-if="!loading && !picks.length && !dataIssues.length" class="empty-card">
+            <strong>{{ t.emptyTitle }}</strong>
+            <p>{{ t.emptyHint }}</p>
+          </article>
+
           <article v-if="dataIssues.length" class="issue-card">
             <strong>{{ t.failures }}</strong>
             <p v-for="issue in dataIssues" :key="issue.symbol">{{ issue.symbol }}: {{ issue.error }}</p>
@@ -834,14 +948,16 @@ onUnmounted(stopLoadingFeedback);
 
       <aside class="signal-panel">
         <h2>{{ t.signalFeed }}</h2>
-        <article v-for="signal in flattenedSignals" :key="`${signal.symbol}-${signal.title}`" class="signal-item">
-          <div>
-            <strong>{{ signal.symbol }}</strong>
-            <p><a :href="signal.link" target="_blank" rel="noreferrer">{{ signal.title }}</a></p>
-            <p v-if="signal.summary" class="signal-summary">{{ signal.summary }}</p>
-          </div>
-          <span>{{ signal.source }} · {{ signal.ageHours }}{{ t.hoursAgo }}</span>
-        </article>
+        <div class="signal-scroll">
+          <article v-for="signal in flattenedSignals" :key="`${signal.symbol}-${signal.title}`" class="signal-item">
+            <div>
+              <strong>{{ signal.symbol }}</strong>
+              <p><a :href="signal.link" target="_blank" rel="noreferrer">{{ signal.title }}</a></p>
+              <p v-if="signal.summary" class="signal-summary">{{ signal.summary }}</p>
+            </div>
+            <span>{{ signal.source }} · {{ signal.ageHours }}{{ t.hoursAgo }}</span>
+          </article>
+        </div>
       </aside>
     </section>
   </main>

@@ -17,6 +17,8 @@ type MessageKey =
   | 'analyze'
   | 'refresh'
   | 'topIdeas'
+  | 'emptyTitle'
+  | 'emptyHint'
   | 'signalFeed'
   | 'score'
   | 'confidence'
@@ -69,6 +71,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     analyze: 'Scan for quality stocks',
     refresh: 'Refresh',
     topIdeas: 'AI-ranked investment candidates',
+    emptyTitle: 'No scan has run yet',
+    emptyHint: 'Review the saved options on the left, then start a scan when you are ready.',
     signalFeed: 'Crawled signal feed',
     score: 'Score',
     confidence: 'Confidence',
@@ -120,6 +124,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     analyze: '扫描优质投资标的',
     refresh: '刷新',
     topIdeas: 'AI 排名投资候选',
+    emptyTitle: '还没有开始扫描',
+    emptyHint: '左侧会恢复上次保存的选项，确认后再手动点击扫描即可。',
     signalFeed: '爬文信号',
     score: '评分',
     confidence: '置信度',
@@ -171,6 +177,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     analyze: '掃描優質投資標的',
     refresh: '刷新',
     topIdeas: 'AI 排名投資候選',
+    emptyTitle: '還沒有開始掃描',
+    emptyHint: '左側會恢復上次保存的選項，確認後再手動點擊掃描即可。',
     signalFeed: '爬文訊號',
     score: '評分',
     confidence: '信心度',
