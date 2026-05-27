@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from backend.app import create_app
 from backend.providers import Article, MarketSnapshot, RssNewsCrawler, is_recent_article, local_company_name, news_queries, news_query
+from backend.services import _score_breakdown, _sentiment_score
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _symbols_from_code_mentions
 
 
@@ -115,6 +116,37 @@ class ApiTestCase(unittest.TestCase):
         self.assertTrue(any("\u8d35\u5dde\u8305\u53f0" in query for query in news_queries("600519.SS", "Kweichow Moutai")))
         self.assertTrue(any("\u817e\u8baf\u63a7\u80a1" in query for query in news_queries("0700.HK", "Tencent Holdings")))
         self.assertTrue(any("\u9a30\u8a0a\u63a7\u80a1" in query for query in news_queries("0700.HK", "Tencent Holdings")))
+
+    def test_manual_china_symbols_resolve_to_company_names(self):
+        provider = MarketUniverseProvider()
+        symbols, errors = provider.resolve_manual_inputs(
+            ["605589.SS", "603986.SS", "603936.SS", "301071.SZ", "300373.SZ", "300323.SZ"],
+            ["CN"],
+        )
+        names = {item.symbol: item.name for item in symbols}
+        self.assertEqual(errors, [])
+        self.assertEqual(names["605589.SS"], "\u5723\u6cc9\u96c6\u56e2")
+        self.assertEqual(names["603986.SS"], "\u5146\u6613\u521b\u65b0")
+        self.assertEqual(names["603936.SS"], "\u535a\u654f\u7535\u5b50")
+        self.assertEqual(names["301071.SZ"], "\u529b\u91cf\u94bb\u77f3")
+        self.assertEqual(names["300373.SZ"], "\u626c\u6770\u79d1\u6280")
+        self.assertEqual(names["300323.SZ"], "\u534e\u707f\u5149\u7535")
+
+    def test_manual_company_name_input_resolves_to_symbol(self):
+        searched_terms = []
+
+        class FakeResolver(MarketUniverseProvider):
+            def _search_eastmoney_term(self, term, market):
+                searched_terms.append((term, market))
+                return [DiscoveredSymbol("605589.SS", "\u5723\u6cc9\u96c6\u56e2", "CN", "test-resolver")]
+
+            def _search_yahoo_term(self, term, market):
+                return []
+
+        symbols, errors = FakeResolver().resolve_manual_inputs(["\u5723\u6cc9\u96c6\u56e2"], ["CN"])
+        self.assertEqual(errors, [])
+        self.assertEqual(searched_terms, [("\u5723\u6cc9\u96c6\u56e2", "CN")])
+        self.assertEqual([(item.symbol, item.name) for item in symbols], [("605589.SS", "\u5723\u6cc9\u96c6\u56e2")])
 
     def test_news_relevance_prefers_company_phrase(self):
         crawler = RssNewsCrawler()
@@ -305,6 +337,27 @@ class ApiTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["strategy"]["id"], "custom")
         self.assertTrue(payload["picks"])
+
+    def test_negative_news_reduces_sentiment_score(self):
+        now = datetime.now(timezone.utc)
+        positive = [
+            Article("Test", "Company reports strong revenue growth", "", "https://example.com/positive", now, 0.4, 0.8, 1.0)
+        ]
+        negative = [
+            Article("Test", "Company issues profit warning after weak demand", "", "https://example.com/negative", now, -0.4, 0.8, 1.0)
+        ]
+        self.assertGreater(_sentiment_score(positive), 50)
+        self.assertLess(_sentiment_score(negative), 50)
+        self.assertGreater(_sentiment_score(positive), _sentiment_score(negative))
+
+    def test_missing_factor_weight_is_reallocated(self):
+        metrics = {"sentiment": 50, "momentum": 70, "value": 60, "risk": 65, "quality": 75}
+        weights = {"sentiment": 0.4, "momentum": 0.2, "value": 0.15, "risk": 0.1, "quality": 0.15}
+        availability = {"sentiment": False, "momentum": True, "value": True, "risk": True, "quality": True}
+        breakdown = _score_breakdown(metrics, weights, availability)
+        self.assertEqual(next(item for item in breakdown if item["factor"] == "sentiment")["weight"], 0)
+        self.assertAlmostEqual(sum(item["weight"] for item in breakdown), 100, delta=0.2)
+        self.assertGreater(next(item for item in breakdown if item["factor"] == "momentum")["weight"], 20)
 
     def test_scan_produces_relative_buy_candidates(self):
         client = create_app(LowRiskFakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()

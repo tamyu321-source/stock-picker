@@ -43,6 +43,8 @@ export interface ScoreComponent {
   factor: keyof StrategyWeights;
   score: number;
   weight: number;
+  baseWeight?: number;
+  available?: boolean;
   contribution: number;
 }
 

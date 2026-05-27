@@ -10,6 +10,9 @@ from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceM
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider
 
 
+FACTOR_ORDER = ["sentiment", "momentum", "value", "risk", "quality"]
+
+
 def get_config() -> dict:
     return {
         "markets": MARKETS,
@@ -22,6 +25,19 @@ def get_config() -> dict:
 def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
     total = sum(max(value, 0) for value in weights.values()) or 1
     return {key: max(value, 0) / total for key, value in weights.items()}
+
+
+def _clamp_score(value: float) -> float:
+    return max(0, min(100, value))
+
+
+def _metric_number(value) -> float | None:
+    try:
+        if value in (None, "", "-"):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _strategy_from_payload(payload: dict) -> dict:
@@ -66,8 +82,29 @@ def _sentiment_score(articles: list[Article]) -> float:
     if not articles:
         return 50
     now = datetime.now(timezone.utc)
-    weighted = [article.sentiment * article.credibility * article.relevance * max(0.2, 1 - _age_hours(article.published_at, now) / 168) for article in articles]
-    return max(0, min(100, 50 + mean(weighted) * 50))
+    weighted_values = []
+    weights = []
+    for article in articles:
+        weight = article.credibility * article.relevance * max(0.2, 1 - _age_hours(article.published_at, now) / 168)
+        weighted_values.append(article.sentiment * weight)
+        weights.append(weight)
+    lexical_score = sum(weighted_values) / (sum(weights) or 1)
+    return _clamp_score(50 + lexical_score * 45 + _news_event_adjustment(articles))
+
+
+def _news_event_adjustment(articles: list[Article]) -> float:
+    now = datetime.now(timezone.utc)
+    event_weight = 0.0
+    event_balance = 0.0
+    for article in articles:
+        article_weight = article.credibility * article.relevance * max(0.2, 1 - _age_hours(article.published_at, now) / 168)
+        for event in _news_events_for(article):
+            polarity = 1 if event["impact"] == "positive" else -1 if event["impact"] == "negative" else 0
+            event_weight += article_weight
+            event_balance += polarity * article_weight
+    if not event_weight:
+        return 0.0
+    return max(-14, min(14, event_balance / event_weight * 14))
 
 
 def _sentiment_boost(articles: list[Article]) -> float:
@@ -142,20 +179,36 @@ def _news_analysis(articles: list[Article]) -> dict:
     }
 
 
-def _score_stock(metrics: dict[str, float], weights: dict[str, float]) -> float:
-    weighted_score = sum(metrics[key] * weights.get(key, 0) for key in metrics)
+def _effective_weights(weights: dict[str, float], availability: dict[str, bool] | None = None) -> dict[str, float]:
+    if not availability:
+        return weights
+    active_weight = sum(weights.get(factor, 0) for factor in FACTOR_ORDER if availability.get(factor))
+    if active_weight <= 0:
+        return weights
+    return {
+        factor: (weights.get(factor, 0) / active_weight if availability.get(factor) else 0)
+        for factor in FACTOR_ORDER
+    }
+
+
+def _score_stock(metrics: dict[str, float], weights: dict[str, float], availability: dict[str, bool] | None = None) -> float:
+    effective_weights = _effective_weights(weights, availability)
+    weighted_score = sum(metrics[key] * effective_weights.get(key, 0) for key in metrics)
     return max(0, min(100, weighted_score))
 
 
-def _score_breakdown(metrics: dict[str, float], weights: dict[str, float]) -> list[dict]:
+def _score_breakdown(metrics: dict[str, float], weights: dict[str, float], availability: dict[str, bool] | None = None) -> list[dict]:
+    effective_weights = _effective_weights(weights, availability)
     return [
         {
             "factor": factor,
             "score": round(metrics[factor], 1),
-            "weight": round(weights.get(factor, 0) * 100, 1),
-            "contribution": round(metrics[factor] * weights.get(factor, 0), 1),
+            "weight": round(effective_weights.get(factor, 0) * 100, 1),
+            "baseWeight": round(weights.get(factor, 0) * 100, 1),
+            "available": bool(availability.get(factor, True)) if availability is not None else True,
+            "contribution": round(metrics[factor] * effective_weights.get(factor, 0), 1),
         }
-        for factor in ["sentiment", "momentum", "value", "risk", "quality"]
+        for factor in FACTOR_ORDER
     ]
 
 
@@ -287,8 +340,14 @@ def _english_reasons(reason_codes: list[dict]) -> list[str]:
 
 
 def _symbols_from_payload(payload: dict, universe_provider=None) -> tuple[list[DiscoveredSymbol], list[dict], str]:
-    symbols = [str(symbol).strip().upper() for symbol in payload.get("symbols", []) if str(symbol).strip()]
-    if symbols:
+    manual_inputs = [str(symbol).strip() for symbol in payload.get("symbols", []) if str(symbol).strip()]
+    if manual_inputs:
+        provider = universe_provider or MarketUniverseProvider()
+        markets = payload.get("markets") or [market["id"] for market in MARKETS]
+        if hasattr(provider, "resolve_manual_inputs"):
+            resolved, discovery_errors = provider.resolve_manual_inputs(manual_inputs, markets, limit=25)
+            return resolved, discovery_errors, "manual"
+        symbols = [symbol.upper() for symbol in manual_inputs]
         return [DiscoveredSymbol(symbol=symbol, name=symbol, market=infer_market(symbol), source="manual") for symbol in symbols[:25]], [], "manual"
     markets = payload.get("markets") or [market["id"] for market in MARKETS]
     provider = universe_provider or MarketUniverseProvider()
@@ -302,31 +361,95 @@ def _symbols_from_payload(payload: dict, universe_provider=None) -> tuple[list[D
     return deduped[:75], discovery_errors, "market-news"
 
 
+def _price_return(closes: list[float], lookback: int) -> float:
+    if len(closes) <= lookback:
+        return 0.0
+    base = closes[-lookback - 1]
+    return closes[-1] / base - 1 if base else 0.0
+
+
+def _moving_average(closes: list[float], window: int) -> float | None:
+    if len(closes) < window:
+        return None
+    return mean(closes[-window:])
+
+
+def _max_drawdown(closes: list[float], window: int = 60) -> float:
+    values = closes[-window:] if len(closes) >= window else closes
+    if len(values) < 2:
+        return 0.0
+    peak = values[0]
+    worst = 0.0
+    for value in values:
+        peak = max(peak, value)
+        if peak:
+            worst = min(worst, value / peak - 1)
+    return abs(worst)
+
+
+def _momentum_score(closes: list[float]) -> float:
+    if len(closes) < 22:
+        return 50
+    current = closes[-1]
+    returns = {
+        20: _price_return(closes, 20),
+        60: _price_return(closes, 60),
+        120: _price_return(closes, 120),
+    }
+    trend_score = 50 + returns[20] * 120 + returns[60] * 70 + returns[120] * 45
+    ma20 = _moving_average(closes, 20)
+    ma60 = _moving_average(closes, 60)
+    ma120 = _moving_average(closes, 120)
+    ma_bonus = 0.0
+    if ma20 and current > ma20:
+        ma_bonus += 4
+    if ma20 and ma60 and ma20 > ma60:
+        ma_bonus += 5
+    if ma60 and ma120 and ma60 > ma120:
+        ma_bonus += 4
+    positive_windows = sum(1 for value in returns.values() if value > 0)
+    consistency_bonus = (positive_windows - 1.5) * 4
+    drawdown_penalty = min(22, _max_drawdown(closes, 60) * 95)
+    return _clamp_score(trend_score + ma_bonus + consistency_bonus - drawdown_penalty)
+
+
+def _metric_availability(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, bool]:
+    info = snapshot.info
+    has_quality = any(
+        _metric_number(info.get(key)) is not None
+        for key in ["returnOnEquity", "profitMargins", "revenueGrowth", "earningsGrowth", "debtToEquity"]
+    )
+    return {
+        "sentiment": bool(articles),
+        "momentum": len(snapshot.closes) >= 22,
+        "value": _metric_number(info.get("trailingPE") or info.get("forwardPE")) is not None,
+        "risk": len(snapshot.closes) >= 22 or _metric_number(info.get("beta")) is not None,
+        "quality": has_quality,
+    }
+
+
 def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, float]:
     closes = snapshot.closes
-    current = closes[-1]
-    base_20 = closes[-21] if len(closes) > 21 else closes[0]
-    base_60 = closes[-61] if len(closes) > 61 else closes[0]
-    momentum = max(0, min(100, 50 + ((current / base_20 - 1) * 110) + ((current / base_60 - 1) * 60)))
+    momentum = _momentum_score(closes)
 
-    pe = snapshot.info.get("trailingPE") or snapshot.info.get("forwardPE")
-    value = 55 if pe is None else max(0, min(100, 100 - abs(float(pe) - 18) * 2.2))
+    pe = _metric_number(snapshot.info.get("trailingPE") or snapshot.info.get("forwardPE"))
+    value = 55 if pe is None else _clamp_score(100 - abs(pe - 18) * 2.2)
 
-    beta = snapshot.info.get("beta")
-    beta_score = 65 if beta is None else max(0, min(100, 100 - abs(float(beta) - 1) * 42))
+    beta = _metric_number(snapshot.info.get("beta"))
+    beta_score = 65 if beta is None else _clamp_score(100 - abs(beta - 1) * 42)
     risk = round((beta_score * 0.45) + (volatility_score(closes) * 0.55), 1)
 
-    roe = snapshot.info.get("returnOnEquity")
-    margin = snapshot.info.get("profitMargins")
-    revenue_growth = snapshot.info.get("revenueGrowth")
-    earnings_growth = snapshot.info.get("earningsGrowth")
-    debt = snapshot.info.get("debtToEquity")
+    roe = _metric_number(snapshot.info.get("returnOnEquity"))
+    margin = _metric_number(snapshot.info.get("profitMargins"))
+    revenue_growth = _metric_number(snapshot.info.get("revenueGrowth"))
+    earnings_growth = _metric_number(snapshot.info.get("earningsGrowth"))
+    debt = _metric_number(snapshot.info.get("debtToEquity"))
     quality_parts = [
-        50 if roe is None else max(0, min(100, float(roe) * 260)),
-        50 if margin is None else max(0, min(100, 45 + float(margin) * 180)),
-        50 if revenue_growth is None else max(0, min(100, 50 + float(revenue_growth) * 180)),
-        50 if earnings_growth is None else max(0, min(100, 50 + float(earnings_growth) * 140)),
-        62 if debt is None else max(0, min(100, 100 - float(debt) / 2)),
+        50 if roe is None else _clamp_score(roe * 260),
+        50 if margin is None else _clamp_score(45 + margin * 180),
+        50 if revenue_growth is None else _clamp_score(50 + revenue_growth * 180),
+        50 if earnings_growth is None else _clamp_score(50 + earnings_growth * 140),
+        62 if debt is None else _clamp_score(100 - debt / 2),
     ]
 
     return {
@@ -535,8 +658,9 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
     company_name = local_company_name(snapshot.symbol, raw_name)
     articles = _dedupe_articles([*item.evidence, *news_crawler.fetch(snapshot.symbol, company_name)])
     metrics = _metrics(snapshot, articles)
+    availability = _metric_availability(snapshot, articles)
     sentiment_delta = _sentiment_boost(articles)
-    score = round(_score_stock(metrics, weights), 1)
+    score = round(_score_stock(metrics, weights, availability), 1)
     verdict = _verdict(score, metrics["risk"])
     reason_codes = _reason_codes(metrics, score, sentiment_delta)
     signals = _signals_for(articles)
@@ -557,7 +681,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "reasonCodes": reason_codes,
         "signals": signals,
         "metrics": metrics,
-        "scoreBreakdown": _score_breakdown(metrics, weights),
+        "scoreBreakdown": _score_breakdown(metrics, weights, availability),
         "decision": _decision_details(verdict, score, metrics, signals),
         "newsAnalysis": news_analysis,
         "financialAnalysis": financial_analysis,

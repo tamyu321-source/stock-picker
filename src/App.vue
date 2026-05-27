@@ -100,6 +100,13 @@ function factorLabel(value: string | number | undefined) {
   return t.value[key] ?? String(value ?? '');
 }
 
+function scoreWeightLabel(item: { weight: number; baseWeight?: number; available?: boolean }) {
+  const effective = Number(item.weight).toFixed(1);
+  const base = item.baseWeight === undefined ? effective : Number(item.baseWeight).toFixed(1);
+  if (item.available === false) return `0.0% (${base}%)`;
+  return base !== effective ? `${base}% -> ${effective}%` : `${effective}%`;
+}
+
 function reasonLabel(reason: ReasonCode) {
   const params = reason.params;
   if (reason.key === 'strongestFactors') {
@@ -703,7 +710,7 @@ onUnmounted(stopLoadingFeedback);
               <div v-for="item in pick.scoreBreakdown" :key="item.factor" class="score-line">
                 <span>{{ factorLabel(item.factor) }}</span>
                 <b>{{ item.score }}</b>
-                <small>{{ t.weight }} {{ item.weight }}% · {{ t.contribution }} {{ item.contribution }}</small>
+                <small>{{ t.weight }} {{ scoreWeightLabel(item) }} · {{ t.contribution }} {{ item.contribution }}</small>
               </div>
             </div>
 

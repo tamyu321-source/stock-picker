@@ -220,6 +220,66 @@ class DiscoveredSymbol:
 class MarketUniverseProvider:
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 OpenStockPicker/0.1"
 
+    def resolve_manual_inputs(self, inputs: Iterable[str], markets: Iterable[str], limit: int = 25) -> tuple[list[DiscoveredSymbol], list[dict]]:
+        allowed_markets = set(markets or configured_markets())
+        resolved: list[DiscoveredSymbol] = []
+        errors: list[dict] = []
+        seen = set()
+
+        for raw_value in inputs:
+            query = str(raw_value or "").strip()
+            if not query:
+                continue
+
+            candidates = self._resolve_manual_input(query, allowed_markets)
+            if not candidates:
+                errors.append(
+                    {
+                        "market": ",".join(sorted(allowed_markets)),
+                        "source": "manual-resolve",
+                        "query": query,
+                        "error": "No matching listed equity was found for this code or company name.",
+                    }
+                )
+                continue
+
+            for item in candidates:
+                if item.symbol in seen:
+                    continue
+                resolved.append(item)
+                seen.add(item.symbol)
+                if len(resolved) >= limit:
+                    return resolved, errors
+
+        return resolved, errors
+
+    def _resolve_manual_input(self, query: str, allowed_markets: set[str]) -> list[DiscoveredSymbol]:
+        symbol_candidates = _manual_symbol_candidates(query, allowed_markets)
+        if symbol_candidates:
+            return [self._manual_symbol(symbol) for symbol in symbol_candidates]
+
+        candidates: list[DiscoveredSymbol] = []
+        for market in _preferred_manual_markets(allowed_markets):
+            if market in {"CN", "HK"}:
+                candidates.extend(self._search_eastmoney_term(query, market))
+            candidates.extend(self._search_yahoo_term(query, market))
+        return _dedupe_discovered([item for item in candidates if item.market in allowed_markets])
+
+    def _manual_symbol(self, symbol: str) -> DiscoveredSymbol:
+        market = infer_market(symbol)
+        name = local_company_name(symbol, "")
+        if not name:
+            for term in [symbol, symbol.split(".")[0]]:
+                resolved: list[DiscoveredSymbol] = []
+                if market in {"CN", "HK"}:
+                    resolved.extend(self._search_eastmoney_term(term, market))
+                resolved.extend(self._search_yahoo_term(term, market))
+                match = next((item for item in resolved if item.symbol == symbol), None)
+                if match:
+                    name = match.name
+                    break
+        return DiscoveredSymbol(symbol=symbol, name=name or symbol, market=market, source="manual-resolve")
+
     def discover(self, markets: Iterable[str], limit_per_market: int = 18) -> tuple[list[DiscoveredSymbol], list[dict]]:
         symbols: list[DiscoveredSymbol] = []
         errors: list[dict] = []
@@ -400,16 +460,19 @@ class MarketUniverseProvider:
             code = str(row.get("Code") or row.get("UnifiedCode") or "").strip()
             classify = str(row.get("Classify") or "").upper()
             jys = str(row.get("JYS") or "").upper()
+            security_type_name = str(row.get("SecurityTypeName") or "").upper()
             symbol = ""
-            if market == "HK" and (classify == "HK" or jys == "HK") and code.isdigit():
+            is_hk = classify == "HK" or jys == "HK" or "HK" in security_type_name or "港" in security_type_name
+            if market == "HK" and is_hk and code.isdigit():
                 symbol = f"{int(code):04d}.HK"
             elif market == "CN" and code.isdigit() and is_common_equity_symbol(f"{code}.SS" if code.startswith('6') else f"{code}.SZ", "CN"):
                 symbol = f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
             if symbol:
+                name = _repair_mojibake(str(row.get("Name") or term))
                 output.append(
                     DiscoveredSymbol(
                         symbol=symbol,
-                        name=local_company_name(symbol, str(row.get("Name") or term)),
+                        name=local_company_name(symbol, name),
                         market=market,
                         source=f"market-news-eastmoney:{term}",
                     )
@@ -651,6 +714,48 @@ def _symbols_from_code_mentions(text: str, market: str) -> list[str]:
     return []
 
 
+def _manual_symbol_candidates(query: str, allowed_markets: set[str]) -> list[str]:
+    normalized = query.strip().upper()
+    if not normalized:
+        return []
+
+    if re.fullmatch(r"\d{6}\.(?:SS|SZ)", normalized):
+        symbol = normalized
+        market = infer_market(symbol)
+        return [symbol] if market in allowed_markets and is_common_equity_symbol(symbol, market) else []
+
+    if re.fullmatch(r"\d{6}", normalized) and "CN" in allowed_markets:
+        symbol = f"{normalized}.SS" if normalized.startswith("6") else f"{normalized}.SZ"
+        return [symbol] if is_common_equity_symbol(symbol, "CN") else []
+
+    if re.fullmatch(r"\d{4,5}\.HK", normalized):
+        symbol = f"{int(normalized.split('.')[0]):04d}.HK"
+        return [symbol] if "HK" in allowed_markets and is_common_equity_symbol(symbol, "HK") else []
+
+    if re.fullmatch(r"\d{4}\.TW", normalized):
+        return [normalized] if "TW" in allowed_markets else []
+
+    if re.fullmatch(r"[A-Z0-9]{2,5}\.SI", normalized):
+        return [normalized] if "SG" in allowed_markets else []
+
+    if re.fullmatch(r"\d{4,5}", normalized):
+        if "TW" in allowed_markets and "HK" not in allowed_markets and len(normalized) == 4:
+            return [f"{normalized}.TW"]
+        if "HK" in allowed_markets:
+            symbol = f"{int(normalized):04d}.HK"
+            return [symbol] if is_common_equity_symbol(symbol, "HK") else []
+
+    if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", normalized) and "." not in normalized and "US" in allowed_markets:
+        return [normalized]
+
+    return []
+
+
+def _preferred_manual_markets(allowed_markets: set[str]) -> list[str]:
+    preferred = ["CN", "HK", "TW", "SG", "US"]
+    return [market for market in preferred if market in allowed_markets]
+
+
 def _html_attr(attrs: str, name: str) -> str:
     match = re.search(rf"{name}\s*=\s*([\"'])(.*?)\1", attrs, flags=re.IGNORECASE | re.DOTALL)
     return match.group(2).strip() if match else ""
@@ -768,6 +873,29 @@ def _dedupe_articles(articles: list[Article]) -> list[Article]:
             output.append(article)
             seen.add(key)
     return output
+
+
+def _dedupe_discovered(items: list[DiscoveredSymbol]) -> list[DiscoveredSymbol]:
+    output = []
+    seen = set()
+    for item in items:
+        if item.symbol in seen:
+            continue
+        output.append(item)
+        seen.add(item.symbol)
+    return output
+
+
+def _repair_mojibake(value: str) -> str:
+    if not value:
+        return value
+    if re.search(r"[\u3400-\u9fff]", value):
+        return value
+    try:
+        repaired = value.encode("latin1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+    return repaired if re.search(r"[\u3400-\u9fff]", repaired) else value
 
 
 def _merge_unique_symbols(existing: list[DiscoveredSymbol], candidates: list[DiscoveredSymbol]) -> list[DiscoveredSymbol]:
