@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timezone
 
@@ -152,6 +153,69 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("600519.SS", {item.symbol for item in symbols})
         self.assertIn("\u8d35\u5dde\u8305\u53f0", {item.name for item in symbols})
 
+    def test_fallback_search_uses_default_taiwan_symbols(self):
+        symbols = MarketUniverseProvider()._discover_fallback_search("TW", 5)
+        self.assertEqual([item.symbol for item in symbols], ["2330.TW", "2317.TW"])
+        self.assertTrue(all(item.source == "curated-liquid-fallback" for item in symbols))
+
+    def test_discover_prefers_local_news_then_google_news(self):
+        class SparseNewsUniverse(MarketUniverseProvider):
+            def _discover_local_market_news(self, market, limit):
+                return [DiscoveredSymbol("AAPL", "Apple", "US", "local-news")]
+
+            def _discover_google_market_news(self, market, limit):
+                return [DiscoveredSymbol("MSFT", "Microsoft", "US", "google-news")]
+
+            def _discover_market(self, market, limit):
+                raise AssertionError("market universe should not be needed")
+
+            def _discover_fallback_search(self, market, limit):
+                raise AssertionError("fallback should not be needed")
+
+        symbols, errors = SparseNewsUniverse().discover(["US"], 2)
+        self.assertEqual([item.symbol for item in symbols], ["AAPL", "MSFT"])
+        self.assertEqual(errors, [])
+
+    def test_discover_does_not_use_defaults_when_local_news_is_enough(self):
+        class LocalNewsUniverse(MarketUniverseProvider):
+            def _discover_local_market_news(self, market, limit):
+                return [
+                    DiscoveredSymbol("2330.TW", "TSMC", "TW", "local-news"),
+                    DiscoveredSymbol("2454.TW", "MediaTek", "TW", "local-news"),
+                ]
+
+            def _discover_google_market_news(self, market, limit):
+                raise AssertionError("google news should not be needed")
+
+            def _discover_market(self, market, limit):
+                raise AssertionError("market universe should not be needed")
+
+            def _discover_fallback_search(self, market, limit):
+                raise AssertionError("fallback should not be needed")
+
+        symbols, errors = LocalNewsUniverse().discover(["TW"], 2)
+        self.assertEqual([item.symbol for item in symbols], ["2330.TW", "2454.TW"])
+        self.assertEqual({item.source for item in symbols}, {"local-news"})
+        self.assertEqual(errors, [])
+
+    def test_discover_falls_back_to_defaults_when_dynamic_sources_fail(self):
+        class OfflineUniverse(MarketUniverseProvider):
+            def _discover_local_market_news(self, market, limit):
+                return []
+
+            def _discover_google_market_news(self, market, limit):
+                return []
+
+            def _discover_market(self, market, limit):
+                raise OSError("offline")
+
+        symbols, errors = OfflineUniverse().discover(["TW"], 5)
+        self.assertEqual([item.symbol for item in symbols], ["2330.TW", "2317.TW"])
+        self.assertEqual({item.source for item in symbols}, {"curated-liquid-fallback"})
+        self.assertIn("local-news", {error["source"] for error in errors})
+        self.assertIn("google-news", {error["source"] for error in errors})
+        self.assertIn("market-universe", {error["source"] for error in errors})
+
     def test_sgx_discovery_ignores_unnamed_codes_and_uses_curated_names(self):
         class FakeSgxUniverse(MarketUniverseProvider):
             def _json(self, url, insecure=False):
@@ -179,6 +243,19 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scan"]["source"], "market-news")
         self.assertEqual({pick["symbol"] for pick in payload["picks"]}, {"8888.TW", "9999.TW"})
         self.assertNotIn("2330.TW", {pick["symbol"] for pick in payload["picks"]})
+
+    def test_streaming_analyze_emits_incremental_picks(self):
+        response = self.client.post("/api/analyze/stream", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        events = [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+        self.assertEqual(events[0]["type"], "started")
+        self.assertEqual(events[-1]["type"], "complete")
+        pick_events = [event for event in events if event["type"] == "pick"]
+        self.assertEqual(len(pick_events), 2)
+        self.assertEqual({event["pick"]["symbol"] for event in pick_events}, {"8888.TW", "9999.TW"})
+        self.assertEqual(events[-1]["scan"]["requested"], 2)
+        self.assertEqual(events[-1]["scan"]["succeeded"], 2)
+        self.assertEqual({pick["symbol"] for pick in events[-1]["picks"]}, {"8888.TW", "9999.TW"})
 
     def test_news_universe_extracts_symbols_from_market_articles(self):
         article = Article(

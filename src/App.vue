@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
-import { analyzeStocks, fetchConfig, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type Strategy, type StrategyWeights } from './api';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { analyzeStocksStream, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 
 const locale = ref<Locale>('zh-CN');
@@ -15,6 +15,11 @@ const symbolText = ref('');
 const picks = ref<Pick[]>([]);
 const dataIssues = ref<Array<{ symbol: string; error: string }>>([]);
 const scanInfo = ref<{ auto: boolean; requested: number; succeeded: number; failed: number } | null>(null);
+const loadingStartedAt = ref(0);
+const loadingElapsedSeconds = ref(0);
+const loadingStepIndex = ref(0);
+let loadingTimer: number | undefined;
+let loadingRunId = 0;
 
 const customWeights = reactive<StrategyWeights>({
   momentum: 24,
@@ -36,6 +41,37 @@ const scanLabel = computed(() => {
   if (locale.value === 'en') return `${scanInfo.value.succeeded}/${scanInfo.value.requested} scanned`;
   if (locale.value === 'zh-CN') return `已扫 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
   return `已掃 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
+});
+const analysisSteps = computed(() => {
+  if (locale.value === 'en') {
+    return isAutoScan.value
+      ? [
+          'Waiting for local finance news sources',
+          'Cross-checking supplemental news feeds',
+          'Loading price and fundamentals data',
+          'Scoring candidates and preparing decisions'
+        ]
+      : [
+          'Loading recent company news',
+          'Fetching price and fundamentals data',
+          'Calculating strategy scores',
+          'Preparing decisions and risk notes'
+        ];
+  }
+  if (locale.value === 'zh-CN') {
+    return isAutoScan.value
+      ? ['正在等待当地财经新闻源', '正在交叉补充新闻信号', '正在拉取行情与基本面', '正在计算评分与投资判断']
+      : ['正在拉取个股近期新闻', '正在获取行情与基本面', '正在计算策略评分', '正在整理判断与风险提示'];
+  }
+  return isAutoScan.value
+    ? ['正在等待當地財經新聞源', '正在交叉補充新聞訊號', '正在拉取行情與基本面', '正在計算評分與投資判斷']
+    : ['正在拉取個股近期新聞', '正在取得行情與基本面', '正在計算策略評分', '正在整理判斷與風險提示'];
+});
+const activeAnalysisStep = computed(() => analysisSteps.value[Math.min(loadingStepIndex.value, analysisSteps.value.length - 1)]);
+const loadingElapsedLabel = computed(() => {
+  if (locale.value === 'en') return `${loadingElapsedSeconds.value}s elapsed`;
+  if (locale.value === 'zh-CN') return `已等待 ${loadingElapsedSeconds.value} 秒`;
+  return `已等待 ${loadingElapsedSeconds.value} 秒`;
 });
 
 function toggleMarket(market: Market) {
@@ -436,24 +472,83 @@ function sectorLabel(pick: Pick) {
   return pick.sector && pick.sector !== 'Unknown' ? pick.sector : t.value.sectorUnavailable;
 }
 
-async function runAnalysis() {
+function startLoadingFeedback() {
+  stopLoadingFeedback();
+  loadingRunId += 1;
+  const currentRunId = loadingRunId;
   loading.value = true;
+  loadingStartedAt.value = Date.now();
+  loadingElapsedSeconds.value = 0;
+  loadingStepIndex.value = 0;
+  loadingTimer = window.setInterval(() => {
+    if (currentRunId !== loadingRunId) return;
+    loadingElapsedSeconds.value = Math.floor((Date.now() - loadingStartedAt.value) / 1000);
+    loadingStepIndex.value = Math.max(
+      loadingStepIndex.value,
+      Math.min(analysisSteps.value.length - 1, Math.floor(loadingElapsedSeconds.value / 6))
+    );
+  }, 1000);
+}
+
+function stopLoadingFeedback() {
+  loadingRunId += 1;
+  if (loadingTimer !== undefined) {
+    window.clearInterval(loadingTimer);
+    loadingTimer = undefined;
+  }
+  loading.value = false;
+}
+
+function upsertStreamingPick(pick: Pick) {
+  const existing = picks.value.filter((item) => item.symbol !== pick.symbol);
+  picks.value = [...existing, pick].sort((left, right) => right.score - left.score);
+}
+
+function handleAnalysisEvent(event: AnalysisStreamEvent) {
+  if (event.type === 'started') {
+    scanInfo.value = event.scan;
+    generatedAt.value = '';
+    loadingStepIndex.value = 0;
+    return;
+  }
+  if (event.type === 'pick') {
+    upsertStreamingPick(event.pick);
+    scanInfo.value = event.scan;
+    loadingStepIndex.value = Math.max(loadingStepIndex.value, 2);
+    return;
+  }
+  if (event.type === 'error') {
+    dataIssues.value = [...dataIssues.value, { symbol: event.symbol, error: event.error }];
+    scanInfo.value = event.scan;
+    loadingStepIndex.value = Math.max(loadingStepIndex.value, 2);
+    return;
+  }
+  picks.value = event.picks;
+  dataIssues.value = event.errors;
+  scanInfo.value = event.scan;
+  generatedAt.value = new Date(event.generatedAt).toLocaleString();
+  loadingStepIndex.value = analysisSteps.value.length - 1;
+}
+
+async function runAnalysis() {
+  if (loading.value) return;
+  startLoadingFeedback();
   error.value = '';
+  scanInfo.value = null;
+  picks.value = [];
+  dataIssues.value = [];
+  generatedAt.value = '';
   try {
-    const result = await analyzeStocks({
+    await analyzeStocksStream({
       markets: selectedMarkets.value.length ? selectedMarkets.value : ['US', 'CN', 'HK', 'SG', 'TW'],
       symbols: symbols.value,
       strategyId: useCustom.value ? undefined : selectedStrategyId.value,
       customWeights: useCustom.value ? { ...customWeights } : undefined
-    });
-    picks.value = result.picks;
-    dataIssues.value = result.errors;
-    scanInfo.value = result.scan ?? null;
-    generatedAt.value = new Date(result.generatedAt).toLocaleString();
+    }, handleAnalysisEvent);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unknown error';
   } finally {
-    loading.value = false;
+    stopLoadingFeedback();
   }
 }
 
@@ -461,6 +556,8 @@ onMounted(async () => {
   config.value = await fetchConfig();
   await runAnalysis();
 });
+
+onUnmounted(stopLoadingFeedback);
 </script>
 
 <template>
@@ -546,8 +643,13 @@ onMounted(async () => {
         </div>
 
         <button class="primary-action" :disabled="loading" @click="runAnalysis">
+          <span v-if="loading" class="spinner" aria-hidden="true"></span>
           {{ loading ? t.loading : t.analyze }}
         </button>
+        <div v-if="loading" class="analysis-inline" role="status" aria-live="polite">
+          <span>{{ activeAnalysisStep }}</span>
+          <strong>{{ loadingElapsedLabel }}</strong>
+        </div>
         <p v-if="error" class="error">{{ error }}</p>
       </aside>
 
@@ -555,6 +657,16 @@ onMounted(async () => {
         <div class="section-row">
           <h2>{{ t.topIdeas }}</h2>
           <button class="ghost" :disabled="loading" @click="runAnalysis">{{ t.refresh }}</button>
+        </div>
+
+        <div v-if="loading" class="analysis-wait" role="status" aria-live="polite">
+          <div class="wait-meter">
+            <span :style="{ width: `${((loadingStepIndex + 1) / analysisSteps.length) * 100}%` }"></span>
+          </div>
+          <div>
+            <strong>{{ activeAnalysisStep }}</strong>
+            <p>{{ loadingElapsedLabel }} · {{ scanLabel }}</p>
+          </div>
         </div>
 
         <div class="pick-list">

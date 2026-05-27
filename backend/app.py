@@ -1,6 +1,6 @@
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 
-from backend.services import analyze, get_config
+from backend.services import analyze, get_config, stream_analyze
 
 
 def create_app(market_provider=None, news_crawler=None, universe_provider=None) -> Flask:
@@ -23,6 +23,20 @@ def create_app(market_provider=None, news_crawler=None, universe_provider=None) 
                 news_crawler=news_crawler,
                 universe_provider=universe_provider,
             )
+        )
+
+    @app.post("/api/analyze/stream")
+    def analyze_stream_endpoint():
+        events = stream_analyze(
+            request.get_json(silent=True) or {},
+            market_provider=market_provider,
+            news_crawler=news_crawler,
+            universe_provider=universe_provider,
+        )
+        return Response(
+            stream_with_context(events),
+            mimetype="application/x-ndjson",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     return app

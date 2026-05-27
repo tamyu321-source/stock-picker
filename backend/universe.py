@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html as html_lib
 import json
 import re
 import ssl
@@ -7,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS
@@ -21,6 +22,8 @@ from backend.providers import (
     is_recent_article,
     local_company_name,
     recency_weight,
+    sentiment,
+    source_credibility,
 )
 
 FALLBACK_SEARCH_TERMS = {
@@ -174,6 +177,34 @@ MARKET_NEWS_QUERIES = {
     ],
 }
 
+LOCAL_MARKET_NEWS_URLS = {
+    "CN": [
+        "https://roll.eastmoney.com/stock.html",
+        "https://finance.eastmoney.com/a/cgsxw.html",
+        "https://www.cnstock.com/",
+    ],
+    "HK": [
+        "https://www.aastocks.com/en/stocks/news/aafn/latest-news",
+        "https://www.aastocks.com/tc/stocks/news/aafn/latest-news",
+    ],
+    "TW": [
+        "https://news.cnyes.com/news/cat/tw_stock_news",
+        "https://www.moneydj.com/KMDJ/News/NewsRealList.aspx",
+    ],
+    "SG": [
+        "https://www.businesstimes.com.sg/rss/companies-markets",
+        "https://www.businesstimes.com.sg/rss/reits-property",
+        "https://www.businesstimes.com.sg/rss/transport-logistics",
+        "https://www.channelnewsasia.com/business",
+    ],
+    "US": [
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "https://www.cnbc.com/id/15839135/device/rss/rss.html",
+        "https://www.marketwatch.com/rss/topstories",
+        "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    ],
+}
+
 
 @dataclass(frozen=True)
 class DiscoveredSymbol:
@@ -193,14 +224,26 @@ class MarketUniverseProvider:
         symbols: list[DiscoveredSymbol] = []
         errors: list[dict] = []
         for market in markets:
-            try:
-                market_symbols = self._discover_market_news(market, limit_per_market)
-            except Exception as exc:
-                errors.append({"market": market, "source": "market-news", "error": str(exc)})
-                market_symbols = []
+            market_symbols: list[DiscoveredSymbol] = []
+            for source, discover, empty_message in [
+                ("local-news", self._discover_local_market_news, "No recent company mentions were extracted from local market news."),
+                ("google-news", self._discover_google_market_news, "No recent company mentions were extracted from Google News."),
+                ("market-universe", self._discover_market, "No live market-universe symbols were returned."),
+                ("fallback-search", self._discover_fallback_search, "No fallback symbols were available."),
+            ]:
+                if len(market_symbols) >= limit_per_market:
+                    break
+                try:
+                    candidates = discover(market, limit_per_market)
+                except Exception as exc:
+                    errors.append({"market": market, "source": source, "error": str(exc)})
+                    continue
 
-            if not market_symbols:
-                errors.append({"market": market, "source": "market-news", "error": "No recent company mentions were extracted from market news."})
+                if not candidates:
+                    errors.append({"market": market, "source": source, "error": empty_message})
+                    continue
+
+                market_symbols = _merge_unique_symbols(market_symbols, candidates)[:limit_per_market]
             symbols.extend(market_symbols[:limit_per_market])
 
         seen = set()
@@ -211,7 +254,25 @@ class MarketUniverseProvider:
                 seen.add(item.symbol)
         return deduped, errors
 
-    def _discover_market_news(self, market: str, limit: int) -> list[DiscoveredSymbol]:
+    def _discover_local_market_news(self, market: str, limit: int) -> list[DiscoveredSymbol]:
+        crawler = RssNewsCrawler()
+        articles: list[Article] = []
+        for url in LOCAL_MARKET_NEWS_URLS.get(market, []):
+            parsed: list[Article] = []
+            try:
+                parsed = crawler._parse_feed(url)
+            except Exception:
+                parsed = []
+            if parsed:
+                articles.extend(parsed)
+                continue
+            try:
+                articles.extend(self._parse_html_news_page(url))
+            except Exception:
+                continue
+        return self._symbols_from_news_articles(market, articles, limit, source="local-news")
+
+    def _discover_google_market_news(self, market: str, limit: int) -> list[DiscoveredSymbol]:
         crawler = RssNewsCrawler()
         articles = []
         for query in MARKET_NEWS_QUERIES.get(market, []):
@@ -219,9 +280,43 @@ class MarketUniverseProvider:
                 articles.extend(crawler._parse_feed(google_news_url(_market_locale_symbol(market), query)))
             except Exception:
                 continue
-        return self._symbols_from_news_articles(market, articles, limit)
+        return self._symbols_from_news_articles(market, articles, limit, source="google-news")
 
-    def _symbols_from_news_articles(self, market: str, articles: list[Article], limit: int) -> list[DiscoveredSymbol]:
+    def _parse_html_news_page(self, url: str, limit: int = 100) -> list[Article]:
+        context = ssl._create_unverified_context() if "moneydj.com" in urlparse(url).netloc else None
+        request = Request(url, headers={"User-Agent": self.user_agent, "Accept": "text/html,*/*"})
+        with urlopen(request, timeout=12, context=context) as response:
+            payload = response.read(350000)
+            charset = response.headers.get_content_charset() or "utf-8"
+        text = payload.decode(charset, errors="replace")
+        articles: list[Article] = []
+        for match in re.finditer(r"<a\b(?P<attrs>[^>]*)>(?P<body>.*?)</a>", text, flags=re.IGNORECASE | re.DOTALL):
+            attrs = match.group("attrs")
+            href = _html_attr(attrs, "href")
+            if not href or href.startswith(("#", "javascript:", "mailto:")):
+                continue
+            title = _clean_html_text(_html_attr(attrs, "title") or match.group("body"))
+            if not _looks_like_news_title(title):
+                continue
+            link = urljoin(url, html_lib.unescape(href))
+            source = urlparse(link).netloc or urlparse(url).netloc
+            articles.append(
+                Article(
+                    source=source,
+                    title=title,
+                    summary="",
+                    link=link,
+                    published_at=datetime.now(timezone.utc),
+                    sentiment=sentiment(title),
+                    credibility=source_credibility(source, link),
+                    relevance=1.0,
+                )
+            )
+            if len(articles) >= limit:
+                break
+        return _dedupe_articles(articles)
+
+    def _symbols_from_news_articles(self, market: str, articles: list[Article], limit: int, source: str = "market-news") -> list[DiscoveredSymbol]:
         index = _news_symbol_index(market)
         now = datetime.now(timezone.utc)
         scores: dict[str, float] = {}
@@ -270,7 +365,7 @@ class MarketUniverseProvider:
                 symbol=symbol,
                 name=symbol_names.get(symbol) or local_company_name(symbol, symbol),
                 market=market,
-                source="market-news",
+                source=source,
                 news_score=round(scores[symbol], 4),
                 news_hits=hits[symbol],
                 evidence=tuple(_dedupe_articles(evidence.get(symbol, []))[:4]),
@@ -354,7 +449,8 @@ class MarketUniverseProvider:
                 output.append(DiscoveredSymbol(symbol=symbol, name=name, market=market, source=f"yahoo-search-fallback:{term}"))
             if len(output) >= limit:
                 break
-        for symbol in CURATED_FALLBACK_SYMBOLS.get(market, []):
+        fallback_symbols = [*CURATED_FALLBACK_SYMBOLS.get(market, []), *DEFAULT_SYMBOLS.get(market, [])]
+        for symbol in fallback_symbols:
             if len(output) >= limit:
                 break
             output.append(DiscoveredSymbol(symbol=symbol, name=local_company_name(symbol, symbol), market=market, source="curated-liquid-fallback"))
@@ -555,22 +651,70 @@ def _symbols_from_code_mentions(text: str, market: str) -> list[str]:
     return []
 
 
+def _html_attr(attrs: str, name: str) -> str:
+    match = re.search(rf"{name}\s*=\s*([\"'])(.*?)\1", attrs, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(2).strip() if match else ""
+
+
+def _clean_html_text(value: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", value or "")
+    for _ in range(2):
+        text = html_lib.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _looks_like_news_title(title: str) -> bool:
+    if not 8 <= len(title) <= 180:
+        return False
+    lower = title.lower()
+    navigation = {
+        "about us",
+        "advertise",
+        "contact us",
+        "home",
+        "latest",
+        "latest news",
+        "login",
+        "market+ (android)",
+        "market+ (iphone)",
+        "mobile site",
+        "privacy policy",
+        "quote service",
+        "register",
+        "search",
+        "skip to main content",
+        "subscribe",
+        "terms of service",
+        "top stories",
+    }
+    if lower in navigation:
+        return False
+    if lower.startswith(("skip to ", "copyright ", "all rights reserved")):
+        return False
+    return bool(re.search(r"[A-Za-z0-9\u3400-\u9fff]", title))
+
+
 def _company_terms_from_article(text: str, market: str) -> list[str]:
-    if market not in {"CN", "HK", "TW"}:
-        return []
     terms = []
-    patterns = [
-        r"([\u4e00-\u9fffA-Za-z0-9]{2,8}?)(?:等\d*股|披露|擬|拟|增持|減持|减持|漲停|涨停|復牌|复牌|業績|业绩|股價|股价|股份|公司)",
-        r"(?:公告|掘金|異動|异动|焦點|焦点)[|丨：:\s]+([\u4e00-\u9fffA-Za-z0-9]{2,12})",
-        r"(?:抢筹|搶籌|狂买|狂買|买入|買入|增持)([\u4e00-\u9fffA-Za-z0-9]{2,8})",
-    ]
-    for pattern in patterns:
-        terms.extend(re.findall(pattern, text))
-    for separator in ["，", ",", "；", ";", "、"]:
-        for part in text.split(separator):
-            match = re.search(r"([\u4e00-\u9fffA-Za-z0-9]{2,12})(?:等\d*股|披露|增持|減持|减持|漲停|涨停)", part)
-            if match:
-                terms.append(match.group(1))
+
+    if market in {"CN", "HK", "TW"}:
+        patterns = [
+            r"([\u4e00-\u9fffA-Za-z0-9]{2,8}?)(?:等\d*股|披露|擬|拟|增持|減持|减持|漲停|涨停|復牌|复牌|業績|业绩|股價|股价|股份|公司)",
+            r"^([\u4e00-\u9fffA-Za-z0-9]{2,8})(?:衝|冲|聚焦|攜手|携手|布局|大漲|大涨|下跌|上漲|上涨|跌|漲|涨|獲|获|推|宣布|看好|營收|营收|法說|法说)",
+            r"(?:公告|掘金|異動|异动|焦點|焦点)[|丨：:\s]+([\u4e00-\u9fffA-Za-z0-9]{2,12})",
+            r"(?:抢筹|搶籌|狂买|狂買|买入|買入|增持)([\u4e00-\u9fffA-Za-z0-9]{2,8})",
+        ]
+        for pattern in patterns:
+            terms.extend(re.findall(pattern, text))
+        for separator in ["，", ",", "；", ";", "、"]:
+            for part in text.split(separator):
+                match = re.search(r"([\u4e00-\u9fffA-Za-z0-9]{2,12})(?:等\d*股|披露|增持|減持|减持|漲停|涨停)", part)
+                if match:
+                    terms.append(match.group(1))
+
+    if market in {"HK", "SG"}:
+        terms.extend(_english_company_terms_from_article(text))
+
     stop_terms = {"公司", "上市公司", "港股", "台股", "股票", "個股", "个股", "業績", "业绩", "公告", "財報", "财报"}
     deduped = []
     seen = set()
@@ -584,6 +728,37 @@ def _company_terms_from_article(text: str, market: str) -> list[str]:
     return deduped[:8]
 
 
+def _english_company_terms_from_article(text: str) -> list[str]:
+    terms = []
+    headline = re.sub(r"\s+", " ", text).strip()
+    prefix = re.split(
+        r"\b(?:repurchases?|buys?|sells?|posts?|reports?|announces?|declares?|launches?|raises?|cuts?|wins?|secures?|jumps?|surges?|falls?|drops?|slides?|plans?|to\s)\b",
+        headline,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    if 2 <= len(prefix) <= 36:
+        terms.append(prefix)
+
+    colon_parts = re.split(r"[:：]", headline, maxsplit=1)
+    if len(colon_parts) == 2 and len(colon_parts[1]) <= 90:
+        terms.extend(part.strip() for part in re.split(r"[,;/]", colon_parts[1])[:4])
+
+    cleaned = []
+    seen = set()
+    stop_terms = {"market", "markets", "stocks", "shares", "company", "companies", "earnings", "results", "latest news"}
+    for term in terms:
+        term = re.sub(r"\([^)]*\)", "", term)
+        term = re.sub(r"[^A-Za-z0-9&'. -]", " ", term)
+        term = re.sub(r"\b(?:HK|SG|Singapore|Hong Kong|shares?|stocks?)\b", " ", term, flags=re.IGNORECASE)
+        term = re.sub(r"\s+", " ", term).strip(" -'\".")
+        key = term.lower()
+        if 2 <= len(term) <= 32 and key not in stop_terms and key not in seen:
+            cleaned.append(term)
+            seen.add(key)
+    return cleaned[:6]
+
+
 def _dedupe_articles(articles: list[Article]) -> list[Article]:
     output = []
     seen = set()
@@ -592,4 +767,14 @@ def _dedupe_articles(articles: list[Article]) -> list[Article]:
         if key not in seen:
             output.append(article)
             seen.add(key)
+    return output
+
+
+def _merge_unique_symbols(existing: list[DiscoveredSymbol], candidates: list[DiscoveredSymbol]) -> list[DiscoveredSymbol]:
+    seen = {item.symbol for item in existing}
+    output = [*existing]
+    for item in candidates:
+        if item.symbol not in seen:
+            output.append(item)
+            seen.add(item.symbol)
     return output

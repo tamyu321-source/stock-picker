@@ -186,7 +186,7 @@ export interface AnalysisResponse {
     requested: number;
     succeeded: number;
     failed: number;
-    discoveryErrors: Array<{ market: string; query: string; error: string }>;
+    discoveryErrors: Array<{ market: string; source?: string; query?: string; error: string }>;
   };
 }
 
@@ -196,6 +196,33 @@ export interface AppConfig {
   defaultSymbols: Record<Market, string[]>;
   scanUniverseSize: Record<Market, number | string>;
 }
+
+export type AnalysisScan = NonNullable<AnalysisResponse['scan']>;
+
+export type AnalysisStreamEvent =
+  | {
+      type: 'started';
+      generatedAt: string;
+      markets: MarketOption[];
+      strategy: Strategy;
+      scan: AnalysisScan;
+    }
+  | {
+      type: 'pick';
+      pick: Pick;
+      rank: number;
+      scan: AnalysisScan;
+    }
+  | {
+      type: 'error';
+      symbol: string;
+      error: string;
+      scan: AnalysisScan;
+    }
+  | AnalysisResponse & {
+      type: 'complete';
+      scan: AnalysisScan;
+    };
 
 const headers = { 'Content-Type': 'application/json' };
 
@@ -218,4 +245,54 @@ export async function analyzeStocks(payload: {
   });
   if (!response.ok) throw new Error('Failed to analyze stocks');
   return response.json();
+}
+
+export async function analyzeStocksStream(
+  payload: {
+    markets: Market[];
+    symbols?: string[];
+    strategyId?: string;
+    customWeights?: StrategyWeights;
+  },
+  onEvent: (event: AnalysisStreamEvent) => void
+): Promise<AnalysisResponse> {
+  const response = await fetch('/api/analyze/stream', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error('Failed to analyze stocks');
+  if (!response.body) {
+    const result = await analyzeStocks(payload);
+    onEvent({ type: 'complete', ...result, scan: result.scan as AnalysisScan });
+    return result;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalResult: AnalysisResponse | null = null;
+
+  const consumeLine = (line: string) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line) as AnalysisStreamEvent;
+    onEvent(event);
+    if (event.type === 'complete') {
+      finalResult = event;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    lines.forEach(consumeLine);
+  }
+
+  buffer += decoder.decode();
+  consumeLine(buffer);
+  if (!finalResult) throw new Error('Analysis stream ended before completion');
+  return finalResult;
 }

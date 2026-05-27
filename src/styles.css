@@ -337,6 +337,10 @@ select {
 }
 
 .primary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   width: 100%;
   border: 0;
   background: #245f46;
@@ -345,6 +349,69 @@ select {
 
 .ghost {
   background: #ffffff;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.76;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgb(255 255 255 / 42%);
+  border-top-color: #fff;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+.analysis-inline {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  color: #3f4f45;
+  font-size: 0.84rem;
+}
+
+.analysis-inline strong {
+  color: #245f46;
+  font-size: 0.78rem;
+}
+
+.analysis-wait {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid #cbded1;
+  border-radius: 8px;
+  background: #f7fbf8;
+}
+
+.analysis-wait strong {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.analysis-wait p {
+  margin: 0;
+  color: #5b6b60;
+  font-size: 0.86rem;
+}
+
+.wait-meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe9e2;
+}
+
+.wait-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #245f46, #5e8f70);
+  transition: width 300ms ease;
 }
 
 .error {
@@ -640,6 +707,12 @@ h3 {
   color: inherit;
   text-decoration-color: #9fb2a5;
   text-underline-offset: 3px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1100px) {

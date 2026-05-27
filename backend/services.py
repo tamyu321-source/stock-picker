@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import json
 from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
@@ -502,7 +503,7 @@ def _action_plan(verdict: str, score: float, metrics: dict[str, float], news: di
     }
 
 
-def analyze(payload: dict, market_provider=None, news_crawler=None, universe_provider=None) -> dict:
+def _analysis_context(payload: dict, market_provider=None, news_crawler=None, universe_provider=None) -> dict:
     markets = set(payload.get("markets") or [market["id"] for market in MARKETS])
     strategy = _strategy_from_payload(payload)
     weights = _normalize_weights(strategy["weights"])
@@ -516,43 +517,85 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
     discovered_symbols, discovery_errors, universe_source = _symbols_from_payload(payload, universe_provider)
     symbols = [item for item in discovered_symbols if infer_market(item.symbol) in markets]
 
-    def process_symbol(item: DiscoveredSymbol) -> dict:
-        snapshot = market_provider.fetch(item.symbol)
-        raw_name = snapshot.name if snapshot.name and snapshot.name.upper() != snapshot.symbol.upper() else item.name
-        company_name = local_company_name(snapshot.symbol, raw_name)
-        articles = _dedupe_articles([*item.evidence, *news_crawler.fetch(snapshot.symbol, company_name)])
-        metrics = _metrics(snapshot, articles)
-        sentiment_delta = _sentiment_boost(articles)
-        score = round(_score_stock(metrics, weights), 1)
-        verdict = _verdict(score, metrics["risk"])
-        reason_codes = _reason_codes(metrics, score, sentiment_delta)
-        signals = _signals_for(articles)
-        news_analysis = _news_analysis(articles)
-        financial_analysis = _financial_analysis(snapshot)
-        return {
-            "symbol": snapshot.symbol,
-            "name": company_name,
-            "market": snapshot.market,
-            "sector": snapshot.sector,
-            "price": snapshot.price,
-            "change": snapshot.change,
-            "currency": snapshot.currency,
-            "score": score,
-            "verdict": verdict,
-            "confidence": round(min(96, 45 + abs(score - 50) * 0.68 + metrics["quality"] * 0.2)),
-            "reasons": _english_reasons(reason_codes),
-            "reasonCodes": reason_codes,
-            "signals": signals,
-            "metrics": metrics,
-            "scoreBreakdown": _score_breakdown(metrics, weights),
-            "decision": _decision_details(verdict, score, metrics, signals),
-            "newsAnalysis": news_analysis,
-            "financialAnalysis": financial_analysis,
-            "actionPlan": _action_plan(verdict, score, metrics, news_analysis, financial_analysis),
-        }
+    return {
+        "strategy": strategy,
+        "weights": weights,
+        "market_provider": market_provider,
+        "news_crawler": news_crawler,
+        "symbols": symbols,
+        "auto_scan": auto_scan,
+        "discovery_errors": discovery_errors,
+        "universe_source": universe_source,
+    }
+
+
+def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weights: dict[str, float]) -> dict:
+    snapshot = market_provider.fetch(item.symbol)
+    raw_name = snapshot.name if snapshot.name and snapshot.name.upper() != snapshot.symbol.upper() else item.name
+    company_name = local_company_name(snapshot.symbol, raw_name)
+    articles = _dedupe_articles([*item.evidence, *news_crawler.fetch(snapshot.symbol, company_name)])
+    metrics = _metrics(snapshot, articles)
+    sentiment_delta = _sentiment_boost(articles)
+    score = round(_score_stock(metrics, weights), 1)
+    verdict = _verdict(score, metrics["risk"])
+    reason_codes = _reason_codes(metrics, score, sentiment_delta)
+    signals = _signals_for(articles)
+    news_analysis = _news_analysis(articles)
+    financial_analysis = _financial_analysis(snapshot)
+    return {
+        "symbol": snapshot.symbol,
+        "name": company_name,
+        "market": snapshot.market,
+        "sector": snapshot.sector,
+        "price": snapshot.price,
+        "change": snapshot.change,
+        "currency": snapshot.currency,
+        "score": score,
+        "verdict": verdict,
+        "confidence": round(min(96, 45 + abs(score - 50) * 0.68 + metrics["quality"] * 0.2)),
+        "reasons": _english_reasons(reason_codes),
+        "reasonCodes": reason_codes,
+        "signals": signals,
+        "metrics": metrics,
+        "scoreBreakdown": _score_breakdown(metrics, weights),
+        "decision": _decision_details(verdict, score, metrics, signals),
+        "newsAnalysis": news_analysis,
+        "financialAnalysis": financial_analysis,
+        "actionPlan": _action_plan(verdict, score, metrics, news_analysis, financial_analysis),
+    }
+
+
+def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
+    return {
+        "auto": context["auto_scan"],
+        "source": context["universe_source"],
+        "requested": len(context["symbols"]),
+        "succeeded": len(picks),
+        "failed": len(errors),
+        "discoveryErrors": context["discovery_errors"],
+    }
+
+
+def _finish_picks(picks: list[dict]) -> None:
+    picks.sort(key=lambda item: item["score"], reverse=True)
+    _relative_verdicts(picks)
+    for pick in picks:
+        pick["reasons"] = _english_reasons(pick["reasonCodes"])
+
+
+def analyze(payload: dict, market_provider=None, news_crawler=None, universe_provider=None) -> dict:
+    context = _analysis_context(payload, market_provider, news_crawler, universe_provider)
+    strategy = context["strategy"]
+    weights = context["weights"]
+    symbols = context["symbols"]
+    market_provider = context["market_provider"]
+    news_crawler = context["news_crawler"]
+
+    picks = []
+    errors = []
 
     with ThreadPoolExecutor(max_workers=min(6, max(1, len(symbols)))) as executor:
-        futures = {executor.submit(process_symbol, item): item.symbol for item in symbols}
+        futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights): item.symbol for item in symbols}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -560,25 +603,62 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
             except Exception as exc:
                 errors.append({"symbol": symbol, "error": str(exc)})
 
-    picks.sort(key=lambda item: item["score"], reverse=True)
-    _relative_verdicts(picks)
-    for pick in picks:
-        pick["reasons"] = _english_reasons(pick["reasonCodes"])
+    _finish_picks(picks)
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "markets": MARKETS,
         "strategy": strategy,
         "picks": picks,
         "errors": errors,
-        "scan": {
-            "auto": auto_scan,
-            "source": universe_source,
-            "requested": len(symbols),
-            "succeeded": len(picks),
-            "failed": len(errors),
-            "discoveryErrors": discovery_errors,
-        },
+        "scan": _scan_state(context, picks, errors),
     }
+
+
+def stream_analyze(payload: dict, market_provider=None, news_crawler=None, universe_provider=None):
+    context = _analysis_context(payload, market_provider, news_crawler, universe_provider)
+    strategy = context["strategy"]
+    weights = context["weights"]
+    symbols = context["symbols"]
+    market_provider = context["market_provider"]
+    news_crawler = context["news_crawler"]
+    generated_at = datetime.now(timezone.utc).isoformat()
+    picks: list[dict] = []
+    errors: list[dict] = []
+
+    def event(event_type: str, **data) -> str:
+        return json.dumps({"type": event_type, **data}, ensure_ascii=False) + "\n"
+
+    yield event(
+        "started",
+        generatedAt=generated_at,
+        markets=MARKETS,
+        strategy=strategy,
+        scan=_scan_state(context, picks, errors),
+    )
+
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(symbols)))) as executor:
+        futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights): item.symbol for item in symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                pick = future.result()
+                picks.append(pick)
+                picks.sort(key=lambda item: item["score"], reverse=True)
+                yield event("pick", pick=pick, rank=picks.index(pick) + 1, scan=_scan_state(context, picks, errors))
+            except Exception as exc:
+                errors.append({"symbol": symbol, "error": str(exc)})
+                yield event("error", symbol=symbol, error=str(exc), scan=_scan_state(context, picks, errors))
+
+    _finish_picks(picks)
+    yield event(
+        "complete",
+        generatedAt=generated_at,
+        markets=MARKETS,
+        strategy=strategy,
+        picks=picks,
+        errors=errors,
+        scan=_scan_state(context, picks, errors),
+    )
 
 
 def _dedupe_articles(articles: list[Article]) -> list[Article]:
