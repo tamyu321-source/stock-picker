@@ -1,3 +1,10 @@
+<p align="right">
+  <a href="./README.md"><img src="https://flagcdn.com/w40/gb.png" alt="United Kingdom flag" width="22"> English</a> |
+  <a href="./README.zh-TW.md"><img src="https://flagcdn.com/w40/tw.png" alt="Taiwan flag" width="22"> 繁體中文</a> |
+  <a href="./README.nan-TW.md"><img src="https://flagcdn.com/w40/tw.png" alt="Taiwan flag" width="22"> 臺語</a> |
+  <a href="./README.zh-CN.md"><img src="https://flagcdn.com/w40/cn.png" alt="China flag" width="22"> 简体中文</a>
+</p>
+
 # Open Stock Picker
 
 Open Stock Picker is a multilingual AI-assisted stock research web app. Its primary workflow is no-code market scanning: choose markets and a strategy, then let the backend discover, score, and rank suitable higher-quality stocks for investment research across China, Hong Kong, Singapore, the United States, and Taiwan.
