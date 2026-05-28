@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from backend.app import create_app
-from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, _parse_eastmoney_datetime, is_recent_article, local_company_name, news_queries, news_query
-from backend.services import _financial_analysis, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
+from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _parse_eastmoney_datetime, fallback_market_data_provider, is_recent_article, local_company_name, news_queries, news_query
+from backend.services import _financial_analysis, _friendly_data_error, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _symbols_from_code_mentions
 
 
@@ -605,13 +605,13 @@ class ApiTestCase(unittest.TestCase):
         verdicts = [pick["verdict"] for pick in payload["picks"]]
         priority = {"buy": 0, "sell": 1, "watch": 2}
 
-        self.assertLess(len(payload["picks"]), payload["scan"]["requested"])
+        self.assertEqual(len(payload["picks"]), payload["scan"]["requested"])
         self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
         self.assertEqual(payload["scan"]["displayed"], len(payload["picks"]))
         self.assertEqual(verdicts, sorted(verdicts, key=priority.get))
-        self.assertEqual(verdicts.count("buy"), 10)
-        self.assertEqual(verdicts.count("sell"), 5)
-        self.assertLessEqual(verdicts.count("watch"), 4)
+        self.assertEqual(verdicts.count("buy"), 12)
+        self.assertEqual(verdicts.count("sell"), 8)
+        self.assertEqual(verdicts.count("watch"), 8)
 
     def test_blank_market_scan_does_not_promote_mediocre_best_names(self):
         class MediocreUniverseProvider:
@@ -669,7 +669,8 @@ class ApiTestCase(unittest.TestCase):
         payload = response.get_json()
 
         self.assertEqual({pick["verdict"] for pick in payload["picks"]}, {"watch"})
-        self.assertLessEqual(len(payload["picks"]), 4)
+        self.assertEqual(len(payload["picks"]), 8)
+        self.assertEqual(payload["scan"]["displayed"], 8)
         self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
 
     def test_response_contains_detailed_100_point_scoring_and_actions(self):
@@ -746,6 +747,110 @@ class ApiTestCase(unittest.TestCase):
         self.assertGreater(len(snapshot.closes), 20)
         self.assertAlmostEqual(snapshot.info["trailingPE"], 18)
 
+    def test_yahoo_http_retries_alternate_hosts_for_market_snapshot(self):
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout=10):
+            url = request.full_url
+            calls.append(url)
+            if "query1.finance.yahoo.com" in url:
+                raise OSError("Remote end closed connection without response")
+            if "quoteSummary" in url:
+                return FakeResponse(
+                    {
+                        "quoteSummary": {
+                            "result": [
+                                {
+                                    "price": {"shortName": "Apple", "currency": "USD", "marketCap": {"raw": 1_000_000}},
+                                    "summaryProfile": {"sector": "Technology"},
+                                    "summaryDetail": {"trailingPE": {"raw": 30}, "beta": {"raw": 1.2}},
+                                }
+                            ]
+                        }
+                    }
+                )
+            return FakeResponse(
+                {
+                    "chart": {
+                        "result": [
+                            {
+                                "meta": {"regularMarketPrice": 101, "currency": "USD", "regularMarketVolume": 123},
+                                "indicators": {"quote": [{"close": [99, 100, 101]}]},
+                            }
+                        ],
+                        "error": None,
+                    }
+                }
+            )
+
+        with patch("backend.providers.urlopen", fake_urlopen):
+            snapshot = YahooHttpMarketDataProvider().fetch("AAPL")
+
+        self.assertTrue(any("query1.finance.yahoo.com" in url for url in calls))
+        self.assertTrue(any("query2.finance.yahoo.com" in url for url in calls))
+        self.assertEqual(snapshot.symbol, "AAPL")
+        self.assertEqual(snapshot.name, "Apple")
+        self.assertEqual(snapshot.price, 101)
+        self.assertEqual(snapshot.currency, "USD")
+        self.assertAlmostEqual(snapshot.info["trailingPE"], 30)
+
+    def test_taiwan_exchange_provider_builds_snapshot_from_twse_rows(self):
+        class FakeTaiwanProvider(TaiwanExchangeMarketDataProvider):
+            def _json(self, url, attempts=2, timeout=4):
+                return {
+                    "stat": "OK",
+                    "title": "115\u5e7405\u6708 6239 \u529b\u6210             \u5404\u65e5\u6210\u4ea4\u8cc7\u8a0a",
+                    "data": [
+                        ["115/05/25", "1,000", "100,000", "99.00", "101.00", "98.00", "100.00", "+1.00", "20", ""],
+                        ["115/05/26", "2,000", "204,000", "101.00", "104.00", "100.00", "102.00", "+2.00", "30", ""],
+                        ["115/05/27", "3,000", "315,000", "103.00", "106.00", "101.00", "105.00", "+3.00", "40", ""],
+                    ],
+                }
+
+        snapshot = FakeTaiwanProvider().fetch("6239.TW")
+
+        self.assertEqual(snapshot.symbol, "6239.TW")
+        self.assertEqual(snapshot.name, "\u529b\u6210")
+        self.assertEqual(snapshot.market, "TW")
+        self.assertEqual(snapshot.currency, "TWD")
+        self.assertEqual(snapshot.price, 105)
+        self.assertEqual(snapshot.closes, [100, 102, 105])
+        self.assertEqual(snapshot.info["regularMarketVolume"], 3000)
+        self.assertEqual(snapshot.info["turnoverValue"], 315000)
+
+    def test_taiwan_symbol_falls_back_to_exchange_when_yahoo_fails(self):
+        fallback_snapshot = MarketSnapshot(
+            symbol="6239.TW",
+            name="\u529b\u6210",
+            market="TW",
+            sector="Semiconductors",
+            price=105,
+            change=2.94,
+            currency="TWD",
+            closes=[100, 102, 105],
+            info={"shortName": "\u529b\u6210"},
+        )
+
+        with patch("backend.providers.YahooHttpMarketDataProvider.fetch", side_effect=OSError("Remote end closed connection")):
+            with patch("backend.providers.TaiwanExchangeMarketDataProvider.fetch", return_value=fallback_snapshot):
+                snapshot = fallback_market_data_provider("6239.TW")
+
+        self.assertEqual(snapshot.name, "\u529b\u6210")
+        self.assertEqual(snapshot.price, 105)
+
     def test_raw_provider_errors_are_hidden_from_scan_response(self):
         class BrokenMarketProvider:
             def fetch(self, symbol):
@@ -760,6 +865,11 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("行情资料暂时不可用", payload["errors"][0]["error"])
         self.assertNotIn("urlopen", payload["errors"][0]["error"])
         self.assertNotIn("No such file", payload["errors"][0]["error"])
+
+    def test_incomplete_read_provider_errors_are_hidden(self):
+        message = _friendly_data_error("002384.SZ", OSError("IncompleteRead(0 bytes read)"))
+        self.assertIn("行情资料暂时不可用", message)
+        self.assertNotIn("IncompleteRead", message)
 
 
 if __name__ == "__main__":

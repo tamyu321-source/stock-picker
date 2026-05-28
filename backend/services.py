@@ -13,10 +13,10 @@ from backend.universe import DiscoveredSymbol, MarketUniverseProvider
 
 FACTOR_ORDER = ["sentiment", "momentum", "value", "risk", "quality"]
 AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET = 30
-AUTO_SCAN_RESULT_LIMIT = 18
-AUTO_SCAN_BUY_LIMIT = 10
-AUTO_SCAN_SELL_LIMIT = 5
-AUTO_SCAN_WATCH_LIMIT = 4
+AUTO_SCAN_RESULT_LIMIT = 36
+AUTO_SCAN_BUY_LIMIT = 12
+AUTO_SCAN_SELL_LIMIT = 8
+AUTO_SCAN_WATCH_LIMIT = 16
 
 
 def get_config() -> dict:
@@ -441,8 +441,14 @@ def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
     if remaining > 0:
         selected.extend(watch_candidates[: min(AUTO_SCAN_WATCH_LIMIT, remaining)])
 
+    selected_symbols = {pick["symbol"] for pick in selected}
+    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+    if remaining > 0:
+        supplemental = [pick for pick in sorted(picks, key=_display_priority_key) if pick["symbol"] not in selected_symbols]
+        selected.extend(supplemental[:remaining])
+
     if not selected:
-        selected = sorted(picks, key=_investment_priority, reverse=True)[: min(6, len(picks))]
+        selected = sorted(picks, key=_investment_priority, reverse=True)[: min(AUTO_SCAN_RESULT_LIMIT, len(picks))]
 
     seen = set()
     unique_selected = []
@@ -998,6 +1004,11 @@ def _friendly_data_error(symbol: str, exc: Exception) -> str:
         for marker in [
             "urlopen error",
             "remote end closed connection",
+            "incompleteread",
+            "incomplete read",
+            "0 bytes read",
+            "connection aborted",
+            "connection reset",
             "no such file or directory",
             "timed out",
             "temporarily unavailable",

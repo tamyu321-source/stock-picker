@@ -6,6 +6,7 @@ from email.utils import parsedate_to_datetime
 import html
 import json
 import re
+import ssl
 import time
 from math import sqrt
 from typing import Any
@@ -244,6 +245,7 @@ LOCAL_COMPANY_NAMES = {
     "2303.TW": "聯電",
     "3711.TW": "日月光投控",
     "2382.TW": "廣達",
+    "6239.TW": "力成",
     "2891.TW": "中信金",
     "2886.TW": "兆豐金",
     "2344.TW": "華邦電",
@@ -306,6 +308,7 @@ COMPANY_SEARCH_ALIASES = {
     "2303.TW": ["聯電", "联电", "UMC"],
     "3711.TW": ["日月光投控", "ASE"],
     "2382.TW": ["廣達", "广达", "Quanta"],
+    "6239.TW": ["力成", "Powertech Technology", "PTI"],
     "2891.TW": ["中信金", "CTBC"],
     "2886.TW": ["兆豐金", "Mega Financial"],
     "D05.SI": ["DBS", "DBS Group"],
@@ -390,6 +393,7 @@ KNOWN_SECTORS = {
     "2303.TW": "Semiconductors",
     "3711.TW": "Electronics Manufacturing",
     "2382.TW": "Computer Hardware",
+    "6239.TW": "Semiconductors",
     "2891.TW": "Financial Services",
     "2886.TW": "Financial Services",
 }
@@ -482,7 +486,12 @@ def fallback_market_data_provider(symbol: str) -> MarketSnapshot:
             return EastmoneyCnMarketDataProvider().fetch(symbol)
         except Exception:
             pass
-    return YahooHttpMarketDataProvider().fetch(symbol)
+    try:
+        return YahooHttpMarketDataProvider().fetch(symbol)
+    except Exception:
+        if infer_market(symbol) == "TW":
+            return TaiwanExchangeMarketDataProvider().fetch(symbol)
+        raise
 
 
 class EastmoneyCnMarketDataProvider:
@@ -529,7 +538,7 @@ class EastmoneyCnMarketDataProvider:
             info=info,
         )
 
-    def _json(self, url: str) -> dict:
+    def _json(self, url: str) -> dict | list:
         last_error = None
         for attempt in range(3):
             try:
@@ -556,10 +565,11 @@ class EastmoneyCnMarketDataProvider:
 
 
 class YahooHttpMarketDataProvider:
-    user_agent = "OpenStockPicker/0.1 (+https://github.com/open-stock-picker)"
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36"
+    hosts = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
 
     def fetch(self, symbol: str) -> MarketSnapshot:
-        chart = self._json(f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}?range=6mo&interval=1d")
+        chart = self._json(self._chart_urls(symbol))
         result = chart.get("chart", {}).get("result", [])
         if not result:
             error = chart.get("chart", {}).get("error") or {}
@@ -579,10 +589,17 @@ class YahooHttpMarketDataProvider:
         change = ((price - previous) / previous * 100) if previous else 0
         price_info = info.get("price", {})
         profile = info.get("summaryProfile", {})
+        name = (
+            _raw(price_info.get("shortName"))
+            or _raw(price_info.get("longName"))
+            or meta.get("shortName")
+            or meta.get("longName")
+            or symbol.upper()
+        )
 
         return MarketSnapshot(
             symbol=symbol.upper(),
-            name=_raw(price_info.get("shortName")) or _raw(price_info.get("longName")) or symbol.upper(),
+            name=name,
             market=infer_market(symbol),
             sector=_raw(profile.get("sector")) or _raw(profile.get("industry")) or fallback_sector(symbol),
             price=round(price, 3),
@@ -592,16 +609,46 @@ class YahooHttpMarketDataProvider:
             info=fundamentals,
         )
 
-    def _json(self, url: str) -> dict:
-        request = Request(url, headers={"User-Agent": self.user_agent, "Accept": "application/json"})
-        with urlopen(request, timeout=10) as response:
-            return json.loads(response.read().decode("utf-8"))
+    def _chart_urls(self, symbol: str) -> list[str]:
+        return [
+            f"https://{host}/v8/finance/chart/{quote(symbol)}?range=6mo&interval=1d&events=history&includeAdjustedClose=true"
+            for host in self.hosts
+        ]
+
+    def _quote_summary_urls(self, symbol: str, modules: str) -> list[str]:
+        return [
+            f"https://{host}/v10/finance/quoteSummary/{quote(symbol)}?modules={modules}"
+            for host in self.hosts
+        ]
+
+    def _json(self, urls: str | list[str], attempts: int = 3, timeout: int = 6) -> dict:
+        if isinstance(urls, str):
+            urls = [urls]
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            for url in urls:
+                try:
+                    request = Request(
+                        url,
+                        headers={
+                            "User-Agent": self.user_agent,
+                            "Accept": "application/json,text/plain,*/*",
+                            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+                            "Cache-Control": "no-cache",
+                            "Connection": "close",
+                        },
+                    )
+                    with urlopen(request, timeout=timeout) as response:
+                        return json.loads(response.read().decode("utf-8-sig"))
+                except Exception as exc:
+                    last_error = exc
+            time.sleep(0.25 * (attempt + 1))
+        raise last_error or ValueError("Yahoo Finance request failed.")
 
     def _quote_summary(self, symbol: str) -> dict:
         modules = "price,summaryProfile,defaultKeyStatistics,financialData,summaryDetail,calendarEvents,earningsTrend"
-        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{quote(symbol)}?modules={modules}"
         try:
-            payload = self._json(url)
+            payload = self._json(self._quote_summary_urls(symbol, modules), attempts=1, timeout=3)
             results = payload.get("quoteSummary", {}).get("result") or []
             return results[0] if results else {}
         except Exception:
@@ -637,6 +684,105 @@ class YahooHttpMarketDataProvider:
             "regularMarketVolume": meta.get("regularMarketVolume"),
             "earningsDate": _raw(info.get("calendarEvents", {}).get("earnings", {}).get("earningsDate")),
         }
+
+
+class TaiwanExchangeMarketDataProvider:
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36"
+
+    def fetch(self, symbol: str) -> MarketSnapshot:
+        if infer_market(symbol) != "TW":
+            raise ValueError(f"Taiwan exchange fallback only supports Taiwan stocks, got {symbol}.")
+
+        code = symbol.upper().split(".")[0]
+        daily_row = self._daily_all_row(code)
+        rows = [daily_row] if daily_row else self._history_rows(code)
+        closes = [_market_number(row[6]) for row in rows if len(row) > 6 and _market_number(row[6]) > 0]
+        if not closes:
+            raise ValueError(f"No Taiwan exchange closing prices returned for {symbol}.")
+
+        latest = rows[-1]
+        price = closes[-1]
+        previous = closes[-2] if len(closes) > 1 else price
+        change = ((price - previous) / previous * 100) if previous else 0
+        latest_change = _market_number(latest[7]) if len(latest) > 7 else None
+        if latest_change is not None and previous:
+            change = latest_change / previous * 100
+        name = local_company_name(symbol.upper(), symbol.upper())
+        volume = _market_number(latest[1]) if len(latest) > 1 else None
+        turnover = _market_number(latest[2]) if len(latest) > 2 else None
+
+        return MarketSnapshot(
+            symbol=symbol.upper(),
+            name=name,
+            market="TW",
+            sector=fallback_sector(symbol),
+            price=round(price, 3),
+            change=round(change, 2),
+            currency="TWD",
+            closes=closes[-130:],
+            info={
+                "shortName": name,
+                "fiftyTwoWeekHigh": max(closes),
+                "fiftyTwoWeekLow": min(closes),
+                "regularMarketVolume": volume,
+                "turnoverValue": turnover,
+            },
+        )
+
+    def _history_rows(self, code: str) -> list[list[str]]:
+        rows: list[list[str]] = []
+        for month in _recent_month_starts(1):
+            try:
+                payload = self._json(
+                    f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={month:%Y%m%d}&stockNo={quote(code)}&response=json",
+                    attempts=1,
+                    timeout=3,
+                )
+                if payload.get("stat") == "OK":
+                    rows.extend(payload.get("data") or [])
+            except Exception:
+                continue
+        return rows
+
+    def _daily_all_row(self, code: str) -> list[str]:
+        rows = self._json("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", attempts=2, timeout=4)
+        if not isinstance(rows, list):
+            return []
+        for row in rows:
+            if str(row.get("Code") or "").strip() == code:
+                return [
+                    str(row.get("Date") or ""),
+                    str(row.get("TradeVolume") or ""),
+                    str(row.get("TradeValue") or ""),
+                    str(row.get("OpeningPrice") or ""),
+                    str(row.get("HighestPrice") or ""),
+                    str(row.get("LowestPrice") or ""),
+                    str(row.get("ClosingPrice") or ""),
+                    str(row.get("Change") or ""),
+                    str(row.get("Transaction") or ""),
+                    "",
+                ]
+        return []
+
+    def _json(self, url: str, attempts: int = 2, timeout: int = 4) -> dict | list:
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                request = Request(
+                    url,
+                    headers={
+                        "User-Agent": self.user_agent,
+                        "Accept": "application/json,text/plain,*/*",
+                        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+                        "Connection": "close",
+                    },
+                )
+                with urlopen(request, timeout=timeout, context=ssl._create_unverified_context()) as response:
+                    return json.loads(response.read().decode("utf-8-sig"))
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.25 * (attempt + 1))
+        raise last_error or ValueError("Taiwan exchange request failed.")
 
 
 class RssNewsCrawler:
@@ -942,6 +1088,28 @@ def _eastmoney_number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _market_number(value: Any) -> float:
+    try:
+        if value in (None, "", "-", "--"):
+            return 0.0
+        return float(str(value).replace(",", "").replace("+", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _recent_month_starts(count: int) -> list[datetime]:
+    now = datetime.now()
+    months = []
+    for offset in range(count):
+        month = now.month - offset
+        year = now.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        months.append(datetime(year, month, 1))
+    return months
 
 
 def parse_datetime(value: str | None) -> datetime | None:
