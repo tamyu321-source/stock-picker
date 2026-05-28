@@ -126,12 +126,18 @@ export interface NewsEvent {
   source: string;
   ageHours: number;
   weight: number;
+  strength: number;
+  score: number;
+  evidence: string;
 }
 
 export interface NewsAnalysis {
   summary: DecisionPoint;
   positiveCount: number;
   negativeCount: number;
+  positiveScore: number;
+  negativeScore: number;
+  netScore: number;
   events: NewsEvent[];
 }
 

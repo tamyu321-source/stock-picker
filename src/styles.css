@@ -847,6 +847,11 @@ h3 {
   color: #667268;
 }
 
+.event-score {
+  color: #17211b;
+  font-weight: 900;
+}
+
 .financial-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -875,11 +880,21 @@ h3 {
   font-size: 0.98rem;
 }
 
-.signal-panel h2 {
+.signal-heading {
   flex: 0 0 auto;
-  margin: 0;
   padding: 16px 18px 12px;
   border-bottom: 1px solid #edf1ec;
+}
+
+.signal-heading h2 {
+  margin: 0 0 5px;
+}
+
+.signal-heading span {
+  display: block;
+  color: #667268;
+  font-size: 0.78rem;
+  line-height: 1.35;
 }
 
 .signal-panel {
@@ -901,6 +916,12 @@ h3 {
 
 .signal-item:first-of-type {
   border-top: 0;
+}
+
+.signal-empty {
+  padding: 14px 0;
+  color: #667268;
+  font-size: 0.84rem;
 }
 
 .signal-item p {

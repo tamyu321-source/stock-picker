@@ -20,6 +20,8 @@ const scanInfo = ref<{ auto: boolean; requested: number; succeeded: number; fail
 const loadingStartedAt = ref(0);
 const loadingElapsedSeconds = ref(0);
 const loadingStepIndex = ref(0);
+const scanRunId = ref(0);
+const signalRefreshStartedAt = ref('');
 let loadingTimer: number | undefined;
 let loadingRunId = 0;
 
@@ -80,6 +82,11 @@ const strategies = computed<Strategy[]>(() => config.value?.strategies ?? []);
 const selectedStrategy = computed(() => strategies.value.find((item) => item.id === selectedStrategyId.value));
 const marketOptions = computed(() => config.value?.markets ?? []);
 const flattenedSignals = computed(() => picks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
+const signalStatusLabel = computed(() => {
+  if (loading.value) return signalRefreshStartedAt.value ? `${t.value.signalRefreshing} · ${signalRefreshStartedAt.value}` : t.value.signalRefreshing;
+  if (generatedAt.value) return `${t.value.signalUpdated} · ${generatedAt.value}`;
+  return t.value.signalEmpty;
+});
 const symbols = computed(() => symbolText.value.split(/[\s,;]+/).map((symbol) => symbol.trim()).filter(Boolean));
 const isAutoScan = computed(() => symbols.value.length === 0);
 const scanLabel = computed(() => {
@@ -286,8 +293,16 @@ function reasonLabels(pick: Pick) {
   return pick.reasonCodes?.length ? pick.reasonCodes.map(reasonLabel) : pick.reasons;
 }
 
+function signedScore(value: unknown) {
+  const numeric = Number(value ?? 0);
+  return `${numeric > 0 ? '+' : ''}${numeric.toFixed(1)}`;
+}
+
 function nanDecisionPointLabel(point: DecisionPoint, score: string, count: number, hours: number) {
   const p = point.params;
+  const positiveScore = Number(p.positiveScore ?? 0).toFixed(1);
+  const negativeScore = Number(p.negativeScore ?? 0).toFixed(1);
+  const netScore = signedScore(p.netScore);
   switch (point.key) {
     case 'buySummary':
       return `值得買入：總分 ${p.score}/100，這个 ㄐㄧㄚˋ 方案相對有力。`;
@@ -296,9 +311,9 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'sellSummary':
       return `退出風險：總分 ${p.score}/100，目前風險報酬較弱。`;
     case 'newsSupport':
-      return `新聞情緒 ${score}/100，來自 ${count} 則近期訊號，對判斷有支撐。`;
+      return `新聞正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}，對判斷有支撐。`;
     case 'newsPressure':
-      return `新聞情緒偏弱，只有 ${score}/100，已有 ${count} 則相關訊號。`;
+      return `新聞負面強度 ${negativeScore}/100，高過正面 ${positiveScore}/100，淨分 ${netScore}，已有 ${count} 則相關訊號。`;
     case 'insufficientNews':
       return '近期新聞證據無夠 ㄅㄨㄝ˫ ㄍㄠˋ，信心度應該收斂。';
     case 'freshNews':
@@ -326,13 +341,13 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'weakQuality':
       return `基本面品質偏弱，只有 ${score}/100。`;
     case 'watchNewsFlow':
-      return `新聞情緒 ${score}/100 暫屬中性；繼續看 ㄎㄨㄚˋ 後續新聞轉正或轉負。`;
+      return `新聞正面 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}；繼續看 ㄎㄨㄚˋ 後續新聞轉正或轉負。`;
     case 'newsBullishSummary':
-      return `新聞淨偏多：${p.positive} 個正面事件、${p.negative} 個負面事件，來自 ${p.total} 則近期新聞。`;
+      return `新聞淨偏多：正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}，來自 ${p.total} 則近期新聞。`;
     case 'newsBearishSummary':
-      return `新聞淨偏空：${p.negative} 個負面事件多於 ${p.positive} 個正面事件。`;
+      return `新聞淨偏空：負面強度 ${negativeScore}/100、正面 ${positiveScore}/100、淨分 ${netScore}。`;
     case 'newsMixedSummary':
-      return `新聞多空混合：${p.positive} 個正面事件、${p.negative} 個負面事件。`;
+      return `新聞多空混合：正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}。`;
     case 'newsNoEvidence':
       return '無找到可用的近期新聞證據。';
     case 'financialStrongSummary':
@@ -417,6 +432,9 @@ function pointLabel(point: DecisionPoint) {
   const score = p.score !== undefined ? Number(p.score).toFixed(1) : '';
   const count = Number(p.count ?? 0);
   const hours = Number(p.hours ?? 0);
+  const positiveScore = Number(p.positiveScore ?? 0).toFixed(1);
+  const negativeScore = Number(p.negativeScore ?? 0).toFixed(1);
+  const netScore = signedScore(p.netScore);
   if (locale.value === 'nan-TW') {
     return nanDecisionPointLabel(point, score, count, hours);
   }
@@ -438,14 +456,14 @@ function pointLabel(point: DecisionPoint) {
       'zh-TW': `需要拋出：總分 ${p.score}/100，目前策略下風險報酬偏弱。`
     },
     newsSupport: {
-      en: `News sentiment is supportive at ${score}/100 across ${count} recent signals.`,
-      'zh-CN': `新闻情绪 ${score}/100，来自 ${count} 条近期信号，对投资判断有支撑。`,
-      'zh-TW': `新聞情緒 ${score}/100，來自 ${count} 則近期訊號，對投資判斷有支撐。`
+      en: `News is supportive: positive strength ${positiveScore}/100 vs negative ${negativeScore}/100, net ${netScore}.`,
+      'zh-CN': `新闻正面强度 ${positiveScore}/100、负面 ${negativeScore}/100、净分 ${netScore}，对投资判断有支撑。`,
+      'zh-TW': `新聞正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}，對投資判斷有支撐。`
     },
     newsPressure: {
-      en: `News sentiment is weak at ${score}/100 across ${count} recent signals.`,
-      'zh-CN': `新闻情绪偏弱，仅 ${score}/100，且已有 ${count} 条相关信号。`,
-      'zh-TW': `新聞情緒偏弱，僅 ${score}/100，且已有 ${count} 則相關訊號。`
+      en: `News is pressuring the call: negative strength ${negativeScore}/100 vs positive ${positiveScore}/100, net ${netScore}.`,
+      'zh-CN': `新闻负面强度 ${negativeScore}/100，高于正面 ${positiveScore}/100，净分 ${netScore}，且已有 ${count} 条相关信号。`,
+      'zh-TW': `新聞負面強度 ${negativeScore}/100，高於正面 ${positiveScore}/100，淨分 ${netScore}，且已有 ${count} 則相關訊號。`
     },
     insufficientNews: {
       en: 'There is not enough recent news evidence, so confidence should be capped.',
@@ -513,24 +531,24 @@ function pointLabel(point: DecisionPoint) {
       'zh-TW': `基本面品質偏弱，僅 ${score}/100。`
     },
     watchNewsFlow: {
-      en: `News sentiment is neutral at ${score}/100; watch whether new articles turn positive or negative.`,
-      'zh-CN': `新闻情绪 ${score}/100，暂属中性；重点看后续新闻转正还是转负。`,
-      'zh-TW': `新聞情緒 ${score}/100，暫屬中性；重點看後續新聞轉正還是轉負。`
+      en: `News is still mixed: positive ${positiveScore}/100, negative ${negativeScore}/100, net ${netScore}.`,
+      'zh-CN': `新闻多空仍混合：正面 ${positiveScore}/100、负面 ${negativeScore}/100、净分 ${netScore}；重点看后续新闻转正还是转负。`,
+      'zh-TW': `新聞多空仍混合：正面 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}；重點看後續新聞轉正還是轉負。`
     },
     newsBullishSummary: {
-      en: `News is net positive: ${p.positive} positive vs ${p.negative} negative events from ${p.total} recent articles.`,
-      'zh-CN': `新闻净偏多：${p.positive} 个正面事件、${p.negative} 个负面事件，来自 ${p.total} 条近期新闻。`,
-      'zh-TW': `新聞淨偏多：${p.positive} 個正面事件、${p.negative} 個負面事件，來自 ${p.total} 則近期新聞。`
+      en: `News is net positive: positive strength ${positiveScore}/100 vs negative ${negativeScore}/100, net ${netScore}, from ${p.total} recent articles.`,
+      'zh-CN': `新闻净偏多：正面强度 ${positiveScore}/100、负面 ${negativeScore}/100、净分 ${netScore}，来自 ${p.total} 条近期新闻。`,
+      'zh-TW': `新聞淨偏多：正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}，來自 ${p.total} 則近期新聞。`
     },
     newsBearishSummary: {
-      en: `News is net negative: ${p.negative} negative events outweigh ${p.positive} positive events.`,
-      'zh-CN': `新闻净偏空：${p.negative} 个负面事件多于 ${p.positive} 个正面事件。`,
-      'zh-TW': `新聞淨偏空：${p.negative} 個負面事件多於 ${p.positive} 個正面事件。`
+      en: `News is net negative: negative strength ${negativeScore}/100 vs positive ${positiveScore}/100, net ${netScore}.`,
+      'zh-CN': `新闻净偏空：负面强度 ${negativeScore}/100、高于正面 ${positiveScore}/100，净分 ${netScore}。`,
+      'zh-TW': `新聞淨偏空：負面強度 ${negativeScore}/100、高於正面 ${positiveScore}/100，淨分 ${netScore}。`
     },
     newsMixedSummary: {
-      en: `News is mixed, with ${p.positive} positive and ${p.negative} negative events.`,
-      'zh-CN': `新闻多空混合：${p.positive} 个正面事件、${p.negative} 个负面事件。`,
-      'zh-TW': `新聞多空混合：${p.positive} 個正面事件、${p.negative} 個負面事件。`
+      en: `News is mixed: positive strength ${positiveScore}/100, negative ${negativeScore}/100, net ${netScore}.`,
+      'zh-CN': `新闻多空混合：正面强度 ${positiveScore}/100、负面 ${negativeScore}/100、净分 ${netScore}。`,
+      'zh-TW': `新聞多空混合：正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}。`
     },
     newsNoEvidence: {
       en: 'No usable recent news evidence was found.',
@@ -737,6 +755,8 @@ function eventLabel(event: NewsEvent) {
       demandNegative: '需求 / 訂單轉弱',
       fundFlowPositive: '資金流入 / 機構買入',
       fundFlowNegative: '資金流出 / 機構賣出',
+      marketMomentumPositive: '市場動能正面事件',
+      marketMomentumNegative: '市場動能負面事件',
       generalPositiveNews: '整體新聞語氣偏好 ㄏㄛˋ',
       generalNegativeNews: '整體新聞語氣偏壞 ㄆㄞˋ'
     };
@@ -757,6 +777,8 @@ function eventLabel(event: NewsEvent) {
     demandNegative: { en: 'Demand/order weakness', 'zh-CN': '需求/订单转弱', 'zh-TW': '需求/訂單轉弱' },
     fundFlowPositive: { en: 'Capital inflow / institutional buying', 'zh-CN': '资金流入/机构买入', 'zh-TW': '資金流入/機構買入' },
     fundFlowNegative: { en: 'Capital outflow / institutional selling', 'zh-CN': '资金流出/机构卖出', 'zh-TW': '資金流出/機構賣出' },
+    marketMomentumPositive: { en: 'Positive market momentum event', 'zh-CN': '市场动能正面事件', 'zh-TW': '市場動能正面事件' },
+    marketMomentumNegative: { en: 'Negative market momentum event', 'zh-CN': '市场动能负面事件', 'zh-TW': '市場動能負面事件' },
     generalPositiveNews: { en: 'Broadly positive news tone', 'zh-CN': '整体新闻语气偏正面', 'zh-TW': '整體新聞語氣偏正面' },
     generalNegativeNews: { en: 'Broadly negative news tone', 'zh-CN': '整体新闻语气偏负面', 'zh-TW': '整體新聞語氣偏負面' }
   };
@@ -872,6 +894,8 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
 
 async function runAnalysis() {
   if (loading.value) return;
+  scanRunId.value += 1;
+  signalRefreshStartedAt.value = new Date().toLocaleString();
   startLoadingFeedback();
   error.value = '';
   scanInfo.value = null;
@@ -1127,7 +1151,11 @@ onUnmounted(stopLoadingFeedback);
                 <div v-for="event in pick.newsAnalysis.events" :key="event.title + event.key" class="event-line" :class="event.impact">
                   <span>{{ eventLabel(event) }}</span>
                   <p>{{ event.title }}</p>
-                  <small>{{ event.source }} · {{ event.ageHours }}{{ t.hoursAgo }}</small>
+                  <small>
+                    <b class="event-score">{{ signedScore(event.score) }}</b>
+                    · {{ event.source }} · {{ event.ageHours }}{{ t.hoursAgo }}
+                    <template v-if="event.evidence"> · {{ event.evidence }}</template>
+                  </small>
                 </div>
               </div>
             </div>
@@ -1167,9 +1195,18 @@ onUnmounted(stopLoadingFeedback);
       </section>
 
       <aside class="signal-panel">
-        <h2>{{ t.signalFeed }}</h2>
+        <div class="signal-heading">
+          <h2>{{ t.signalFeed }}</h2>
+          <span>{{ signalStatusLabel }}</span>
+        </div>
         <div class="signal-scroll">
-          <article v-for="signal in flattenedSignals" :key="`${signal.symbol}-${signal.title}`" class="signal-item">
+          <article v-if="loading && !flattenedSignals.length" class="signal-empty">
+            <span>{{ t.signalRefreshing }}</span>
+          </article>
+          <article v-else-if="!flattenedSignals.length" class="signal-empty">
+            <span>{{ t.signalEmpty }}</span>
+          </article>
+          <article v-for="signal in flattenedSignals" :key="`${scanRunId}-${signal.symbol}-${signal.title}`" class="signal-item">
             <div>
               <strong>{{ signal.symbol }}</strong>
               <p><a :href="signal.link" target="_blank" rel="noreferrer">{{ signal.title }}</a></p>

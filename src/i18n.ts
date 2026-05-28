@@ -20,6 +20,9 @@ type MessageKey =
   | 'emptyTitle'
   | 'emptyHint'
   | 'signalFeed'
+  | 'signalRefreshing'
+  | 'signalUpdated'
+  | 'signalEmpty'
   | 'score'
   | 'confidence'
   | 'buy'
@@ -74,6 +77,9 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     emptyTitle: 'No scan has run yet',
     emptyHint: 'Review the saved options on the left, then start a scan when you are ready.',
     signalFeed: 'Crawled signal feed',
+    signalRefreshing: 'Refreshing this scan\'s news crawl',
+    signalUpdated: 'News refreshed',
+    signalEmpty: 'No current crawl signals yet',
     score: 'Score',
     confidence: 'Confidence',
     buy: 'Worth buying',
@@ -127,6 +133,9 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     emptyTitle: '还没有开始扫描',
     emptyHint: '左侧会恢复上次保存的选项，确认后再手动点击扫描即可。',
     signalFeed: '爬文信号',
+    signalRefreshing: '正在重新爬取本轮新闻',
+    signalUpdated: '本轮新闻已更新',
+    signalEmpty: '本轮还没有新闻信号',
     score: '评分',
     confidence: '置信度',
     buy: '值得投资',
@@ -180,6 +189,9 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     emptyTitle: '還沒有開始掃描',
     emptyHint: '左側會恢復上次保存的選項，確認後再手動點擊掃描即可。',
     signalFeed: '爬文訊號',
+    signalRefreshing: '正在重新爬取本輪新聞',
+    signalUpdated: '本輪新聞已更新',
+    signalEmpty: '本輪還沒有新聞訊號',
     score: '評分',
     confidence: '信心度',
     buy: '值得投資',
@@ -233,6 +245,9 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     emptyTitle: '猶未 ㄧㄚˋ ㄅㄨㄝ˫ 開始掃描',
     emptyHint: '看一下左側選項，確認後就開始掃描 ㄙㄠˋ。',
     signalFeed: '爬文訊號',
+    signalRefreshing: '重新爬本輪新聞中',
+    signalUpdated: '本輪新聞已更新',
+    signalEmpty: '本輪猶未有新聞訊號',
     score: '分數',
     confidence: '信心度',
     buy: '會使 ㄟ˫ ㄙㄞˋ 買',

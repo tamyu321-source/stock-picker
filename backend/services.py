@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import json
-from math import log10
+from math import exp, log10
 from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
@@ -84,6 +84,11 @@ def _signals_for(articles: list[Article]) -> list[dict]:
     ]
 
 
+def _article_weight(article: Article, now: datetime | None = None) -> float:
+    now = now or datetime.now(timezone.utc)
+    return article.credibility * article.relevance * max(0.2, 1 - _age_hours(article.published_at, now) / 168)
+
+
 def _sentiment_score(articles: list[Article]) -> float:
     if not articles:
         return 50
@@ -91,26 +96,16 @@ def _sentiment_score(articles: list[Article]) -> float:
     weighted_values = []
     weights = []
     for article in articles:
-        weight = article.credibility * article.relevance * max(0.2, 1 - _age_hours(article.published_at, now) / 168)
+        weight = _article_weight(article, now)
         weighted_values.append(article.sentiment * weight)
         weights.append(weight)
     lexical_score = sum(weighted_values) / (sum(weights) or 1)
-    return _clamp_score(50 + lexical_score * 45 + _news_event_adjustment(articles))
+    return _clamp_score(50 + lexical_score * 32 + _news_event_adjustment(articles))
 
 
 def _news_event_adjustment(articles: list[Article]) -> float:
-    now = datetime.now(timezone.utc)
-    event_weight = 0.0
-    event_balance = 0.0
-    for article in articles:
-        article_weight = article.credibility * article.relevance * max(0.2, 1 - _age_hours(article.published_at, now) / 168)
-        for event in _news_events_for(article):
-            polarity = 1 if event["impact"] == "positive" else -1 if event["impact"] == "negative" else 0
-            event_weight += article_weight
-            event_balance += polarity * article_weight
-    if not event_weight:
-        return 0.0
-    return max(-14, min(14, event_balance / event_weight * 14))
+    profile = _news_sentiment_profile(articles)
+    return max(-24, min(24, profile["netScore"] * 0.28))
 
 
 def _sentiment_boost(articles: list[Article]) -> float:
@@ -120,27 +115,53 @@ def _sentiment_boost(articles: list[Article]) -> float:
 
 
 NEWS_EVENT_RULES = [
-    ("earningsPositive", "positive", ["earnings beat", "beats expectations", "profit rises", "record revenue", "revenue growth", "showstopping earnings", "record $", "業績增長", "营收增长", "獲利成長", "利润增长", "盈喜", "創新高", "创新高"]),
-    ("earningsNegative", "negative", ["misses expectations", "profit warning", "revenue falls", "業績下滑", "营收下滑", "獲利衰退", "利润下降", "盈警", "虧損", "亏损"]),
-    ("guidancePositive", "positive", ["raises guidance", "上调指引", "上修財測", "财测上修", "展望樂觀", "展望乐观"]),
+    ("earningsPositive", "positive", ["earnings beat", "beats expectations", "profit rises", "record revenue", "revenue growth", "showstopping earnings", "record $", "业绩增长", "業績增長", "营收增长", "營收成長", "获利成长", "獲利成長", "利润增长", "盈喜"]),
+    ("earningsNegative", "negative", ["misses expectations", "profit warning", "revenue falls", "业绩下滑", "業績下滑", "业绩持续承压", "業績持續承壓", "营收下滑", "營收下滑", "获利衰退", "獲利衰退", "利润下降", "盈警", "亏损", "虧損", "承压", "承壓"]),
+    ("guidancePositive", "positive", ["raises guidance", "上调指引", "上修財測", "财测上修", "展望樂觀", "展望乐观", "高端化升级", "高端化升級", "产能升级", "產能升級"]),
     ("guidanceNegative", "negative", ["cuts guidance", "下调指引", "財測下修", "财测下修", "展望保守", "需求放缓", "需求放緩"]),
-    ("analystPositive", "positive", ["upgrade", "outperform", "buy rating", "target price raised", "上调评级", "買入評級", "目标价上调", "目標價上調"]),
-    ("analystNegative", "negative", ["downgrade", "underperform", "sell rating", "target price cut", "下调评级", "賣出評級", "目标价下调", "目標價下調"]),
+    ("analystPositive", "positive", ["upgrade", "outperform", "buy rating", "target price raised", "上调评级", "调高至买入", "评级被调高", "评级调高", "買入評級", "目标价上调", "目标价涨幅", "目標價上調", "強推", "强推"]),
+    ("analystNegative", "negative", ["downgrade", "underperform", "sell rating", "target price cut", "下调评级", "评级调低", "賣出評級", "目标价下调", "目標價下調"]),
     ("capitalReturn", "positive", ["buyback", "repurchase", "dividend", "回购", "回購", "分红", "派息", "股息"]),
     ("shareholderSale", "negative", ["insider selling", "stake sale", "减持", "減持", "套现", "沽售"]),
     ("legalRegulatoryRisk", "negative", ["lawsuit", "probe", "investigation", "regulatory", "sanction", "诉讼", "調查", "调查", "监管", "罰款", "罚款"]),
-    ("demandPositive", "positive", ["strong demand", "long-term demand", "order growth", "contract win", "新订单", "大单", "需求強勁", "需求强劲", "接單", "接单"]),
-    ("demandNegative", "negative", ["weak demand", "china problem", "not enough", "isn't enough", "wobbly", "inventory correction", "order cut", "庫存調整", "库存调整", "砍单", "訂單下滑", "订单下滑"]),
-    ("fundFlowPositive", "positive", ["net inflow", "institutional buying", "资金流入", "主力资金净流入", "機構買入", "机构买入", "抢筹", "搶籌"]),
-    ("fundFlowNegative", "negative", ["net outflow", "institutional selling", "资金流出", "主力资金净流出", "機構賣出", "机构卖出"]),
+    ("demandPositive", "positive", ["strong demand", "long-term demand", "order growth", "contract win", "新订单", "大单", "需求強勁", "需求强劲", "接單", "接单", "产业链提价", "提价"]),
+    ("demandNegative", "negative", ["weak demand", "china problem", "not enough", "isn't enough", "wobbly", "inventory correction", "order cut", "库存调整", "庫存調整", "砍单", "訂單下滑", "订单下滑"]),
+    ("fundFlowPositive", "positive", ["net inflow", "institutional buying", "资金流入", "主力资金净流入", "净流入资金", "净流入", "資金流入", "機構買入", "机构买入", "抢筹", "搶籌"]),
+    ("fundFlowNegative", "negative", ["net outflow", "institutional selling", "资金流出", "主力资金净流出", "净流出", "資金流出", "機構賣出", "机构卖出"]),
+    ("marketMomentumPositive", "positive", ["创上市以来新高", "創上市以來新高", "成交额创", "成交額創", "涨停", "漲停", "封板", "放量上涨", "批量涨停"]),
+    ("marketMomentumNegative", "negative", ["跌停", "放量下跌", "大幅下跌", "创阶段新低", "創階段新低", "破位"]),
 ]
+
+NEWS_EVENT_STRENGTH = {
+    "earningsPositive": 0.95,
+    "earningsNegative": 0.98,
+    "guidancePositive": 0.78,
+    "guidanceNegative": 0.86,
+    "analystPositive": 0.66,
+    "analystNegative": 0.72,
+    "capitalReturn": 0.55,
+    "shareholderSale": 0.82,
+    "legalRegulatoryRisk": 0.95,
+    "demandPositive": 0.72,
+    "demandNegative": 0.78,
+    "fundFlowPositive": 0.58,
+    "fundFlowNegative": 0.62,
+    "marketMomentumPositive": 0.50,
+    "marketMomentumNegative": 0.58,
+    "generalPositiveNews": 0.45,
+    "generalNegativeNews": 0.45,
+}
 
 
 def _news_events_for(article: Article) -> list[dict]:
     text = f"{article.title} {article.summary}".lower()
+    article_weight = _article_weight(article)
     events = []
     for key, impact, needles in NEWS_EVENT_RULES:
-        if any(needle.lower() in text for needle in needles):
+        matched = [needle for needle in needles if needle.lower() in text]
+        if matched:
+            strength = NEWS_EVENT_STRENGTH.get(key, 0.5)
+            polarity = 1 if impact == "positive" else -1 if impact == "negative" else 0
             events.append(
                 {
                     "key": key,
@@ -148,40 +169,78 @@ def _news_events_for(article: Article) -> list[dict]:
                     "title": article.title,
                     "source": article.source,
                     "ageHours": _age_hours(article.published_at, datetime.now(timezone.utc)),
-                    "weight": round(article.credibility * article.relevance, 2),
+                    "weight": round(article_weight * strength, 3),
+                    "strength": round(strength, 2),
+                    "score": round(polarity * strength * 100, 1),
+                    "evidence": matched[0],
                 }
             )
     if not events and abs(article.sentiment) >= 0.45:
+        key = "generalPositiveNews" if article.sentiment > 0 else "generalNegativeNews"
+        impact = "positive" if article.sentiment > 0 else "negative"
+        strength = NEWS_EVENT_STRENGTH[key]
+        polarity = 1 if article.sentiment > 0 else -1
         events.append(
             {
-                "key": "generalPositiveNews" if article.sentiment > 0 else "generalNegativeNews",
-                "impact": "positive" if article.sentiment > 0 else "negative",
+                "key": key,
+                "impact": impact,
                 "title": article.title,
                 "source": article.source,
                 "ageHours": _age_hours(article.published_at, datetime.now(timezone.utc)),
-                "weight": round(article.credibility * article.relevance, 2),
+                "weight": round(article_weight * strength, 3),
+                "strength": round(strength, 2),
+                "score": round(polarity * strength * 100, 1),
+                "evidence": "sentiment",
             }
         )
     return events
 
 
-def _news_analysis(articles: list[Article]) -> dict:
+def _news_sentiment_profile(articles: list[Article]) -> dict:
     events = [event for article in articles for event in _news_events_for(article)]
+    positive_raw = sum(event["weight"] * abs(event["score"]) for event in events if event["impact"] == "positive")
+    negative_raw = sum(event["weight"] * abs(event["score"]) for event in events if event["impact"] == "negative")
+    positive_score = round(min(100, 100 * (1 - exp(-positive_raw / 85))), 1)
+    negative_score = round(min(100, 100 * (1 - exp(-negative_raw / 85))), 1)
+    return {
+        "events": events,
+        "positiveScore": positive_score,
+        "negativeScore": negative_score,
+        "netScore": round(positive_score - negative_score, 1),
+    }
+
+
+def _news_analysis(articles: list[Article]) -> dict:
+    profile = _news_sentiment_profile(articles)
+    events = profile["events"]
     positive_count = sum(1 for event in events if event["impact"] == "positive")
     negative_count = sum(1 for event in events if event["impact"] == "negative")
     if not articles:
         summary_key = "newsNoEvidence"
-    elif positive_count > negative_count:
+    elif profile["netScore"] >= 12:
         summary_key = "newsBullishSummary"
-    elif negative_count > positive_count:
+    elif profile["netScore"] <= -12:
         summary_key = "newsBearishSummary"
     else:
         summary_key = "newsMixedSummary"
     return {
-        "summary": {"key": summary_key, "params": {"positive": positive_count, "negative": negative_count, "total": len(articles)}},
+        "summary": {
+            "key": summary_key,
+            "params": {
+                "positive": positive_count,
+                "negative": negative_count,
+                "total": len(articles),
+                "positiveScore": profile["positiveScore"],
+                "negativeScore": profile["negativeScore"],
+                "netScore": profile["netScore"],
+            },
+        },
         "positiveCount": positive_count,
         "negativeCount": negative_count,
-        "events": sorted(events, key=lambda event: (event["weight"], -event["ageHours"]), reverse=True)[:8],
+        "positiveScore": profile["positiveScore"],
+        "negativeScore": profile["negativeScore"],
+        "netScore": profile["netScore"],
+        "events": sorted(events, key=lambda event: (abs(event["score"]) * event["weight"], -event["ageHours"]), reverse=True)[:8],
     }
 
 
@@ -221,7 +280,7 @@ def _score_breakdown(metrics: dict[str, float], weights: dict[str, float], avail
 def _verdict(score: float, risk_metric: float) -> str:
     if score >= 72 and risk_metric >= 45:
         return "buy"
-    if score < 52 or risk_metric < 42:
+    if score < 52 or (risk_metric < 35 and score < 58):
         return "sell"
     return "watch"
 
@@ -244,7 +303,7 @@ def _relative_verdicts(picks: list[dict]) -> None:
             pick["verdict"] = "sell"
         else:
             pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"])
+        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"])
         pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
 
 
@@ -274,17 +333,17 @@ def _sell_priority(pick: dict) -> float:
 
 def _is_exit_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
-    return pick["score"] < 52 or metrics["risk"] < 42
+    return pick["score"] < 52 or (metrics["risk"] < 35 and pick["score"] < 58)
 
 
 def _is_urgent_exit_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
     return (
         pick["score"] <= 48
-        or metrics["risk"] < 35
         or metrics["sentiment"] <= 35
         or metrics["momentum"] <= 35
-        or metrics["quality"] <= 35
+        or (metrics["risk"] < 35 and pick["score"] < 58)
+        or (metrics["quality"] <= 35 and pick["score"] < 58)
     )
 
 
@@ -338,7 +397,7 @@ def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
             pick["verdict"] = "sell"
         else:
             pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"])
+        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"])
         pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
 
     for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
@@ -410,24 +469,34 @@ def _reason_codes(metrics: dict[str, float], score: float, sentiment_delta: floa
     return reasons
 
 
-def _decision_details(verdict: str, score: float, metrics: dict[str, float], signals: list[dict]) -> dict:
+def _decision_details(verdict: str, score: float, metrics: dict[str, float], signals: list[dict], news_analysis: dict) -> dict:
     positives = []
     negatives = []
     watch_items = []
     signal_count = len(signals)
     latest_signal = min((signal["ageHours"] for signal in signals), default=None)
+    positive_news = float(news_analysis.get("positiveScore") or 0)
+    negative_news = float(news_analysis.get("negativeScore") or 0)
+    net_news = float(news_analysis.get("netScore") or positive_news - negative_news)
+    news_params = {
+        "score": metrics["sentiment"],
+        "count": signal_count,
+        "positiveScore": round(positive_news, 1),
+        "negativeScore": round(negative_news, 1),
+        "netScore": round(net_news, 1),
+    }
 
-    if metrics["sentiment"] >= 56:
-        positives.append({"key": "newsSupport", "params": {"score": metrics["sentiment"], "count": signal_count}})
-    elif metrics["sentiment"] <= 45:
-        negatives.append({"key": "newsPressure", "params": {"score": metrics["sentiment"], "count": signal_count}})
+    if positive_news >= 18 and net_news >= 8:
+        positives.append({"key": "newsSupport", "params": news_params})
+    elif negative_news >= 18 and net_news <= -8:
+        negatives.append({"key": "newsPressure", "params": news_params})
     else:
-        watch_items.append({"key": "watchNewsFlow", "params": {"score": metrics["sentiment"], "count": signal_count}})
+        watch_items.append({"key": "watchNewsFlow", "params": news_params})
 
     if signal_count == 0:
         negatives.append({"key": "insufficientNews", "params": {}})
     elif latest_signal is not None and latest_signal <= 24:
-        positives.append({"key": "freshNews", "params": {"hours": latest_signal}})
+        watch_items.append({"key": "freshNews", "params": {"hours": latest_signal}})
 
     if metrics["momentum"] >= 60:
         positives.append({"key": "momentumSupport", "params": {"score": metrics["momentum"]}})
@@ -800,8 +869,9 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
 
 
 def _action_plan(verdict: str, score: float, metrics: dict[str, float], news: dict, financials: dict) -> dict:
-    negative_news = news["negativeCount"]
-    positive_news = news["positiveCount"]
+    negative_news = float(news.get("negativeScore", news.get("negativeCount", 0) * 10) or 0)
+    positive_news = float(news.get("positiveScore", news.get("positiveCount", 0) * 10) or 0)
+    net_news = float(news.get("netScore", positive_news - negative_news) or 0)
     negative_fundamentals = len(financials["negatives"])
     watch_items = []
     risk_controls = []
@@ -809,19 +879,23 @@ def _action_plan(verdict: str, score: float, metrics: dict[str, float], news: di
     if verdict == "buy":
         summary_key = "actionAccumulate"
         steps = [{"key": "actionBuyInBatches", "params": {"score": score}}]
-        if metrics["sentiment"] < 60:
+        if positive_news < 18 or net_news < 8:
             steps.append({"key": "actionWaitNewsConfirmation", "params": {}})
+        if negative_news > positive_news + 10:
+            steps.append({"key": "actionDoNotAverageDown", "params": {}})
         if metrics["risk"] < 55:
             risk_controls.append({"key": "actionUseSmallPosition", "params": {"risk": metrics["risk"]}})
     elif verdict == "sell":
         summary_key = "actionReduceOrExit"
         steps = [{"key": "actionReduceExposure", "params": {"score": score}}]
-        if negative_news > positive_news:
+        if negative_news > positive_news + 10:
             steps.append({"key": "actionDoNotAverageDown", "params": {}})
         risk_controls.append({"key": "actionSetExitReview", "params": {}})
     else:
         summary_key = "actionWait"
         steps = [{"key": "actionNoChase", "params": {"score": score}}]
+        if negative_news > positive_news + 10:
+            steps.append({"key": "actionDoNotAverageDown", "params": {}})
         watch_items.append({"key": "actionWatchNewsCatalyst", "params": {}})
 
     if negative_fundamentals:
@@ -897,7 +971,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "signals": signals,
         "metrics": metrics,
         "scoreBreakdown": _score_breakdown(metrics, weights, availability),
-        "decision": _decision_details(verdict, score, metrics, signals),
+        "decision": _decision_details(verdict, score, metrics, signals, news_analysis),
         "newsAnalysis": news_analysis,
         "financialAnalysis": financial_analysis,
         "actionPlan": _action_plan(verdict, score, metrics, news_analysis, financial_analysis),
@@ -914,6 +988,23 @@ def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
         "failed": len(errors),
         "discoveryErrors": context["discovery_errors"],
     }
+
+
+def _friendly_data_error(symbol: str, exc: Exception) -> str:
+    message = str(exc)
+    lowered = message.lower()
+    if any(
+        marker in lowered
+        for marker in [
+            "urlopen error",
+            "remote end closed connection",
+            "no such file or directory",
+            "timed out",
+            "temporarily unavailable",
+        ]
+    ):
+        return f"行情资料暂时不可用，已跳过 {symbol}。请稍后重新扫描。"
+    return message or f"行情资料暂时不可用，已跳过 {symbol}。"
 
 
 def _finish_picks(picks: list[dict], auto_scan: bool = False) -> list[dict]:
@@ -947,7 +1038,7 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
             try:
                 picks.append(future.result())
             except Exception as exc:
-                errors.append({"symbol": symbol, "error": str(exc)})
+                errors.append({"symbol": symbol, "error": _friendly_data_error(symbol, exc)})
 
     context["evaluated"] = len(picks)
     display_picks = _finish_picks(picks, context["auto_scan"])
@@ -995,9 +1086,10 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                 rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
                 yield event("pick", pick=pick, picks=display_picks, rank=rank, scan=_scan_state(context, display_picks, errors))
             except Exception as exc:
-                errors.append({"symbol": symbol, "error": str(exc)})
+                error_message = _friendly_data_error(symbol, exc)
+                errors.append({"symbol": symbol, "error": error_message})
                 display_picks = _finish_picks(picks, context["auto_scan"])
-                yield event("error", symbol=symbol, error=str(exc), scan=_scan_state(context, display_picks, errors))
+                yield event("error", symbol=symbol, error=error_message, scan=_scan_state(context, display_picks, errors))
 
     context["evaluated"] = len(picks)
     display_picks = _finish_picks(picks, context["auto_scan"])

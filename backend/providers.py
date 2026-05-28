@@ -6,6 +6,7 @@ from email.utils import parsedate_to_datetime
 import html
 import json
 import re
+import time
 from math import sqrt
 from typing import Any
 from urllib.parse import quote, quote_plus, urlencode
@@ -436,40 +437,122 @@ def company_search_names(symbol: str, fallback: str = "") -> list[str]:
 class YFinanceMarketDataProvider:
     def fetch(self, symbol: str) -> MarketSnapshot:
         if yf is None:
-            return YahooHttpMarketDataProvider().fetch(symbol)
-
-        ticker = yf.Ticker(symbol)
-        history = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-        if history.empty:
-            raise ValueError(f"No market data returned for {symbol}. Check the ticker suffix.")
-
-        closes = [float(value) for value in history["Close"].dropna().tail(130).tolist()]
-        if not closes:
-            raise ValueError(f"No closing prices returned for {symbol}.")
+            return fallback_market_data_provider(symbol)
 
         try:
-            info = dict(ticker.get_info())
-        except Exception:
-            info = {}
-        info = _merge_market_fundamentals(symbol, info)
+            ticker = yf.Ticker(symbol)
+            history = ticker.history(period="6mo", interval="1d", auto_adjust=True)
+            if history.empty:
+                raise ValueError(f"No market data returned for {symbol}. Check the ticker suffix.")
 
+            closes = [float(value) for value in history["Close"].dropna().tail(130).tolist()]
+            if not closes:
+                raise ValueError(f"No closing prices returned for {symbol}.")
+
+            try:
+                info = dict(ticker.get_info())
+            except Exception:
+                info = {}
+            info = _merge_market_fundamentals(symbol, info)
+
+            price = closes[-1]
+            previous = closes[-2] if len(closes) > 1 else price
+            change = ((price - previous) / previous * 100) if previous else 0
+            name = info.get("shortName") or info.get("longName") or symbol
+            sector = info.get("sector") or info.get("industry") or fallback_sector(symbol)
+
+            return MarketSnapshot(
+                symbol=symbol.upper(),
+                name=name,
+                market=infer_market(symbol),
+                sector=sector,
+                price=round(price, 3),
+                change=round(change, 2),
+                currency=info.get("currency") or "",
+                closes=closes,
+                info=info,
+            )
+        except Exception:
+            return fallback_market_data_provider(symbol)
+
+
+def fallback_market_data_provider(symbol: str) -> MarketSnapshot:
+    if infer_market(symbol) == "CN":
+        try:
+            return EastmoneyCnMarketDataProvider().fetch(symbol)
+        except Exception:
+            pass
+    return YahooHttpMarketDataProvider().fetch(symbol)
+
+
+class EastmoneyCnMarketDataProvider:
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36"
+
+    def fetch(self, symbol: str) -> MarketSnapshot:
+        if infer_market(symbol) != "CN":
+            raise ValueError(f"Eastmoney fallback only supports China A-shares, got {symbol}.")
+
+        upper = symbol.upper()
+        code = upper.split(".")[0]
+        secid_prefix = "1" if upper.endswith(".SS") else "0"
+        url = (
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+            f"secid={secid_prefix}.{quote(code)}&klt=101&fqt=1&beg=0&end=20500101"
+            "&fields1=f1,f2,f3,f4,f5,f6"
+            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+        )
+        payload = self._json(url)
+        data = payload.get("data") or {}
+        klines = data.get("klines") or []
+        rows = [self._parse_kline(row) for row in klines[-130:]]
+        closes = [row["close"] for row in rows if row["close"] > 0]
+        if not closes:
+            raise ValueError(f"No Eastmoney closing prices returned for {symbol}.")
+
+        info = _eastmoney_cn_fundamentals(symbol)
         price = closes[-1]
         previous = closes[-2] if len(closes) > 1 else price
-        change = ((price - previous) / previous * 100) if previous else 0
-        name = info.get("shortName") or info.get("longName") or symbol
-        sector = info.get("sector") or info.get("industry") or fallback_sector(symbol)
+        change = rows[-1].get("changePercent")
+        if change is None:
+            change = ((price - previous) / previous * 100) if previous else 0
+        name = info.get("shortName") or local_company_name(upper, data.get("name") or upper)
 
         return MarketSnapshot(
-            symbol=symbol.upper(),
+            symbol=upper,
             name=name,
-            market=infer_market(symbol),
-            sector=sector,
+            market="CN",
+            sector=fallback_sector(upper),
             price=round(price, 3),
             change=round(change, 2),
-            currency=info.get("currency") or "",
+            currency="CNY",
             closes=closes,
             info=info,
         )
+
+    def _json(self, url: str) -> dict:
+        last_error = None
+        for attempt in range(3):
+            try:
+                request = Request(
+                    url,
+                    headers={
+                        "User-Agent": self.user_agent,
+                        "Accept": "application/json,text/plain,*/*",
+                        "Referer": "https://quote.eastmoney.com/",
+                    },
+                )
+                with urlopen(request, timeout=10) as response:
+                    return json.loads(response.read().decode("utf-8-sig"))
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.25 * (attempt + 1))
+        raise last_error
+
+    def _parse_kline(self, row: str) -> dict[str, float | None]:
+        parts = str(row).split(",")
+        close = _eastmoney_number(parts[2] if len(parts) > 2 else None) or 0.0
+        change_percent = _eastmoney_number(parts[8] if len(parts) > 8 else None)
+        return {"close": close, "changePercent": change_percent}
 
 
 class YahooHttpMarketDataProvider:
@@ -809,11 +892,22 @@ def _eastmoney_cn_fundamentals(symbol: str) -> dict[str, Any]:
     secid_prefix = "1" if upper.endswith(".SS") else "0"
     fields = "f57,f58,f47,f48,f116,f117,f162,f167,f168,f170"
     url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid_prefix}.{quote(code)}&fields={fields}"
-    try:
-        request = Request(url, headers={"User-Agent": YahooHttpMarketDataProvider.user_agent, "Accept": "application/json,text/plain,*/*"})
-        with urlopen(request, timeout=8) as response:
-            data = json.loads(response.read().decode("utf-8-sig")).get("data") or {}
-    except Exception:
+    data = {}
+    headers = {
+        "User-Agent": EastmoneyCnMarketDataProvider.user_agent,
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://quote.eastmoney.com/",
+    }
+    for attempt in range(6):
+        try:
+            request = Request(url, headers=headers)
+            with urlopen(request, timeout=8) as response:
+                data = json.loads(response.read().decode("utf-8-sig")).get("data") or {}
+            if data:
+                break
+        except Exception:
+            time.sleep(0.25 * (attempt + 1))
+    if not data:
         return {}
 
     pe = _eastmoney_scaled(data.get("f162"))

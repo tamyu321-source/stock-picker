@@ -1,10 +1,11 @@
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from backend.app import create_app
-from backend.providers import Article, MarketSnapshot, RssNewsCrawler, _parse_eastmoney_datetime, is_recent_article, local_company_name, news_queries, news_query
-from backend.services import _financial_analysis, _metric_availability, _metrics, _score_breakdown, _sentiment_score
+from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, _parse_eastmoney_datetime, is_recent_article, local_company_name, news_queries, news_query
+from backend.services import _financial_analysis, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _symbols_from_code_mentions
 
 
@@ -397,6 +398,48 @@ class ApiTestCase(unittest.TestCase):
         self.assertLess(_sentiment_score(negative), 50)
         self.assertGreater(_sentiment_score(positive), _sentiment_score(negative))
 
+    def test_news_analysis_scores_chinese_positive_and_negative_events(self):
+        now = datetime.now(timezone.utc)
+        positive = [
+            Article(
+                "Eastmoney",
+                "\u4e2d\u56fd\u5de8\u77f3\u8bc4\u7ea7\u88ab\u8c03\u9ad8 \u4e3b\u529b\u8d44\u91d1\u51c0\u6d41\u5165",
+                "\u76ee\u6807\u4ef7\u4e0a\u8c03",
+                "https://example.com/positive-cn",
+                now,
+                0.3,
+                0.8,
+                1.0,
+            )
+        ]
+        negative = [
+            Article(
+                "Eastmoney",
+                "\u4e2d\u56fd\u5de8\u77f3\u4e1a\u7ee9\u6301\u7eed\u627f\u538b \u9700\u6c42\u653e\u7f13",
+                "\u5229\u6da6\u4e0b\u964d",
+                "https://example.com/negative-cn",
+                now,
+                -0.3,
+                0.8,
+                1.0,
+            )
+        ]
+
+        positive_profile = _news_analysis(positive)
+        negative_profile = _news_analysis(negative)
+
+        self.assertGreater(positive_profile["positiveScore"], positive_profile["negativeScore"])
+        self.assertGreater(positive_profile["netScore"], 0)
+        self.assertEqual(positive_profile["summary"]["key"], "newsBullishSummary")
+        self.assertGreater(negative_profile["negativeScore"], negative_profile["positiveScore"])
+        self.assertLess(negative_profile["netScore"], 0)
+        self.assertEqual(negative_profile["summary"]["key"], "newsBearishSummary")
+        self.assertTrue(all("score" in event and "evidence" in event for event in positive_profile["events"]))
+
+    def test_high_volatility_alone_does_not_force_sell_verdict(self):
+        self.assertEqual(_verdict(61.2, 29.2), "watch")
+        self.assertEqual(_verdict(56.0, 29.2), "sell")
+
     def test_missing_factor_weight_is_reallocated(self):
         metrics = {"sentiment": 50, "momentum": 70, "value": 60, "risk": 65, "quality": 75}
         weights = {"sentiment": 0.4, "momentum": 0.2, "value": 0.15, "risk": 0.1, "quality": 0.15}
@@ -641,11 +684,82 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("watchItems", pick["decision"])
         self.assertIn("newsAnalysis", pick)
         self.assertEqual(pick["newsAnalysis"]["positiveCount"], 1)
+        self.assertGreater(pick["newsAnalysis"]["positiveScore"], 0)
+        self.assertIn("positiveScore", pick["decision"]["positives"][0]["params"])
         self.assertEqual(pick["newsAnalysis"]["events"][0]["key"], "earningsPositive")
         self.assertIn("financialAnalysis", pick)
         self.assertTrue(pick["financialAnalysis"]["metrics"])
         self.assertIn("actionPlan", pick)
         self.assertIn("steps", pick["actionPlan"])
+
+    def test_eastmoney_fallback_builds_cn_market_snapshot(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout=10):
+            url = request.full_url
+            if "kline/get" in url:
+                return FakeResponse(
+                    {
+                        "data": {
+                            "name": "测试A股",
+                            "klines": [
+                                f"2026-01-{day:02d},{10 + day / 10:.2f},{10 + day / 8:.2f},{11 + day / 8:.2f},9,1000,10000,1,1.2,0.1,2"
+                                for day in range(1, 32)
+                            ],
+                        }
+                    }
+                )
+            return FakeResponse(
+                {
+                    "data": {
+                        "f58": "测试A股",
+                        "f47": 1000,
+                        "f48": 1000000,
+                        "f116": 5000000000,
+                        "f117": 3000000000,
+                        "f162": 1800,
+                        "f167": 210,
+                        "f168": 200,
+                        "f170": 120,
+                    }
+                }
+            )
+
+        with patch("backend.providers.urlopen", fake_urlopen):
+            snapshot = EastmoneyCnMarketDataProvider().fetch("603006.SS")
+
+        self.assertEqual(snapshot.symbol, "603006.SS")
+        self.assertEqual(snapshot.market, "CN")
+        self.assertEqual(snapshot.currency, "CNY")
+        self.assertEqual(snapshot.name, "测试A股")
+        self.assertGreater(len(snapshot.closes), 20)
+        self.assertAlmostEqual(snapshot.info["trailingPE"], 18)
+
+    def test_raw_provider_errors_are_hidden_from_scan_response(self):
+        class BrokenMarketProvider:
+            def fetch(self, symbol):
+                raise OSError("[Errno 2] No such file or directory")
+
+        response = create_app(BrokenMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client().post(
+            "/api/analyze",
+            json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"},
+        )
+        payload = response.get_json()
+        self.assertTrue(payload["errors"])
+        self.assertIn("行情资料暂时不可用", payload["errors"][0]["error"])
+        self.assertNotIn("urlopen", payload["errors"][0]["error"])
+        self.assertNotIn("No such file", payload["errors"][0]["error"])
 
 
 if __name__ == "__main__":
