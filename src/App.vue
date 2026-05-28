@@ -2,8 +2,10 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { analyzeStocksStream, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
+import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
 type StandardLocale = Exclude<Locale, 'nan-TW'>;
+type YogurtSoundCue = 'appear' | 'tap';
 
 const locale = ref<Locale>('en');
 const config = ref<AppConfig | null>(null);
@@ -24,8 +26,13 @@ const loadingElapsedSeconds = ref(0);
 const loadingStepIndex = ref(0);
 const scanRunId = ref(0);
 const signalRefreshStartedAt = ref('');
+const yogurtSecretPrimed = ref(false);
+const yogurtSecretOpen = ref(false);
 let loadingTimer: number | undefined;
 let loadingRunId = 0;
+let yogurtSecretTimer: number | undefined;
+let yogurtAudioContext: AudioContext | undefined;
+const yogurtAudioDataUris: Partial<Record<YogurtSoundCue, string>> = {};
 
 const SETTINGS_STORAGE_KEY = 'open-stock-picker.settings.v1';
 const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'SG', 'TW'];
@@ -84,6 +91,18 @@ const strategies = computed<Strategy[]>(() => config.value?.strategies ?? []);
 const selectedStrategy = computed(() => strategies.value.find((item) => item.id === selectedStrategyId.value));
 const marketOptions = computed(() => config.value?.markets ?? []);
 const flattenedSignals = computed(() => picks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
+const yogurtSecretLocalized = computed(() => locale.value === 'zh-TW' || locale.value === 'nan-TW');
+const yogurtSecretTriggerLabel = computed(() => (locale.value === 'nan-TW' ? '活菌雷達' : '菌群雷達'));
+const yogurtSecretClueLabel = computed(() => {
+  if (locale.value === 'nan-TW') return '揣著 8 種乳酸菌 · 閣點一下';
+  if (locale.value === 'zh-TW') return '偵測到 8 種乳酸菌 · 再點一下';
+  return '4億/g';
+});
+const yogurtSecretNote = computed(() => {
+  if (locale.value === 'nan-TW') return '你佇選股器內底揣著台南的發酵補給站，閣有 4 億/g 活菌藏咧。';
+  if (locale.value === 'zh-TW') return '你在選股器裡找到一個台南發酵補給站，還藏著 4 億/g 活性乳酸菌。';
+  return '';
+});
 const signalStatusLabel = computed(() => {
   if (loading.value) return signalRefreshStartedAt.value ? `${t.value.signalRefreshing} · ${signalRefreshStartedAt.value}` : t.value.signalRefreshing;
   if (generatedAt.value) return `${t.value.signalUpdated} · ${generatedAt.value}`;
@@ -916,6 +935,188 @@ function stopLoadingFeedback() {
   loading.value = false;
 }
 
+function isYogurtLocale(value: Locale) {
+  return value === 'zh-TW' || value === 'nan-TW';
+}
+
+function setLocale(nextLocale: Locale) {
+  const shouldPlayAppear = isYogurtLocale(nextLocale);
+  locale.value = nextLocale;
+  if (shouldPlayAppear) {
+    playYogurtSound('appear');
+  }
+}
+
+function getYogurtAudioContext() {
+  if (typeof window === 'undefined') return null;
+  const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor) return null;
+  if (!yogurtAudioContext) {
+    yogurtAudioContext = new AudioContextCtor();
+  }
+  return yogurtAudioContext;
+}
+
+function playTone(context: AudioContext, startTime: number, frequency: number, duration: number, gainValue: number, type: OscillatorType = 'sine') {
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(frequency, startTime);
+  gain.gain.setValueAtTime(0.0001, startTime);
+  gain.gain.exponentialRampToValueAtTime(gainValue, startTime + 0.018);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(startTime);
+  oscillator.stop(startTime + duration + 0.03);
+}
+
+function encodeWavDataUri(samples: Int16Array, sampleRate: number) {
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + samples.byteLength, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, samples.byteLength, true);
+
+  const bytes = new Uint8Array(header.byteLength + samples.byteLength);
+  bytes.set(new Uint8Array(header), 0);
+  bytes.set(new Uint8Array(samples.buffer), header.byteLength);
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 2048) {
+    binary += String.fromCharCode(...bytes.slice(offset, offset + 2048));
+  }
+  return `data:audio/wav;base64,${window.btoa(binary)}`;
+}
+
+function createYogurtSoundDataUri(cue: YogurtSoundCue) {
+  const sampleRate = 22050;
+  const duration = cue === 'appear' ? 0.42 : 0.2;
+  const samples = new Int16Array(Math.floor(sampleRate * duration));
+  const addTone = (start: number, toneDuration: number, frequency: number, volume: number) => {
+    const startIndex = Math.floor(start * sampleRate);
+    const sampleCount = Math.floor(toneDuration * sampleRate);
+    for (let index = 0; index < sampleCount && startIndex + index < samples.length; index += 1) {
+      const progress = index / Math.max(1, sampleCount - 1);
+      const envelope = Math.sin(Math.PI * progress);
+      const sample = Math.sin((2 * Math.PI * frequency * index) / sampleRate) * envelope * volume;
+      samples[startIndex + index] += Math.round(sample * 32767);
+    }
+  };
+
+  if (cue === 'appear') {
+    addTone(0, 0.18, 523.25, 0.28);
+    addTone(0.055, 0.18, 659.25, 0.24);
+    addTone(0.11, 0.2, 783.99, 0.22);
+    addTone(0.2, 0.16, 1046.5, 0.14);
+  } else {
+    addTone(0, 0.09, 880, 0.34);
+    addTone(0.045, 0.12, 1320, 0.22);
+    addTone(0.1, 0.08, 660, 0.15);
+  }
+
+  return encodeWavDataUri(samples, sampleRate);
+}
+
+function playYogurtAudioFallback(cue: YogurtSoundCue) {
+  if (typeof Audio === 'undefined') return false;
+  try {
+    yogurtAudioDataUris[cue] = yogurtAudioDataUris[cue] ?? createYogurtSoundDataUri(cue);
+    const audio = new Audio(yogurtAudioDataUris[cue]);
+    audio.volume = cue === 'appear' ? 0.42 : 0.48;
+    void audio.play().catch(() => undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function playYogurtSound(cue: YogurtSoundCue) {
+  const context = getYogurtAudioContext();
+  if (!context) {
+    playYogurtAudioFallback(cue);
+    return;
+  }
+  void context.resume().then(() => {
+    const now = context.currentTime;
+    if (cue === 'appear') {
+      [523.25, 659.25, 783.99].forEach((frequency, index) => {
+        playTone(context, now + index * 0.055, frequency, 0.18, 0.035, 'sine');
+      });
+      playTone(context, now + 0.18, 1046.5, 0.16, 0.018, 'triangle');
+      return;
+    }
+
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'triangle';
+    oscillator.frequency.setValueAtTime(880, now);
+    oscillator.frequency.exponentialRampToValueAtTime(1320, now + 0.06);
+    oscillator.frequency.exponentialRampToValueAtTime(660, now + 0.16);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.055, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.2);
+  }).catch(() => {
+    playYogurtAudioFallback(cue);
+  });
+}
+
+function clearYogurtSecretTimer() {
+  if (yogurtSecretTimer !== undefined) {
+    window.clearTimeout(yogurtSecretTimer);
+    yogurtSecretTimer = undefined;
+  }
+}
+
+function primeYogurtSecret() {
+  clearYogurtSecretTimer();
+  if (yogurtSecretLocalized.value) {
+    playYogurtSound('tap');
+  }
+  yogurtSecretPrimed.value = true;
+  yogurtSecretTimer = window.setTimeout(() => {
+    if (!yogurtSecretOpen.value) {
+      yogurtSecretPrimed.value = false;
+    }
+    yogurtSecretTimer = undefined;
+  }, 7000);
+}
+
+function openYogurtSecret() {
+  clearYogurtSecretTimer();
+  yogurtSecretPrimed.value = false;
+  yogurtSecretOpen.value = true;
+}
+
+function closeYogurtSecret() {
+  clearYogurtSecretTimer();
+  yogurtSecretPrimed.value = false;
+  yogurtSecretOpen.value = false;
+}
+
+function stopAppTimers() {
+  stopLoadingFeedback();
+  clearYogurtSecretTimer();
+}
+
 async function keepOptionalSymbolsVisible(event: Event) {
   const details = event.target as HTMLDetailsElement;
   if (!details.open) return;
@@ -1010,7 +1211,7 @@ onMounted(async () => {
   normalizeStrategySelection();
 });
 
-onUnmounted(stopLoadingFeedback);
+onUnmounted(stopAppTimers);
 </script>
 
 <template>
@@ -1023,10 +1224,10 @@ onUnmounted(stopLoadingFeedback);
       </div>
 
       <div class="locale-switcher" aria-label="Language">
-        <button :class="{ active: locale === 'en' }" @click="locale = 'en'"><span class="flag flag-uk"></span>EN</button>
-        <button :class="{ active: locale === 'zh-CN' }" @click="locale = 'zh-CN'"><span class="flag flag-cn"></span>简</button>
-        <button :class="{ active: locale === 'zh-TW' }" @click="locale = 'zh-TW'"><span class="flag flag-tw"></span>繁</button>
-        <button :class="{ active: locale === 'nan-TW' }" title="ㄉㄞˊ ㄍㄧˋ" aria-label="ㄉㄞˊ ㄍㄧˋ" @click="locale = 'nan-TW'"><span class="flag flag-nan"></span>ㄉㄞˊ</button>
+        <button :class="{ active: locale === 'en' }" @click="setLocale('en')"><span class="flag flag-uk"></span>EN</button>
+        <button :class="{ active: locale === 'zh-CN' }" @click="setLocale('zh-CN')"><span class="flag flag-cn"></span>简</button>
+        <button :class="{ active: locale === 'zh-TW' }" @click="setLocale('zh-TW')"><span class="flag flag-tw"></span>繁</button>
+        <button :class="{ active: locale === 'nan-TW' }" title="ㄉㄞˊ ㄍㄧˋ" aria-label="ㄉㄞˊ ㄍㄧˋ" @click="setLocale('nan-TW')"><span class="flag flag-nan"></span>ㄉㄞˊ</button>
       </div>
     </header>
 
@@ -1044,6 +1245,33 @@ onUnmounted(stopLoadingFeedback);
         <strong>{{ generatedAt || '-' }}</strong>
       </div>
     </section>
+
+    <button
+      class="yogurt-secret-tap"
+      :class="{ armed: yogurtSecretPrimed, localized: yogurtSecretLocalized }"
+      type="button"
+      :aria-label="yogurtSecretLocalized ? '菌群雷達' : yogurtSecretPrimed ? 'Ugood Days clue unlocked' : 'Hidden supplier note'"
+      @click="primeYogurtSecret"
+    >
+      <span v-if="yogurtSecretLocalized" class="yogurt-logo-mark" aria-hidden="true">
+        <i class="yogurt-logo-swoop"></i>
+        <i class="yogurt-logo-face"></i>
+        <i class="yogurt-logo-bubble bubble-one"></i>
+        <i class="yogurt-logo-bubble bubble-two"></i>
+      </span>
+      <span v-else aria-hidden="true"></span>
+      <small v-if="yogurtSecretLocalized">{{ yogurtSecretTriggerLabel }}</small>
+    </button>
+    <button
+      v-if="yogurtSecretPrimed && !yogurtSecretOpen"
+      class="yogurt-secret-chip"
+      :class="{ localized: yogurtSecretLocalized }"
+      type="button"
+      aria-label="Open Ugood Days supplier note"
+      @click="openYogurtSecret"
+    >
+      {{ yogurtSecretClueLabel }}
+    </button>
 
     <section class="workspace">
       <aside class="control-panel">
@@ -1362,5 +1590,50 @@ onUnmounted(stopLoadingFeedback);
         </div>
       </aside>
     </section>
+
+    <div v-if="yogurtSecretOpen" class="yogurt-secret-backdrop" role="dialog" aria-modal="true" aria-labelledby="yogurt-secret-title" @click.self="closeYogurtSecret">
+      <article class="yogurt-secret-card">
+        <button class="yogurt-secret-close" type="button" aria-label="Close Ugood Days note" @click="closeYogurtSecret">×</button>
+        <div class="yogurt-secret-header">
+          <img :src="ugoodaysLogo" alt="純粹好食 logo" />
+          <div>
+            <p>台南優格供應商</p>
+            <h2 id="yogurt-secret-title">優格一點點，健康多一點</h2>
+            <span>純粹好食 Ugood Days</span>
+          </div>
+        </div>
+        <div class="yogurt-products" aria-label="Products">
+          <span>希臘優格</span>
+          <span>鮮奶優格</span>
+          <span>原味優格飲</span>
+        </div>
+        <p v-if="yogurtSecretNote" class="yogurt-secret-note">{{ yogurtSecretNote }}</p>
+        <p class="yogurt-secret-copy">
+          嚴選 Kefir 菌種，搭配 A菌、B菌，精選 8 種乳酸菌，每公克高達 4 億活性乳酸菌。
+        </p>
+        <dl class="yogurt-secret-info">
+          <div>
+            <dt>客服專線</dt>
+            <dd>06-2609986</dd>
+          </div>
+          <div>
+            <dt>信箱</dt>
+            <dd><a href="mailto:ugoodays@gmail.com">ugoodays@gmail.com</a></dd>
+          </div>
+          <div>
+            <dt>地址</dt>
+            <dd>台南市東區富農街一段294號（後甲派出所正前方）</dd>
+          </div>
+          <div>
+            <dt>統一編號</dt>
+            <dd>60505556</dd>
+          </div>
+        </dl>
+        <div class="yogurt-secret-links">
+          <a href="https://www.ugoodays.com/" target="_blank" rel="noreferrer">Website</a>
+          <a href="https://www.instagram.com/ugoodays/" target="_blank" rel="noreferrer">Instagram</a>
+        </div>
+      </article>
+    </div>
   </main>
 </template>
