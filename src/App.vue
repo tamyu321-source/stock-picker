@@ -1,7 +1,9 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { analyzeStocksStream, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
+
+type StandardLocale = Exclude<Locale, 'nan-TW'>;
 
 const locale = ref<Locale>('en');
 const config = ref<AppConfig | null>(null);
@@ -42,6 +44,37 @@ const customWeights = reactive<StrategyWeights>({
   quality: 16
 });
 
+const marketLabels: Record<Locale, Record<Market, string>> = {
+  en: {
+    CN: 'China A-shares',
+    HK: 'Hong Kong',
+    SG: 'Singapore',
+    US: 'United States',
+    TW: 'Taiwan'
+  },
+  'zh-CN': {
+    CN: '中国 A 股',
+    HK: '香港',
+    SG: '新加坡',
+    US: '美国',
+    TW: '台湾'
+  },
+  'zh-TW': {
+    CN: '中國 A 股',
+    HK: '香港',
+    SG: '新加坡',
+    US: '美國',
+    TW: '台灣'
+  },
+  'nan-TW': {
+    CN: '中國 A 股',
+    HK: '香港',
+    SG: '新加坡',
+    US: '美國',
+    TW: '台灣 ㄉㄞˊ ㄨㄢˊ'
+  }
+};
+
 const t = computed(() => messages[locale.value]);
 const strategies = computed<Strategy[]>(() => config.value?.strategies ?? []);
 const selectedStrategy = computed(() => strategies.value.find((item) => item.id === selectedStrategyId.value));
@@ -54,10 +87,12 @@ const scanLabel = computed(() => {
     if (isAutoScan.value) return t.value.autoScan;
     if (locale.value === 'en') return `${symbols.value.length} narrowed`;
     if (locale.value === 'zh-CN') return `限定 ${symbols.value.length} 只`;
+    if (locale.value === 'nan-TW') return `限定 ${symbols.value.length} 檔`;
     return `限定 ${symbols.value.length} 檔`;
   }
   if (locale.value === 'en') return `${scanInfo.value.succeeded}/${scanInfo.value.requested} scanned`;
   if (locale.value === 'zh-CN') return `已扫 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
+  if (locale.value === 'nan-TW') return `已掃 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
   return `已掃 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
 });
 const analysisSteps = computed(() => {
@@ -81,6 +116,11 @@ const analysisSteps = computed(() => {
       ? ['正在直接扫描所选市场', '正在交叉检查当地财经新闻源', '正在拉取行情与基本面', '正在排序优质投资候选']
       : ['正在拉取个股近期新闻', '正在获取行情与基本面', '正在计算策略评分', '正在整理判断与风险提示'];
   }
+  if (locale.value === 'nan-TW') {
+    return isAutoScan.value
+      ? ['直接掃描所選市場', '交叉檢查在地財經新聞', '抓 ㄌㄚㄏ 行情佮基本面', '排序優質投資候選']
+      : ['抓 ㄌㄚㄏ 個股近期新聞', '取得行情佮基本面', '計算策略評分', '整理判斷佮風險提示'];
+  }
   return isAutoScan.value
     ? ['正在直接掃描所選市場', '正在交叉檢查當地財經新聞源', '正在拉取行情與基本面', '正在排序優質投資候選']
     : ['正在拉取個股近期新聞', '正在取得行情與基本面', '正在計算策略評分', '正在整理判斷與風險提示'];
@@ -89,11 +129,12 @@ const activeAnalysisStep = computed(() => analysisSteps.value[Math.min(loadingSt
 const loadingElapsedLabel = computed(() => {
   if (locale.value === 'en') return `${loadingElapsedSeconds.value}s elapsed`;
   if (locale.value === 'zh-CN') return `已等待 ${loadingElapsedSeconds.value} 秒`;
+  if (locale.value === 'nan-TW') return `已等 ㄊㄢˋ ${loadingElapsedSeconds.value} 秒`;
   return `已等待 ${loadingElapsedSeconds.value} 秒`;
 });
 
 function isLocale(value: unknown): value is Locale {
-  return value === 'en' || value === 'zh-CN' || value === 'zh-TW';
+  return value === 'en' || value === 'zh-CN' || value === 'zh-TW' || value === 'nan-TW';
 }
 
 function isMarket(value: unknown): value is Market {
@@ -182,6 +223,10 @@ function strategyDescription(strategy?: Strategy) {
   return strategyText[locale.value][strategy.id]?.description ?? strategy.description;
 }
 
+function marketLabel(market: Market) {
+  return marketLabels[locale.value][market] ?? market;
+}
+
 function verdictLabel(verdict: Pick['verdict']) {
   return t.value[verdict];
 }
@@ -203,31 +248,37 @@ function reasonLabel(reason: ReasonCode) {
   if (reason.key === 'strongestFactors') {
     if (locale.value === 'en') return `${factorLabel(params.first)} and ${factorLabel(params.second)} are the strongest factors.`;
     if (locale.value === 'zh-CN') return `${factorLabel(params.first)} 与 ${factorLabel(params.second)} 是最强的评分因子。`;
+    if (locale.value === 'nan-TW') return `${factorLabel(params.first)} 佮 ㄍㄚㄅ ${factorLabel(params.second)} 是較強的評分因子。`;
     return `${factorLabel(params.first)} 與 ${factorLabel(params.second)} 是最強的評分因子。`;
   }
   if (reason.key === 'sentimentImpact') {
     const delta = Number(params.delta).toFixed(1);
     if (locale.value === 'en') return `Live crawled sentiment changes the score by ${Number(params.delta) >= 0 ? '+' : ''}${delta} points.`;
     if (locale.value === 'zh-CN') return `实时爬文情绪让评分变化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
+    if (locale.value === 'nan-TW') return `即時爬文情緒予 ㄏㄛ˫ 評分變化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
     return `即時爬文情緒讓評分變化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
   }
   if (reason.key === 'belowThreshold') {
     if (locale.value === 'en') return `${factorLabel(params.factor)} is below threshold and should be monitored before adding exposure.`;
     if (locale.value === 'zh-CN') return `${factorLabel(params.factor)} 低于门槛，加仓前需要继续观察。`;
+    if (locale.value === 'nan-TW') return `${factorLabel(params.factor)} 低於門檻，加碼前先看 ㄎㄨㄚˋ 清楚。`;
     return `${factorLabel(params.factor)} 低於門檻，加碼前需要繼續觀察。`;
   }
   if (reason.key === 'clearsBuyThreshold') {
     if (locale.value === 'en') return 'Composite score clears the buy threshold under the selected strategy.';
     if (locale.value === 'zh-CN') return '综合评分已通过当前策略的买入门槛。';
+    if (locale.value === 'nan-TW') return '綜合評分已經過買入門檻，會使 ㄟ˫ ㄙㄞˋ 納入候選。';
     return '綜合評分已通過目前策略的買入門檻。';
   }
   if (reason.key === 'rankedTopOpportunity') {
     if (locale.value === 'en') return `Ranked #${params.rank} within this scan, making it a relative buy candidate.`;
     if (locale.value === 'zh-CN') return `本次扫描排名第 ${params.rank}，属于相对更值得关注的买入候选。`;
+    if (locale.value === 'nan-TW') return `這擺掃描排名第 ${params.rank}，是較值得看 ㄎㄨㄚˋ 的買入候選。`;
     return `本次掃描排名第 ${params.rank}，屬於相對更值得關注的買入候選。`;
   }
   if (locale.value === 'en') return 'Composite score is not strong enough for a high-conviction entry.';
   if (locale.value === 'zh-CN') return '综合评分暂不足以支持高信心进场。';
+  if (locale.value === 'nan-TW') return '綜合評分暫時無夠 ㄅㄨㄝ˫ ㄍㄠˋ 支持高信心進場。';
   return '綜合評分暫不足以支持高信心進場。';
 }
 
@@ -235,12 +286,142 @@ function reasonLabels(pick: Pick) {
   return pick.reasonCodes?.length ? pick.reasonCodes.map(reasonLabel) : pick.reasons;
 }
 
+function nanDecisionPointLabel(point: DecisionPoint, score: string, count: number, hours: number) {
+  const p = point.params;
+  switch (point.key) {
+    case 'buySummary':
+      return `值得買入：總分 ${p.score}/100，這个 ㄐㄧㄚˋ 方案相對有力。`;
+    case 'watchSummary':
+      return `重點觀察：總分 ${p.score}/100，進場或離場確認猶未 ㄧㄚˋ ㄅㄨㄝ˫ 完整。`;
+    case 'sellSummary':
+      return `退出風險：總分 ${p.score}/100，目前風險報酬較弱。`;
+    case 'newsSupport':
+      return `新聞情緒 ${score}/100，來自 ${count} 則近期訊號，對判斷有支撐。`;
+    case 'newsPressure':
+      return `新聞情緒偏弱，只有 ${score}/100，已有 ${count} 則相關訊號。`;
+    case 'insufficientNews':
+      return '近期新聞證據無夠 ㄅㄨㄝ˫ ㄍㄠˋ，信心度應該收斂。';
+    case 'freshNews':
+      return `最新相關新聞約 ${hours} 小時前，時效性較好。`;
+    case 'momentumSupport':
+      return `價格動能 ${score}/100，有支撐。`;
+    case 'weakMomentum':
+      return `動能偏弱，只有 ${score}/100，價格未確認前毋通 ㄅㄇˊ 追高。`;
+    case 'watchBreakout':
+      return '觀察動能能否提升到 60/100 以上。';
+    case 'valuationSupport':
+      return `估值分 ${score}/100，價格相對未明顯過貴。`;
+    case 'expensiveValuation':
+      return `估值偏貴，只有 ${score}/100，要注意利多兌現後回落。`;
+    case 'watchValuation':
+      return '觀察下一次財報或指引後，估值有無 ㄨ˫ 重新變合理。';
+    case 'riskControlled':
+      return `風險控制 ${score}/100，波動和 beta 目前可接受。`;
+    case 'riskHigh':
+      return `風險分偏低，只有 ${score}/100，下行保護較弱。`;
+    case 'watchRisk':
+      return '觀察波動率和回撤是否收斂。';
+    case 'qualitySupport':
+      return `基本面品質 ${score}/100，對中期持有有支撐。`;
+    case 'weakQuality':
+      return `基本面品質偏弱，只有 ${score}/100。`;
+    case 'watchNewsFlow':
+      return `新聞情緒 ${score}/100 暫屬中性；繼續看 ㄎㄨㄚˋ 後續新聞轉正或轉負。`;
+    case 'newsBullishSummary':
+      return `新聞淨偏多：${p.positive} 個正面事件、${p.negative} 個負面事件，來自 ${p.total} 則近期新聞。`;
+    case 'newsBearishSummary':
+      return `新聞淨偏空：${p.negative} 個負面事件多於 ${p.positive} 個正面事件。`;
+    case 'newsMixedSummary':
+      return `新聞多空混合：${p.positive} 個正面事件、${p.negative} 個負面事件。`;
+    case 'newsNoEvidence':
+      return '無找到可用的近期新聞證據。';
+    case 'financialStrongSummary':
+      return `財報 / 基本面檢查偏強，涵蓋 ${p.count} 個可用指標。`;
+    case 'financialWeakSummary':
+      return `財報 / 基本面檢查偏弱，涵蓋 ${p.count} 個可用指標。`;
+    case 'financialMixedSummary':
+      return `財報 / 基本面檢查多空混合，涵蓋 ${p.count} 個可用指標。`;
+    case 'financialDataMissing':
+      return '財報資料不足，需等待更完整的揭露或資料源。';
+    case 'financialValuationReasonable':
+      return `估值相對合理，PE 約 ${p.value}。`;
+    case 'financialValuationRich':
+      return `估值偏貴，PE 約 ${p.value}，毋通 ㄅㄇˊ 付太高價格。`;
+    case 'financialWatchValuation':
+      return `估值中性，PE 約 ${p.value}；觀察獲利上修或價格回檔。`;
+    case 'financialGrowthSupport':
+      return `成長指標有支撐，評分 ${p.score}/100。`;
+    case 'financialGrowthWeak':
+      return `成長指標偏弱，評分 ${p.score}/100。`;
+    case 'financialWatchNextReport':
+      return '重點觀察下一份財報的營收佮 ㄍㄚㄅ EPS 是否確認改善。';
+    case 'financialProfitabilitySupport':
+      return `獲利能力有支撐，評分 ${p.score}/100。`;
+    case 'financialProfitabilityWeak':
+      return `獲利能力偏弱，評分 ${p.score}/100。`;
+    case 'financialDebtControlled':
+      return `負債風險相對可控，評分 ${p.score}/100。`;
+    case 'financialDebtRisk':
+      return `負債壓力偏高，評分 ${p.score}/100。`;
+    case 'financialLiquiditySupport':
+      return `流動性佮 ㄍㄚㄅ 市值規模代理指標有支撐，評分 ${p.score}/100。`;
+    case 'financialLiquidityRisk':
+      return `流動性佮 ㄍㄚㄅ 市值規模代理指標偏弱，評分 ${p.score}/100。`;
+    case 'financialAnalystUpside':
+      return `分析師目標價隱含約 ${p.upside}% 上行空間，來自 ${p.count} 個意見。`;
+    case 'financialAnalystDownside':
+      return `分析師目標價隱含約 ${p.upside}% 下行空間。`;
+    case 'financialDividendSupport':
+      return `股息率約 ${p.yield}%，提供股東回報支撐。`;
+    case 'financialWatchHighRange':
+      return `價格位於 52 週區間較高位置 ${p.position}%，觀察回檔風險。`;
+    case 'financialWatchLowRange':
+      return `價格位於 52 週區間較低位置 ${p.position}%，觀察是否基本面惡化導致折價。`;
+    case 'actionAccumulate':
+      return `建議操作：總分維持 ${p.score}/100 時，可考慮分批佈局。`;
+    case 'actionReduceOrExit':
+      return `建議操作：除非總分從 ${p.score}/100 明顯修復，否則考慮降低倉位或退出。`;
+    case 'actionWait':
+      return `建議操作：等待確認，現在總分 ${p.score}/100。`;
+    case 'actionBuyInBatches':
+      return '用分批方式，毋通 ㄅㄇˊ 一次滿倉買入。';
+    case 'actionWaitNewsConfirmation':
+      return '加碼前等待下一則正面新聞或財報確認。';
+    case 'actionUseSmallPosition':
+      return `風險分只有 ${p.risk}/100，倉位應保持較小。`;
+    case 'actionReduceExposure':
+      return `研究評分只有 ${p.score}/100，應考慮降低風險暴露。`;
+    case 'actionDoNotAverageDown':
+      return '負面新聞事件占優時，不建議越跌越買攤平。';
+    case 'actionSetExitReview':
+      return '在下一次重大公告或財報後重新評估是否繼續持有。';
+    case 'actionNoChase':
+      return `毋通 ㄅㄇˊ 追高，目前信心度只有 ${p.score}/100。`;
+    case 'actionWatchNewsCatalyst':
+      return '觀察是否出現新催化：財報優於預期、指引上修、評級上調、回購或資金流入。';
+    case 'actionWatchFinancialRepair':
+      return `觀察 ${p.count} 個偏弱財務項是否開始修復。`;
+    case 'actionWatchMomentumTurn':
+      return '加碼前觀察價格動能是否轉強。';
+    case 'actionRespectRisk':
+      return `風險分 ${p.risk}/100，必須優先控制下行風險。`;
+    case 'actionRequireNewsEvidence':
+      return '需要新的公司級新聞證據，才適合做高信心判斷。';
+    default:
+      return point.key;
+  }
+}
+
 function pointLabel(point: DecisionPoint) {
   const p = point.params;
   const score = p.score !== undefined ? Number(p.score).toFixed(1) : '';
-  const count = p.count ?? 0;
-  const hours = p.hours ?? 0;
-  const text: Record<DecisionPoint['key'], Record<Locale, string>> = {
+  const count = Number(p.count ?? 0);
+  const hours = Number(p.hours ?? 0);
+  if (locale.value === 'nan-TW') {
+    return nanDecisionPointLabel(point, score, count, hours);
+  }
+
+  const text: Record<DecisionPoint['key'], Record<StandardLocale, string>> = {
     buySummary: {
       en: `Worth buying: total score ${p.score}/100, with enough relative strength under the selected news-led strategy.`,
       'zh-CN': `值得投资：总分 ${p.score}/100，在当前新闻权重策略下具备相对优势。`,
@@ -537,11 +718,32 @@ function pointLabel(point: DecisionPoint) {
       'zh-TW': '需要新的公司級新聞證據，才適合做高信心判斷。'
     }
   };
-  return text[point.key][locale.value];
+  return text[point.key][locale.value as StandardLocale];
 }
 
 function eventLabel(event: NewsEvent) {
-  const labels: Record<string, Record<Locale, string>> = {
+  if (locale.value === 'nan-TW') {
+    const labels: Record<string, string> = {
+      earningsPositive: '正面財報 / 業績事件',
+      earningsNegative: '負面財報 / 業績事件',
+      guidancePositive: '指引上修或展望改善',
+      guidanceNegative: '指引下修或展望轉弱',
+      analystPositive: '分析師上調評級 / 目標價',
+      analystNegative: '分析師下調評級 / 目標價',
+      capitalReturn: '回購 / 配息股東回報',
+      shareholderSale: '股東或內部人賣壓',
+      legalRegulatoryRisk: '法律或監管風險',
+      demandPositive: '需求 / 訂單催化',
+      demandNegative: '需求 / 訂單轉弱',
+      fundFlowPositive: '資金流入 / 機構買入',
+      fundFlowNegative: '資金流出 / 機構賣出',
+      generalPositiveNews: '整體新聞語氣偏好 ㄏㄛˋ',
+      generalNegativeNews: '整體新聞語氣偏壞 ㄆㄞˋ'
+    };
+    return labels[event.key] ?? event.key;
+  }
+
+  const labels: Record<string, Record<StandardLocale, string>> = {
     earningsPositive: { en: 'Positive earnings/report event', 'zh-CN': '正面财报/业绩事件', 'zh-TW': '正面財報/業績事件' },
     earningsNegative: { en: 'Negative earnings/report event', 'zh-CN': '负面财报/业绩事件', 'zh-TW': '負面財報/業績事件' },
     guidancePositive: { en: 'Guidance raised or outlook improved', 'zh-CN': '指引上修或展望改善', 'zh-TW': '指引上修或展望改善' },
@@ -558,11 +760,28 @@ function eventLabel(event: NewsEvent) {
     generalPositiveNews: { en: 'Broadly positive news tone', 'zh-CN': '整体新闻语气偏正面', 'zh-TW': '整體新聞語氣偏正面' },
     generalNegativeNews: { en: 'Broadly negative news tone', 'zh-CN': '整体新闻语气偏负面', 'zh-TW': '整體新聞語氣偏負面' }
   };
-  return labels[event.key]?.[locale.value] ?? event.key;
+  return labels[event.key]?.[locale.value as StandardLocale] ?? event.key;
 }
 
 function financialMetricLabel(metric: FinancialMetric) {
-  const labels: Record<string, Record<Locale, string>> = {
+  if (locale.value === 'nan-TW') {
+    const labels: Record<string, string> = {
+      pe: 'PE',
+      priceToBook: 'PB',
+      revenueGrowth: '營收成長',
+      earningsGrowth: '獲利成長',
+      returnOnEquity: 'ROE',
+      profitMargins: '利潤率',
+      debtToEquity: '負債 / 權益',
+      analystTargetUpside: '分析師目標價空間',
+      dividendYield: '股息率',
+      liquidityQuality: '流動性 / 規模代理',
+      fiftyTwoWeekPosition: '52 週位置'
+    };
+    return labels[metric.key] ?? metric.key;
+  }
+
+  const labels: Record<string, Record<StandardLocale, string>> = {
     pe: { en: 'PE', 'zh-CN': '市盈率', 'zh-TW': '本益比' },
     priceToBook: { en: 'PB', 'zh-CN': '市净率', 'zh-TW': '股價淨值比' },
     revenueGrowth: { en: 'Revenue growth', 'zh-CN': '营收增长', 'zh-TW': '營收成長' },
@@ -575,7 +794,7 @@ function financialMetricLabel(metric: FinancialMetric) {
     liquidityQuality: { en: 'Liquidity/size proxy', 'zh-CN': '流动性/规模代理', 'zh-TW': '流動性/規模代理' },
     fiftyTwoWeekPosition: { en: '52-week position', 'zh-CN': '52 周区间位置', 'zh-TW': '52 週區間位置' }
   };
-  return labels[metric.key]?.[locale.value] ?? metric.key;
+  return labels[metric.key]?.[locale.value as StandardLocale] ?? metric.key;
 }
 
 function sectorLabel(pick: Pick) {
@@ -708,6 +927,7 @@ onUnmounted(stopLoadingFeedback);
         <button :class="{ active: locale === 'en' }" @click="locale = 'en'"><span class="flag flag-uk"></span>EN</button>
         <button :class="{ active: locale === 'zh-CN' }" @click="locale = 'zh-CN'"><span class="flag flag-cn"></span>简</button>
         <button :class="{ active: locale === 'zh-TW' }" @click="locale = 'zh-TW'"><span class="flag flag-tw"></span>繁</button>
+        <button :class="{ active: locale === 'nan-TW' }" title="ㄉㄞˊ ㄍㄧˋ" aria-label="ㄉㄞˊ ㄍㄧˋ" @click="locale = 'nan-TW'"><span class="flag flag-nan"></span>ㄉㄞˊ</button>
       </div>
     </header>
 
@@ -739,7 +959,7 @@ onUnmounted(stopLoadingFeedback);
                 @click="toggleMarket(market.id)"
               >
                 <strong>{{ market.id }}</strong>
-                <span>{{ market.label }}</span>
+                <span>{{ marketLabel(market.id) }}</span>
               </button>
             </div>
           </div>

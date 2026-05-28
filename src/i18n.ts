@@ -1,4 +1,4 @@
-export type Locale = 'en' | 'zh-CN' | 'zh-TW';
+﻿export type Locale = 'en' | 'zh-CN' | 'zh-TW' | 'nan-TW';
 
 type MessageKey =
   | 'appName'
@@ -212,6 +212,59 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     liveData: '真實行情與 RSS 爬文',
     failures: '資料問題',
     sectorUnavailable: '產業資料暫缺'
+  },
+  'nan-TW': {
+    appName: 'Open Stock Picker',
+    subtitle: '免先輸入股票代碼，直接掃描市場，揣 ㄘㄨㄝ˫ 出較適合投資的優質股票。',
+    marketCoverage: '市場範圍',
+    strategy: '策略 ㄑㄧㄚㄅ ㄌㄧㄛㄍ',
+    defaultStrategy: '預設策略',
+    symbols: '直接市場掃描',
+    symbolsHint: '可選：輸入 ticker 或公司名，掃描範圍會變較細 ㄎㄚˋ ㄙㄨㄝ˪；留空就是直接掃描市場。',
+    symbolsBlank: '毋免 ㄅㄍˊ 輸入股票代碼',
+    scanPurpose: '掃描所選市場，照品質、估值、動能、風險佮 ㄍㄚㄅ 最新新聞排序。',
+    optionalSymbols: '可選：限定指定股票',
+    symbolsPlaceholder: 'AAPL, TSMC, D05.SI, 2330.TW, 600519.SS',
+    autoScan: '自動市場掃描',
+    customWeights: '自訂權重',
+    analyze: '掃描好股 ㄏㄛˋ ㄍㄛˋ',
+    refresh: '刷新 ㄒㄧㄣ ㄎㄧˋ',
+    topIdeas: 'AI 排名投資候選',
+    emptyTitle: '猶未 ㄧㄚˋ ㄅㄨㄝ˫ 開始掃描',
+    emptyHint: '看一下左側選項，確認後就開始掃描 ㄙㄠˋ。',
+    signalFeed: '爬文訊號',
+    score: '分數',
+    confidence: '信心度',
+    buy: '會使 ㄟ˫ ㄙㄞˋ 買',
+    watch: '重點觀察',
+    sell: '退出風險',
+    momentum: '動能',
+    value: '估值',
+    sentiment: '新聞情緒',
+    risk: '風險控制',
+    quality: '品質',
+    riskTolerance: '風險承受度',
+    source: '來源',
+    credibility: '可信度',
+    hoursAgo: ' 小時前',
+    loading: '正在掃描投資候選',
+    openSource: '免寫 code 的即時選股流程',
+    backendStatus: 'Python AI 評分 API',
+    allMarkets: '中國、香港、新加坡、美國、台灣 ㄉㄞˊ ㄨㄢˊ',
+    reasonTitle: '判斷因素',
+    scoreDetail: '100 分明細',
+    positiveReasons: '支持投資的理由',
+    negativeReasons: '退出 / 風險理由',
+    watchItems: '重點看啥物 ㄒㄧㄚˋ ㄇㄧㆷ',
+    actionPlan: '建議操作',
+    newsEvents: '新聞事件解析',
+    financialReview: '財報 / 基本面檢查',
+    riskControls: '風險控制',
+    weight: '權重',
+    contribution: '貢獻分',
+    liveData: '即時行情佮 ㄍㄚㄅ RSS 爬文',
+    failures: '資料問題',
+    sectorUnavailable: '產業資料暫缺'
   }
 };
 
@@ -256,6 +309,20 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     defensive: {
       name: '防守價值',
       description: '偏重低回撤、現金流、便宜估值和穩定訊號品質。'
+    }
+  },
+  'nan-TW': {
+    balanced: {
+      name: '均衡 AI 核心',
+      description: '綜合趨勢、估值、新聞情緒、下行風險佮 ㄍㄚㄅ 基本面品質。'
+    },
+    growth: {
+      name: '成長動能',
+      description: '偏重成長敘事、價格動能佮 ㄍㄚㄅ 正向機構 / 媒體覆蓋。'
+    },
+    defensive: {
+      name: '防守價值',
+      description: '偏重低回撤、現金流、便宜估值佮 ㄍㄚㄅ 穩定訊號品質。'
     }
   }
 };
