@@ -613,7 +613,7 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(verdicts.count("sell"), 8)
         self.assertEqual(verdicts.count("watch"), 8)
 
-    def test_blank_market_scan_does_not_promote_mediocre_best_names(self):
+    def test_blank_market_scan_promotes_relative_best_names(self):
         class MediocreUniverseProvider:
             def discover(self, markets, limit_per_market=18):
                 return [
@@ -668,7 +668,9 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
 
-        self.assertEqual({pick["verdict"] for pick in payload["picks"]}, {"watch"})
+        self.assertIn("buy", {pick["verdict"] for pick in payload["picks"]})
+        self.assertEqual([pick["verdict"] for pick in payload["picks"]].count("buy"), 1)
+        self.assertEqual(payload["sectors"][0]["recommendation"], "overweight")
         self.assertEqual(len(payload["picks"]), 8)
         self.assertEqual(payload["scan"]["displayed"], 8)
         self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
@@ -692,6 +694,21 @@ class ApiTestCase(unittest.TestCase):
         self.assertTrue(pick["financialAnalysis"]["metrics"])
         self.assertIn("actionPlan", pick)
         self.assertIn("steps", pick["actionPlan"])
+
+    def test_response_contains_sector_analysis(self):
+        response = self.client.post("/api/analyze", json={"markets": ["US"], "symbols": ["AAPL", "MSFT"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertIn("sectors", payload)
+        self.assertEqual(len(payload["sectors"]), 1)
+        sector = payload["sectors"][0]
+        self.assertEqual(sector["name"], "Technology")
+        self.assertEqual(sector["count"], 2)
+        self.assertIn(sector["recommendation"], {"overweight", "neutral", "underweight"})
+        self.assertEqual(set(sector["metrics"]), {"sentiment", "momentum", "value", "risk", "quality"})
+        self.assertEqual(sum(sector["verdictCounts"].values()), 2)
+        self.assertTrue(sector["leaders"])
+        self.assertIn("symbol", sector["leaders"][0])
 
     def test_eastmoney_fallback_builds_cn_market_snapshot(self):
         class FakeResponse:

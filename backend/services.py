@@ -383,6 +383,25 @@ def _is_watch_candidate(pick: dict) -> bool:
     )
 
 
+def _relative_buy_target(count: int) -> int:
+    if count <= 0:
+        return 0
+    return min(AUTO_SCAN_BUY_LIMIT, max(1, round(count * 0.18)))
+
+
+def _is_relative_investment_candidate(pick: dict) -> bool:
+    metrics = pick["metrics"]
+    return (
+        not _is_urgent_exit_candidate(pick)
+        and metrics["risk"] >= 35
+        and (
+            pick["score"] >= 50
+            or _investment_priority(pick) >= 54
+            or _investable_factor_count(metrics) >= 2
+        )
+    )
+
+
 def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
     for pick in picks:
         pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
@@ -400,6 +419,24 @@ def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
         pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"])
         pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
 
+    buy_count = sum(1 for pick in picks if pick["verdict"] == "buy")
+    target_buy_count = _relative_buy_target(len(picks))
+    if buy_count < target_buy_count:
+        relative_candidates = sorted(
+            [pick for pick in picks if pick["verdict"] != "buy" and _is_relative_investment_candidate(pick)],
+            key=_investment_priority,
+            reverse=True,
+        )
+        for pick in relative_candidates[: target_buy_count - buy_count]:
+            pick["verdict"] = "buy"
+            pick["reasonCodes"] = [
+                reason
+                for reason in pick["reasonCodes"]
+                if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}
+            ]
+            pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"])
+            pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
+
     for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
         pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index}})
 
@@ -410,6 +447,138 @@ def _display_priority_key(pick: dict) -> tuple[int, float]:
     if pick["verdict"] == "sell":
         return (1, -_sell_priority(pick))
     return (2, -_investment_priority(pick))
+
+
+def _average(values: list[float]) -> float:
+    return round(mean(values), 1) if values else 0.0
+
+
+def _sector_name(pick: dict) -> str:
+    sector = str(pick.get("sector") or "").strip()
+    return sector if sector and sector.lower() != "unknown" else "Unclassified"
+
+
+def _sector_id(name: str) -> str:
+    cleaned = "".join(character.lower() if character.isalnum() else "-" for character in name)
+    return "-".join(part for part in cleaned.split("-") if part) or "unclassified"
+
+
+def _sector_recommendation(score: float, metrics: dict[str, float], verdict_counts: dict[str, int], count: int) -> str:
+    sell_ratio = verdict_counts.get("sell", 0) / count if count else 0
+    buy_ratio = verdict_counts.get("buy", 0) / count if count else 0
+    if score >= 66 and metrics["risk"] >= 45 and metrics["sentiment"] >= 50 and sell_ratio < 0.34:
+        return "overweight"
+    if score < 54 or metrics["risk"] < 38 or sell_ratio >= 0.45:
+        return "underweight"
+    if buy_ratio >= 0.45 and metrics["quality"] >= 58 and metrics["momentum"] >= 55:
+        return "overweight"
+    return "neutral"
+
+
+def _sector_priority(sector: dict) -> float:
+    metrics = sector["metrics"]
+    sell_count = sector["verdictCounts"].get("sell", 0)
+    sell_ratio = sell_count / sector["count"] if sector["count"] else 0
+    return round(
+        sector["score"] * 0.48
+        + metrics["quality"] * 0.16
+        + metrics["momentum"] * 0.14
+        + metrics["risk"] * 0.12
+        + metrics["sentiment"] * 0.10
+        - sell_ratio * 18,
+        3,
+    )
+
+
+def _apply_relative_sector_recommendations(sectors: list[dict]) -> None:
+    if not sectors or any(sector["recommendation"] == "overweight" for sector in sectors):
+        return
+    candidates = [
+        sector
+        for sector in sectors
+        if sector["score"] >= 50
+        and sector["metrics"]["risk"] >= 35
+        and sector["verdictCounts"].get("sell", 0) < sector["count"]
+    ]
+    if not candidates:
+        candidates = [
+            sector
+            for sector in sectors
+            if sector["metrics"]["risk"] >= 30
+            and sector["verdictCounts"].get("sell", 0) < sector["count"]
+        ]
+    if candidates:
+        sorted(candidates, key=_sector_priority, reverse=True)[0]["recommendation"] = "overweight"
+
+
+def _constituent_summary(pick: dict) -> dict:
+    return {
+        "symbol": pick["symbol"],
+        "name": pick["name"],
+        "market": pick["market"],
+        "score": pick["score"],
+        "verdict": pick["verdict"],
+    }
+
+
+def _sector_analysis(picks: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for pick in picks:
+        grouped.setdefault(_sector_name(pick), []).append(pick)
+
+    sectors = []
+    for name, sector_picks in grouped.items():
+        metrics = {
+            factor: _average([float(pick["metrics"].get(factor, 0)) for pick in sector_picks])
+            for factor in FACTOR_ORDER
+        }
+        score = _average([float(pick["score"]) for pick in sector_picks])
+        verdict_counts = {
+            "buy": sum(1 for pick in sector_picks if pick["verdict"] == "buy"),
+            "watch": sum(1 for pick in sector_picks if pick["verdict"] == "watch"),
+            "sell": sum(1 for pick in sector_picks if pick["verdict"] == "sell"),
+        }
+        market_counts: dict[str, int] = {}
+        for pick in sector_picks:
+            market_counts[pick["market"]] = market_counts.get(pick["market"], 0) + 1
+        leaders = sorted(sector_picks, key=_investment_priority, reverse=True)[:3]
+        leader_symbols = {pick["symbol"] for pick in leaders}
+        laggards = [
+            pick
+            for pick in sorted(sector_picks, key=_sell_priority, reverse=True)
+            if pick["symbol"] not in leader_symbols
+        ][:3]
+        count = len(sector_picks)
+        sectors.append(
+            {
+                "id": _sector_id(name),
+                "name": name,
+                "score": score,
+                "recommendation": _sector_recommendation(score, metrics, verdict_counts, count),
+                "confidence": round(min(96, 42 + abs(score - 50) * 0.46 + min(count, 8) * 4 + metrics["quality"] * 0.12)),
+                "count": count,
+                "marketMix": [
+                    {"market": market, "count": market_counts[market]}
+                    for market in sorted(market_counts)
+                ],
+                "verdictCounts": verdict_counts,
+                "metrics": metrics,
+                "leaders": [_constituent_summary(pick) for pick in leaders],
+                "laggards": [_constituent_summary(pick) for pick in laggards],
+            }
+        )
+
+    _apply_relative_sector_recommendations(sectors)
+    recommendation_priority = {"overweight": 0, "neutral": 1, "underweight": 2}
+    return sorted(
+        sectors,
+        key=lambda sector: (
+            recommendation_priority.get(sector["recommendation"], 3),
+            -sector["score"],
+            -sector["count"],
+            sector["name"],
+        ),
+    )
 
 
 def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
@@ -1053,11 +1222,13 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
 
     context["evaluated"] = len(picks)
     display_picks = _finish_picks(picks, context["auto_scan"])
+    sectors = _sector_analysis(display_picks)
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "markets": MARKETS,
         "strategy": strategy,
         "picks": display_picks,
+        "sectors": sectors,
         "errors": errors,
         "scan": _scan_state(context, display_picks, errors),
     }
@@ -1094,22 +1265,25 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                 picks.append(pick)
                 context["evaluated"] = len(picks)
                 display_picks = _finish_picks(picks, context["auto_scan"])
+                sectors = _sector_analysis(display_picks)
                 rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
-                yield event("pick", pick=pick, picks=display_picks, rank=rank, scan=_scan_state(context, display_picks, errors))
+                yield event("pick", pick=pick, picks=display_picks, sectors=sectors, rank=rank, scan=_scan_state(context, display_picks, errors))
             except Exception as exc:
                 error_message = _friendly_data_error(symbol, exc)
                 errors.append({"symbol": symbol, "error": error_message})
                 display_picks = _finish_picks(picks, context["auto_scan"])
-                yield event("error", symbol=symbol, error=error_message, scan=_scan_state(context, display_picks, errors))
+                yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(display_picks), scan=_scan_state(context, display_picks, errors))
 
     context["evaluated"] = len(picks)
     display_picks = _finish_picks(picks, context["auto_scan"])
+    sectors = _sector_analysis(display_picks)
     yield event(
         "complete",
         generatedAt=generated_at,
         markets=MARKETS,
         strategy=strategy,
         picks=display_picks,
+        sectors=sectors,
         errors=errors,
         scan=_scan_state(context, display_picks, errors),
     )

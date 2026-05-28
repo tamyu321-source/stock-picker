@@ -17,6 +17,20 @@ type MessageKey =
   | 'analyze'
   | 'refresh'
   | 'topIdeas'
+  | 'stockView'
+  | 'sectorView'
+  | 'sectorIdeas'
+  | 'sectorEmptyTitle'
+  | 'sectorEmptyHint'
+  | 'sectorCount'
+  | 'sectorRecommendation'
+  | 'sectorDimensions'
+  | 'sectorLeaders'
+  | 'sectorLaggards'
+  | 'sectorMarketMix'
+  | 'overweight'
+  | 'sectorNeutral'
+  | 'underweight'
   | 'emptyTitle'
   | 'emptyHint'
   | 'signalFeed'
@@ -74,6 +88,20 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     analyze: 'Scan for quality stocks',
     refresh: 'Refresh',
     topIdeas: 'AI-ranked investment candidates',
+    stockView: 'Stocks',
+    sectorView: 'Sectors',
+    sectorIdeas: 'Multi-dimensional sector advice',
+    sectorEmptyTitle: 'No sector analysis yet',
+    sectorEmptyHint: 'Run a scan first; sectors will be ranked from the same scored candidates.',
+    sectorCount: 'Constituents',
+    sectorRecommendation: 'Recommendation',
+    sectorDimensions: 'Sector dimensions',
+    sectorLeaders: 'Leaders',
+    sectorLaggards: 'Risk drag',
+    sectorMarketMix: 'Market mix',
+    overweight: 'Overweight',
+    sectorNeutral: 'Neutral',
+    underweight: 'Underweight',
     emptyTitle: 'No scan has run yet',
     emptyHint: 'Review the saved options on the left, then start a scan when you are ready.',
     signalFeed: 'Crawled signal feed',
@@ -130,6 +158,20 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     analyze: '扫描优质投资标的',
     refresh: '刷新',
     topIdeas: 'AI 排名投资候选',
+    stockView: '个股',
+    sectorView: '板块',
+    sectorIdeas: '多维度板块投资建议',
+    sectorEmptyTitle: '还没有板块分析',
+    sectorEmptyHint: '先运行一次扫描，系统会基于同一批评分结果聚合各板块建议。',
+    sectorCount: '成分股',
+    sectorRecommendation: '投资建议',
+    sectorDimensions: '板块维度',
+    sectorLeaders: '领先标的',
+    sectorLaggards: '拖累风险',
+    sectorMarketMix: '市场分布',
+    overweight: '建议超配',
+    sectorNeutral: '中性配置',
+    underweight: '建议低配',
     emptyTitle: '还没有开始扫描',
     emptyHint: '左侧会恢复上次保存的选项，确认后再手动点击扫描即可。',
     signalFeed: '爬文信号',
@@ -186,6 +228,20 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     analyze: '掃描優質投資標的',
     refresh: '刷新',
     topIdeas: 'AI 排名投資候選',
+    stockView: '個股',
+    sectorView: '板塊',
+    sectorIdeas: '多維度板塊投資建議',
+    sectorEmptyTitle: '還沒有板塊分析',
+    sectorEmptyHint: '先執行一次掃描，系統會基於同一批評分結果聚合各板塊建議。',
+    sectorCount: '成分股',
+    sectorRecommendation: '投資建議',
+    sectorDimensions: '板塊維度',
+    sectorLeaders: '領先標的',
+    sectorLaggards: '拖累風險',
+    sectorMarketMix: '市場分布',
+    overweight: '建議超配',
+    sectorNeutral: '中性配置',
+    underweight: '建議低配',
     emptyTitle: '還沒有開始掃描',
     emptyHint: '左側會恢復上次保存的選項，確認後再手動點擊掃描即可。',
     signalFeed: '爬文訊號',
@@ -242,6 +298,20 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     analyze: '掃描好股 ㄏㄛˋ ㄍㄛˋ',
     refresh: '刷新 ㄒㄧㄣ ㄎㄧˋ',
     topIdeas: 'AI 排名投資候選',
+    stockView: '個股',
+    sectorView: '板塊',
+    sectorIdeas: '多維度板塊投資建議',
+    sectorEmptyTitle: '猶未 ㄧㄚˋ ㄅㄨㄝ˫ 有板塊分析',
+    sectorEmptyHint: '先掃描一擺，系統會照同一批分數聚合各板塊建議。',
+    sectorCount: '成分股',
+    sectorRecommendation: '投資建議',
+    sectorDimensions: '板塊維度',
+    sectorLeaders: '領先標的',
+    sectorLaggards: '拖累風險',
+    sectorMarketMix: '市場分布',
+    overweight: '建議超配',
+    sectorNeutral: '中性配置',
+    underweight: '建議低配',
     emptyTitle: '猶未 ㄧㄚˋ ㄅㄨㄝ˫ 開始掃描',
     emptyHint: '看一下左側選項，確認後就開始掃描 ㄙㄠˋ。',
     signalFeed: '爬文訊號',

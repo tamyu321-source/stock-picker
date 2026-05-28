@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type Strategy, type StrategyWeights } from './api';
+import { analyzeStocksStream, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 
 type StandardLocale = Exclude<Locale, 'nan-TW'>;
@@ -15,6 +15,8 @@ const error = ref('');
 const generatedAt = ref('');
 const symbolText = ref('');
 const picks = ref<Pick[]>([]);
+const sectors = ref<SectorAnalysis[]>([]);
+const activeView = ref<'stocks' | 'sectors'>('stocks');
 const dataIssues = ref<Array<{ symbol: string; error: string }>>([]);
 const scanInfo = ref<{ auto: boolean; requested: number; succeeded: number; failed: number } | null>(null);
 const loadingStartedAt = ref(0);
@@ -823,6 +825,70 @@ function sectorLabel(pick: Pick) {
   return pick.sector && pick.sector !== 'Unknown' ? pick.sector : t.value.sectorUnavailable;
 }
 
+function sectorRecommendationLabel(recommendation: SectorRecommendation) {
+  if (recommendation === 'overweight') return t.value.overweight;
+  if (recommendation === 'underweight') return t.value.underweight;
+  return t.value.sectorNeutral;
+}
+
+function sectorMetricValue(sector: SectorAnalysis, factor: keyof StrategyWeights) {
+  return Number(sector.metrics[factor] ?? 0);
+}
+
+function sectorMetricWidth(sector: SectorAnalysis, factor: keyof StrategyWeights) {
+  return `${Math.max(4, Math.min(100, sectorMetricValue(sector, factor)))}%`;
+}
+
+function sectorVerdictCount(sector: SectorAnalysis, verdict: Pick['verdict']) {
+  return sector.verdictCounts[verdict] ?? 0;
+}
+
+function sectorMarketMixLabel(sector: SectorAnalysis) {
+  return sector.marketMix.map((item) => `${item.market} ${item.count}`).join(' · ');
+}
+
+function sectorInsight(sector: SectorAnalysis) {
+  const ranked = weightKeys
+    .map((factor) => ({ factor, score: sectorMetricValue(sector, factor) }))
+    .sort((left, right) => right.score - left.score);
+  const strongest = ranked[0];
+  const weakest = ranked[ranked.length - 1];
+  if (locale.value === 'en') {
+    if (sector.recommendation === 'overweight') {
+      return `${factorLabel(strongest.factor)} leads at ${strongest.score.toFixed(1)}/100, while ${factorLabel(weakest.factor)} is the main check.`;
+    }
+    if (sector.recommendation === 'underweight') {
+      return `${factorLabel(weakest.factor)} is dragging the sector at ${weakest.score.toFixed(1)}/100; keep exposure tight.`;
+    }
+    return `${factorLabel(strongest.factor)} is supportive, but ${factorLabel(weakest.factor)} still needs confirmation.`;
+  }
+  if (locale.value === 'zh-CN') {
+    if (sector.recommendation === 'overweight') {
+      return `${factorLabel(strongest.factor)} 最强，达到 ${strongest.score.toFixed(1)}/100；${factorLabel(weakest.factor)} 是主要检查点。`;
+    }
+    if (sector.recommendation === 'underweight') {
+      return `${factorLabel(weakest.factor)} 拖累明显，只有 ${weakest.score.toFixed(1)}/100，板块仓位应收紧。`;
+    }
+    return `${factorLabel(strongest.factor)} 有支撑，但 ${factorLabel(weakest.factor)} 仍需确认。`;
+  }
+  if (locale.value === 'nan-TW') {
+    if (sector.recommendation === 'overweight') {
+      return `${factorLabel(strongest.factor)} 較強，有 ${strongest.score.toFixed(1)}/100；${factorLabel(weakest.factor)} 是主要檢查點。`;
+    }
+    if (sector.recommendation === 'underweight') {
+      return `${factorLabel(weakest.factor)} 拖累較明顯，只有 ${weakest.score.toFixed(1)}/100，板塊倉位愛收斂。`;
+    }
+    return `${factorLabel(strongest.factor)} 有支撐，毋過 ${factorLabel(weakest.factor)} 猶愛確認。`;
+  }
+  if (sector.recommendation === 'overweight') {
+    return `${factorLabel(strongest.factor)} 最強，達到 ${strongest.score.toFixed(1)}/100；${factorLabel(weakest.factor)} 是主要檢查點。`;
+  }
+  if (sector.recommendation === 'underweight') {
+    return `${factorLabel(weakest.factor)} 拖累明顯，只有 ${weakest.score.toFixed(1)}/100，板塊倉位應收斂。`;
+  }
+  return `${factorLabel(strongest.factor)} 有支撐，但 ${factorLabel(weakest.factor)} 仍需確認。`;
+}
+
 function startLoadingFeedback() {
   stopLoadingFeedback();
   loadingRunId += 1;
@@ -866,6 +932,7 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
   if (event.type === 'started') {
     scanInfo.value = event.scan;
     generatedAt.value = '';
+    sectors.value = [];
     loadingStepIndex.value = 0;
     return;
   }
@@ -875,17 +942,24 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
     } else {
       upsertStreamingPick(event.pick);
     }
+    if (event.sectors) {
+      sectors.value = event.sectors;
+    }
     scanInfo.value = event.scan;
     loadingStepIndex.value = Math.max(loadingStepIndex.value, 2);
     return;
   }
   if (event.type === 'error') {
     dataIssues.value = [...dataIssues.value, { symbol: event.symbol, error: event.error }];
+    if (event.sectors) {
+      sectors.value = event.sectors;
+    }
     scanInfo.value = event.scan;
     loadingStepIndex.value = Math.max(loadingStepIndex.value, 2);
     return;
   }
   picks.value = event.picks;
+  sectors.value = event.sectors;
   dataIssues.value = event.errors;
   scanInfo.value = event.scan;
   generatedAt.value = new Date(event.generatedAt).toLocaleString();
@@ -900,6 +974,7 @@ async function runAnalysis() {
   error.value = '';
   scanInfo.value = null;
   picks.value = [];
+  sectors.value = [];
   dataIssues.value = [];
   generatedAt.value = '';
   try {
@@ -1045,8 +1120,18 @@ onUnmounted(stopLoadingFeedback);
 
       <section class="results">
         <div class="section-row">
-          <h2>{{ t.topIdeas }}</h2>
-          <button class="ghost" :disabled="loading" @click="runAnalysis">{{ t.refresh }}</button>
+          <h2>{{ activeView === 'stocks' ? t.topIdeas : t.sectorIdeas }}</h2>
+          <div class="result-actions">
+            <div class="view-toggle" role="tablist" aria-label="Result view">
+              <button :class="{ active: activeView === 'stocks' }" type="button" @click="activeView = 'stocks'">
+                {{ t.stockView }} <span>{{ picks.length }}</span>
+              </button>
+              <button :class="{ active: activeView === 'sectors' }" type="button" @click="activeView = 'sectors'">
+                {{ t.sectorView }} <span>{{ sectors.length }}</span>
+              </button>
+            </div>
+            <button class="ghost" :disabled="loading" @click="runAnalysis">{{ t.refresh }}</button>
+          </div>
         </div>
 
         <div v-if="loading" class="analysis-wait" role="status" aria-live="polite">
@@ -1059,7 +1144,7 @@ onUnmounted(stopLoadingFeedback);
           </div>
         </div>
 
-        <div class="pick-list">
+        <div v-if="activeView === 'stocks'" class="pick-list">
           <article v-if="!loading && !picks.length && !dataIssues.length" class="empty-card">
             <strong>{{ t.emptyTitle }}</strong>
             <p>{{ t.emptyHint }}</p>
@@ -1188,6 +1273,66 @@ onUnmounted(stopLoadingFeedback);
                     <li v-for="item in pick.financialAnalysis.watchItems" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
                   </ul>
                 </div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div v-else class="sector-list">
+          <article v-if="!loading && !sectors.length && !dataIssues.length" class="empty-card">
+            <strong>{{ t.sectorEmptyTitle }}</strong>
+            <p>{{ t.sectorEmptyHint }}</p>
+          </article>
+
+          <article v-for="sector in sectors" :key="sector.id" class="sector-card" :class="sector.recommendation">
+            <div class="sector-heading">
+              <div>
+                <span class="sector-recommendation">{{ sectorRecommendationLabel(sector.recommendation) }}</span>
+                <h3>{{ sector.name }}</h3>
+                <p>{{ sectorInsight(sector) }}</p>
+              </div>
+              <div class="score-pill">
+                <span>{{ t.score }}</span>
+                <strong>{{ sector.score }}</strong>
+              </div>
+            </div>
+
+            <div class="metric-row sector-stats">
+              <span>{{ t.sectorCount }} {{ sector.count }}</span>
+              <span>{{ t.buy }} {{ sectorVerdictCount(sector, 'buy') }}</span>
+              <span>{{ t.watch }} {{ sectorVerdictCount(sector, 'watch') }}</span>
+              <span>{{ t.sell }} {{ sectorVerdictCount(sector, 'sell') }}</span>
+              <span>{{ t.confidence }} {{ sector.confidence }}%</span>
+              <span>{{ t.sectorMarketMix }} {{ sectorMarketMixLabel(sector) }}</span>
+            </div>
+
+            <div class="sector-dimensions">
+              <strong>{{ t.sectorDimensions }}</strong>
+              <div v-for="factor in weightKeys" :key="`${sector.id}-${factor}`" class="sector-dimension">
+                <div>
+                  <span>{{ factorLabel(factor) }}</span>
+                  <b>{{ sectorMetricValue(sector, factor).toFixed(1) }}</b>
+                </div>
+                <div class="dimension-bar">
+                  <span :style="{ width: sectorMetricWidth(sector, factor) }"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="sector-constituents">
+              <div>
+                <strong>{{ t.sectorLeaders }}</strong>
+                <p v-for="leader in sector.leaders" :key="`${sector.id}-leader-${leader.symbol}`">
+                  <span>{{ leader.symbol }}</span>
+                  {{ leader.name }} · {{ leader.score }} · {{ verdictLabel(leader.verdict) }}
+                </p>
+              </div>
+              <div v-if="sector.laggards.length">
+                <strong>{{ t.sectorLaggards }}</strong>
+                <p v-for="laggard in sector.laggards" :key="`${sector.id}-laggard-${laggard.symbol}`">
+                  <span>{{ laggard.symbol }}</span>
+                  {{ laggard.name }} · {{ laggard.score }} · {{ verdictLabel(laggard.verdict) }}
+                </p>
               </div>
             </div>
           </article>

@@ -1,5 +1,6 @@
 export type Market = 'US' | 'CN' | 'HK' | 'SG' | 'TW';
 export type Verdict = 'buy' | 'watch' | 'sell';
+export type SectorRecommendation = 'overweight' | 'neutral' | 'underweight';
 
 export interface StrategyWeights {
   momentum: number;
@@ -184,11 +185,34 @@ export interface Pick {
   actionPlan?: ActionPlan;
 }
 
+export interface SectorConstituent {
+  symbol: string;
+  name: string;
+  market: Market;
+  score: number;
+  verdict: Verdict;
+}
+
+export interface SectorAnalysis {
+  id: string;
+  name: string;
+  score: number;
+  recommendation: SectorRecommendation;
+  confidence: number;
+  count: number;
+  marketMix: Array<{ market: Market; count: number }>;
+  verdictCounts: Record<Verdict, number>;
+  metrics: StrategyWeights;
+  leaders: SectorConstituent[];
+  laggards: SectorConstituent[];
+}
+
 export interface AnalysisResponse {
   generatedAt: string;
   markets: MarketOption[];
   strategy: Strategy;
   picks: Pick[];
+  sectors: SectorAnalysis[];
   errors: Array<{ symbol: string; error: string }>;
   scan?: {
     auto: boolean;
@@ -222,6 +246,7 @@ export type AnalysisStreamEvent =
       type: 'pick';
       pick: Pick;
       picks?: Pick[];
+      sectors?: SectorAnalysis[];
       rank: number;
       scan: AnalysisScan;
     }
@@ -229,6 +254,7 @@ export type AnalysisStreamEvent =
       type: 'error';
       symbol: string;
       error: string;
+      sectors?: SectorAnalysis[];
       scan: AnalysisScan;
     }
   | AnalysisResponse & {
