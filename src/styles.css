@@ -200,28 +200,37 @@ h1 {
 }
 
 .flag-nan {
-  background: #f8fff8;
+  background:
+    linear-gradient(
+      90deg,
+      #00a043 0 24%,
+      #fff 24% 76%,
+      #00a043 76% 100%
+    );
 }
 
 .flag-nan::before {
   content: "";
   position: absolute;
-  inset: 1px;
-  border: 1px solid #128a4b;
-  border-radius: 1px;
+  left: 7px;
+  top: 2px;
+  width: 6px;
+  height: 11px;
+  background: #00a043;
+  clip-path: polygon(58% 0, 72% 8%, 78% 21%, 72% 34%, 77% 47%, 66% 63%, 55% 77%, 43% 89%, 48% 100%, 35% 96%, 30% 83%, 19% 74%, 10% 58%, 13% 39%, 29% 28%, 37% 14%);
+  transform: rotate(14deg);
 }
 
 .flag-nan::after {
   content: "";
   position: absolute;
-  left: 9px;
-  top: 2px;
-  width: 6px;
-  height: 10px;
-  border-radius: 60% 45% 55% 50%;
+  left: 5px;
+  top: 8px;
+  width: 1.4px;
+  height: 1.4px;
+  border-radius: 999px;
   background: #0aa35b;
-  transform: rotate(22deg);
-  box-shadow: -3px 7px 0 -2px #0aa35b;
+  box-shadow: 8px 3px 0 -0.35px #00a043, 9px 7px 0 -0.35px #00a043;
 }
 
 .status-strip {

@@ -82,7 +82,7 @@ const marketLabels: Record<Locale, Record<Market, string>> = {
     HK: '香港',
     SG: '新加坡',
     US: '美國',
-    TW: '台灣 ㄉㄞˊ ㄨㄢˊ'
+    TW: '臺灣'
   }
 };
 
@@ -146,8 +146,8 @@ const analysisSteps = computed(() => {
   }
   if (locale.value === 'nan-TW') {
     return isAutoScan.value
-      ? ['直接掃描所選市場', '交叉檢查在地財經新聞', '抓 ㄌㄚㄏ 行情佮基本面', '排序優質投資候選']
-      : ['抓 ㄌㄚㄏ 個股近期新聞', '取得行情佮基本面', '計算策略評分', '整理判斷佮風險提示'];
+      ? ['直接掃所選市場', '交叉檢查在地財經新聞', '取得行情佮基本面', '排序較好的投資候選']
+      : ['取得個股近期新聞', '取得行情佮基本面', '計算策略分數', '整理判斷佮風險提示'];
   }
   return isAutoScan.value
     ? ['正在直接掃描所選市場', '正在交叉檢查當地財經新聞源', '正在拉取行情與基本面', '正在排序優質投資候選']
@@ -157,7 +157,7 @@ const activeAnalysisStep = computed(() => analysisSteps.value[Math.min(loadingSt
 const loadingElapsedLabel = computed(() => {
   if (locale.value === 'en') return `${loadingElapsedSeconds.value}s elapsed`;
   if (locale.value === 'zh-CN') return `已等待 ${loadingElapsedSeconds.value} 秒`;
-  if (locale.value === 'nan-TW') return `已等 ㄊㄢˋ ${loadingElapsedSeconds.value} 秒`;
+  if (locale.value === 'nan-TW') return `已等 ${loadingElapsedSeconds.value} 秒`;
   return `已等待 ${loadingElapsedSeconds.value} 秒`;
 });
 
@@ -276,37 +276,37 @@ function reasonLabel(reason: ReasonCode) {
   if (reason.key === 'strongestFactors') {
     if (locale.value === 'en') return `${factorLabel(params.first)} and ${factorLabel(params.second)} are the strongest factors.`;
     if (locale.value === 'zh-CN') return `${factorLabel(params.first)} 与 ${factorLabel(params.second)} 是最强的评分因子。`;
-    if (locale.value === 'nan-TW') return `${factorLabel(params.first)} 佮 ㄍㄚㄅ ${factorLabel(params.second)} 是較強的評分因子。`;
+    if (locale.value === 'nan-TW') return `${factorLabel(params.first)} 佮 ${factorLabel(params.second)} 是較強的評分因子。`;
     return `${factorLabel(params.first)} 與 ${factorLabel(params.second)} 是最強的評分因子。`;
   }
   if (reason.key === 'sentimentImpact') {
     const delta = Number(params.delta).toFixed(1);
     if (locale.value === 'en') return `Live crawled sentiment changes the score by ${Number(params.delta) >= 0 ? '+' : ''}${delta} points.`;
     if (locale.value === 'zh-CN') return `实时爬文情绪让评分变化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
-    if (locale.value === 'nan-TW') return `即時爬文情緒予 ㄏㄛ˫ 評分變化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
+    if (locale.value === 'nan-TW') return `即時爬文的新聞氣口，予評分變化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
     return `即時爬文情緒讓評分變化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
   }
   if (reason.key === 'belowThreshold') {
     if (locale.value === 'en') return `${factorLabel(params.factor)} is below threshold and should be monitored before adding exposure.`;
     if (locale.value === 'zh-CN') return `${factorLabel(params.factor)} 低于门槛，加仓前需要继续观察。`;
-    if (locale.value === 'nan-TW') return `${factorLabel(params.factor)} 低於門檻，加碼前先看 ㄎㄨㄚˋ 清楚。`;
+    if (locale.value === 'nan-TW') return `${factorLabel(params.factor)} 低於門檻，加碼前愛閣觀察。`;
     return `${factorLabel(params.factor)} 低於門檻，加碼前需要繼續觀察。`;
   }
   if (reason.key === 'clearsBuyThreshold') {
     if (locale.value === 'en') return 'Composite score clears the buy threshold under the selected strategy.';
     if (locale.value === 'zh-CN') return '综合评分已通过当前策略的买入门槛。';
-    if (locale.value === 'nan-TW') return '綜合評分已經過買入門檻，會使 ㄟ˫ ㄙㄞˋ 納入候選。';
+    if (locale.value === 'nan-TW') return '綜合評分已經過買入門檻，會使納入候選。';
     return '綜合評分已通過目前策略的買入門檻。';
   }
   if (reason.key === 'rankedTopOpportunity') {
     if (locale.value === 'en') return `Ranked #${params.rank} within this scan, making it a relative buy candidate.`;
     if (locale.value === 'zh-CN') return `本次扫描排名第 ${params.rank}，属于相对更值得关注的买入候选。`;
-    if (locale.value === 'nan-TW') return `這擺掃描排名第 ${params.rank}，是較值得看 ㄎㄨㄚˋ 的買入候選。`;
+    if (locale.value === 'nan-TW') return `這擺掃描排名第 ${params.rank}，是相對較值得看的買入候選。`;
     return `本次掃描排名第 ${params.rank}，屬於相對更值得關注的買入候選。`;
   }
   if (locale.value === 'en') return 'Composite score is not strong enough for a high-conviction entry.';
   if (locale.value === 'zh-CN') return '综合评分暂不足以支持高信心进场。';
-  if (locale.value === 'nan-TW') return '綜合評分暫時無夠 ㄅㄨㄝ˫ ㄍㄠˋ 支持高信心進場。';
+  if (locale.value === 'nan-TW') return '綜合評分暫時無夠支持高信心進場。';
   return '綜合評分暫不足以支持高信心進場。';
 }
 
@@ -326,9 +326,9 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
   const netScore = signedScore(p.netScore);
   switch (point.key) {
     case 'buySummary':
-      return `值得買入：總分 ${p.score}/100，這个 ㄐㄧㄚˋ 方案相對有力。`;
+      return `會使買入：總分 ${p.score}/100，這个方案相對有力。`;
     case 'watchSummary':
-      return `重點觀察：總分 ${p.score}/100，進場或離場確認猶未 ㄧㄚˋ ㄅㄨㄝ˫ 完整。`;
+      return `重點觀察：總分 ${p.score}/100，進場或離場確認猶未完整。`;
     case 'sellSummary':
       return `退出風險：總分 ${p.score}/100，目前風險報酬較弱。`;
     case 'newsSupport':
@@ -336,13 +336,13 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'newsPressure':
       return `新聞負面強度 ${negativeScore}/100，高過正面 ${positiveScore}/100，淨分 ${netScore}，已有 ${count} 則相關訊號。`;
     case 'insufficientNews':
-      return '近期新聞證據無夠 ㄅㄨㄝ˫ ㄍㄠˋ，信心度應該收斂。';
+      return '近期新聞證據無夠，信心度愛收斂。';
     case 'freshNews':
       return `最新相關新聞約 ${hours} 小時前，時效性較好。`;
     case 'momentumSupport':
       return `價格動能 ${score}/100，有支撐。`;
     case 'weakMomentum':
-      return `動能偏弱，只有 ${score}/100，價格未確認前毋通 ㄅㄇˊ 追高。`;
+      return `動能偏弱，只有 ${score}/100，價格未確認前毋通追高。`;
     case 'watchBreakout':
       return '觀察動能能否提升到 60/100 以上。';
     case 'valuationSupport':
@@ -350,7 +350,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'expensiveValuation':
       return `估值偏貴，只有 ${score}/100，要注意利多兌現後回落。`;
     case 'watchValuation':
-      return '觀察下一次財報或指引後，估值有無 ㄨ˫ 重新變合理。';
+      return '觀察下一次財報或指引後，估值有無重新變合理。';
     case 'riskControlled':
       return `風險控制 ${score}/100，波動和 beta 目前可接受。`;
     case 'riskHigh':
@@ -362,7 +362,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'weakQuality':
       return `基本面品質偏弱，只有 ${score}/100。`;
     case 'watchNewsFlow':
-      return `新聞正面 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}；繼續看 ㄎㄨㄚˋ 後續新聞轉正或轉負。`;
+      return `新聞正面 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}；繼續看後續新聞轉正抑是轉負。`;
     case 'newsBullishSummary':
       return `新聞淨偏多：正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}，來自 ${p.total} 則近期新聞。`;
     case 'newsBearishSummary':
@@ -382,7 +382,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'financialValuationReasonable':
       return `估值相對合理，PE 約 ${p.value}。`;
     case 'financialValuationRich':
-      return `估值偏貴，PE 約 ${p.value}，毋通 ㄅㄇˊ 付太高價格。`;
+      return `估值偏貴，PE 約 ${p.value}，毋通付太高價。`;
     case 'financialWatchValuation':
       return `估值中性，PE 約 ${p.value}；觀察獲利上修或價格回檔。`;
     case 'financialGrowthSupport':
@@ -390,7 +390,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'financialGrowthWeak':
       return `成長指標偏弱，評分 ${p.score}/100。`;
     case 'financialWatchNextReport':
-      return '重點觀察下一份財報的營收佮 ㄍㄚㄅ EPS 是否確認改善。';
+      return '重點觀察下一份財報的營收佮 EPS 是否確認改善。';
     case 'financialProfitabilitySupport':
       return `獲利能力有支撐，評分 ${p.score}/100。`;
     case 'financialProfitabilityWeak':
@@ -400,9 +400,9 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'financialDebtRisk':
       return `負債壓力偏高，評分 ${p.score}/100。`;
     case 'financialLiquiditySupport':
-      return `流動性佮 ㄍㄚㄅ 市值規模代理指標有支撐，評分 ${p.score}/100。`;
+      return `流動性佮市值規模代理指標有支撐，評分 ${p.score}/100。`;
     case 'financialLiquidityRisk':
-      return `流動性佮 ㄍㄚㄅ 市值規模代理指標偏弱，評分 ${p.score}/100。`;
+      return `流動性佮市值規模代理指標偏弱，評分 ${p.score}/100。`;
     case 'financialAnalystUpside':
       return `分析師目標價隱含約 ${p.upside}% 上行空間，來自 ${p.count} 個意見。`;
     case 'financialAnalystDownside':
@@ -420,7 +420,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'actionWait':
       return `建議操作：等待確認，現在總分 ${p.score}/100。`;
     case 'actionBuyInBatches':
-      return '用分批方式，毋通 ㄅㄇˊ 一次滿倉買入。';
+      return '用分批方式，毋通一次滿倉買入。';
     case 'actionWaitNewsConfirmation':
       return '加碼前等待下一則正面新聞或財報確認。';
     case 'actionUseSmallPosition':
@@ -432,7 +432,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
     case 'actionSetExitReview':
       return '在下一次重大公告或財報後重新評估是否繼續持有。';
     case 'actionNoChase':
-      return `毋通 ㄅㄇˊ 追高，目前信心度只有 ${p.score}/100。`;
+      return `毋通追高，目前信心度只有 ${p.score}/100。`;
     case 'actionWatchNewsCatalyst':
       return '觀察是否出現新催化：財報優於預期、指引上修、評級上調、回購或資金流入。';
     case 'actionWatchFinancialRepair':
@@ -778,8 +778,8 @@ function eventLabel(event: NewsEvent) {
       fundFlowNegative: '資金流出 / 機構賣出',
       marketMomentumPositive: '市場動能正面事件',
       marketMomentumNegative: '市場動能負面事件',
-      generalPositiveNews: '整體新聞語氣偏好 ㄏㄛˋ',
-      generalNegativeNews: '整體新聞語氣偏壞 ㄆㄞˋ'
+      generalPositiveNews: '整體新聞氣口偏好',
+      generalNegativeNews: '整體新聞氣口偏歹'
     };
     return labels[event.key] ?? event.key;
   }
@@ -1227,7 +1227,7 @@ onUnmounted(stopAppTimers);
         <button :class="{ active: locale === 'en' }" @click="setLocale('en')"><span class="flag flag-uk"></span>EN</button>
         <button :class="{ active: locale === 'zh-CN' }" @click="setLocale('zh-CN')"><span class="flag flag-cn"></span>简</button>
         <button :class="{ active: locale === 'zh-TW' }" @click="setLocale('zh-TW')"><span class="flag flag-tw"></span>繁</button>
-        <button :class="{ active: locale === 'nan-TW' }" title="ㄉㄞˊ ㄍㄧˋ" aria-label="ㄉㄞˊ ㄍㄧˋ" @click="setLocale('nan-TW')"><span class="flag flag-nan"></span>ㄉㄞˊ</button>
+        <button :class="{ active: locale === 'nan-TW' }" title="臺語" aria-label="臺語" @click="setLocale('nan-TW')"><span class="flag flag-nan"></span>臺語</button>
       </div>
     </header>
 
