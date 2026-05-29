@@ -5,11 +5,16 @@ import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
 type StandardLocale = Exclude<Locale, 'nan-TW'>;
+type LocalizedText = Partial<Record<StandardLocale, string>> & { en: string };
 type YogurtSoundCue = 'appear' | 'tap';
+type ResultMarketFilter = 'all' | Market;
+type ResultVerdictFilter = 'all' | Pick['verdict'];
 
 const locale = ref<Locale>('en');
+const languageMenuOpen = ref(false);
+const languageMenuRef = ref<HTMLElement | null>(null);
 const config = ref<AppConfig | null>(null);
-const selectedMarkets = ref<Market[]>(['US', 'CN', 'HK', 'SG', 'TW']);
+const selectedMarkets = ref<Market[]>(['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW']);
 const selectedStrategyId = ref('balanced');
 const useCustom = ref(false);
 const loading = ref(false);
@@ -19,6 +24,8 @@ const symbolText = ref('');
 const picks = ref<Pick[]>([]);
 const sectors = ref<SectorAnalysis[]>([]);
 const activeView = ref<'stocks' | 'sectors'>('stocks');
+const resultMarketFilter = ref<ResultMarketFilter>('all');
+const resultVerdictFilter = ref<ResultVerdictFilter>('all');
 const dataIssues = ref<Array<{ symbol: string; error: string }>>([]);
 const scanInfo = ref<{ auto: boolean; requested: number; succeeded: number; failed: number } | null>(null);
 const loadingStartedAt = ref(0);
@@ -35,8 +42,17 @@ let yogurtAudioContext: AudioContext | undefined;
 const yogurtAudioDataUris: Partial<Record<YogurtSoundCue, string>> = {};
 
 const SETTINGS_STORAGE_KEY = 'open-stock-picker.settings.v1';
-const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'SG', 'TW'];
+const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
+const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 'watch', 'sell'];
+const languageOptions: Array<{ id: Locale; label: string; shortLabel: string; flagClass: string }> = [
+  { id: 'en', label: 'English', shortLabel: 'EN', flagClass: 'flag-uk' },
+  { id: 'zh-CN', label: '简体中文', shortLabel: '简', flagClass: 'flag-cn' },
+  { id: 'zh-TW', label: '繁體中文', shortLabel: '繁', flagClass: 'flag-tw' },
+  { id: 'nan-TW', label: '臺語', shortLabel: '臺', flagClass: 'flag-nan' },
+  { id: 'ja', label: '日本語', shortLabel: '日', flagClass: 'flag-jp' },
+  { id: 'ko', label: '한국어', shortLabel: '한', flagClass: 'flag-kr' }
+];
 
 type PersistedSettings = {
   locale?: Locale;
@@ -59,6 +75,8 @@ const marketLabels: Record<Locale, Record<Market, string>> = {
   en: {
     CN: 'China A-shares',
     HK: 'Hong Kong',
+    JP: 'Japan',
+    KR: 'South Korea',
     SG: 'Singapore',
     US: 'United States',
     TW: 'Taiwan'
@@ -66,6 +84,8 @@ const marketLabels: Record<Locale, Record<Market, string>> = {
   'zh-CN': {
     CN: '中国 A 股',
     HK: '香港',
+    JP: '日本',
+    KR: '韩国',
     SG: '新加坡',
     US: '美国',
     TW: '台湾'
@@ -73,6 +93,8 @@ const marketLabels: Record<Locale, Record<Market, string>> = {
   'zh-TW': {
     CN: '中國 A 股',
     HK: '香港',
+    JP: '日本',
+    KR: '韓國',
     SG: '新加坡',
     US: '美國',
     TW: '台灣'
@@ -80,17 +102,44 @@ const marketLabels: Record<Locale, Record<Market, string>> = {
   'nan-TW': {
     CN: '中國 A 股',
     HK: '香港',
+    JP: '日本',
+    KR: '韓國',
     SG: '新加坡',
     US: '美國',
     TW: '臺灣'
+  },
+  ja: {
+    CN: '中国 A 株',
+    HK: '香港',
+    JP: '日本',
+    KR: '韓国',
+    SG: 'シンガポール',
+    US: '米国',
+    TW: '台湾'
+  },
+  ko: {
+    CN: '중국 A주',
+    HK: '홍콩',
+    JP: '일본',
+    KR: '한국',
+    SG: '싱가포르',
+    US: '미국',
+    TW: '대만'
   }
 };
 
 const t = computed(() => messages[locale.value]);
+const activeLanguageOption = computed(() => languageOptions.find((option) => option.id === locale.value) ?? languageOptions[0]);
 const strategies = computed<Strategy[]>(() => config.value?.strategies ?? []);
 const selectedStrategy = computed(() => strategies.value.find((item) => item.id === selectedStrategyId.value));
 const marketOptions = computed(() => config.value?.markets ?? []);
-const flattenedSignals = computed(() => picks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
+const filteredPicks = computed(() => picks.value.filter((pick) => {
+  const marketMatches = resultMarketFilter.value === 'all' || pick.market === resultMarketFilter.value;
+  const verdictMatches = resultVerdictFilter.value === 'all' || pick.verdict === resultVerdictFilter.value;
+  return marketMatches && verdictMatches;
+}));
+const flattenedSignals = computed(() => filteredPicks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
+const resultFiltersActive = computed(() => resultMarketFilter.value !== 'all' || resultVerdictFilter.value !== 'all');
 const yogurtSecretLocalized = computed(() => locale.value === 'zh-TW' || locale.value === 'nan-TW');
 const yogurtSecretTriggerLabel = computed(() => (locale.value === 'nan-TW' ? '活菌雷達' : '菌群雷達'));
 const yogurtSecretClueLabel = computed(() => {
@@ -115,11 +164,15 @@ const scanLabel = computed(() => {
     if (isAutoScan.value) return t.value.autoScan;
     if (locale.value === 'en') return `${symbols.value.length} narrowed`;
     if (locale.value === 'zh-CN') return `限定 ${symbols.value.length} 只`;
+    if (locale.value === 'ja') return `${symbols.value.length} 件に絞り込み`;
+    if (locale.value === 'ko') return `${symbols.value.length}개로 제한`;
     if (locale.value === 'nan-TW') return `限定 ${symbols.value.length} 檔`;
     return `限定 ${symbols.value.length} 檔`;
   }
   if (locale.value === 'en') return `${scanInfo.value.succeeded}/${scanInfo.value.requested} scanned`;
   if (locale.value === 'zh-CN') return `已扫 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
+  if (locale.value === 'ja') return `${scanInfo.value.succeeded}/${scanInfo.value.requested} 件スキャン済み`;
+  if (locale.value === 'ko') return `${scanInfo.value.succeeded}/${scanInfo.value.requested}개 스캔 완료`;
   if (locale.value === 'nan-TW') return `已掃 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
   return `已掃 ${scanInfo.value.succeeded}/${scanInfo.value.requested}`;
 });
@@ -144,6 +197,16 @@ const analysisSteps = computed(() => {
       ? ['正在深度扫描所选市场', '正在交叉检查当地财经新闻源', '正在拉取行情与基本面', '正在严格筛选优质投资候选']
       : ['正在拉取个股近期新闻', '正在获取行情与基本面', '正在计算策略评分', '正在整理判断与风险提示'];
   }
+  if (locale.value === 'ja') {
+    return isAutoScan.value
+      ? ['選択市場から候補を発見中', '現地の金融ニュースを照合中', '価格とファンダメンタルを取得中', '高品質候補を厳格に選別中']
+      : ['直近の企業ニュースを取得中', '価格とファンダメンタルを取得中', '戦略スコアを計算中', '判断とリスクメモを作成中'];
+  }
+  if (locale.value === 'ko') {
+    return isAutoScan.value
+      ? ['선택 시장에서 후보를 찾는 중', '현지 금융 뉴스를 교차 확인 중', '가격과 펀더멘털을 가져오는 중', '우량 후보를 엄격히 선별 중']
+      : ['최근 기업 뉴스를 가져오는 중', '가격과 펀더멘털을 가져오는 중', '전략 점수를 계산 중', '판단과 리스크 메모를 정리 중'];
+  }
   if (locale.value === 'nan-TW') {
     return isAutoScan.value
       ? ['深入掃所選市場', '交叉檢查在地財經新聞', '取得行情佮基本面', '嚴格篩選優質投資候選']
@@ -157,12 +220,14 @@ const activeAnalysisStep = computed(() => analysisSteps.value[Math.min(loadingSt
 const loadingElapsedLabel = computed(() => {
   if (locale.value === 'en') return `${loadingElapsedSeconds.value}s elapsed`;
   if (locale.value === 'zh-CN') return `已等待 ${loadingElapsedSeconds.value} 秒`;
+  if (locale.value === 'ja') return `${loadingElapsedSeconds.value} 秒経過`;
+  if (locale.value === 'ko') return `${loadingElapsedSeconds.value}초 경과`;
   if (locale.value === 'nan-TW') return `已等 ${loadingElapsedSeconds.value} 秒`;
   return `已等待 ${loadingElapsedSeconds.value} 秒`;
 });
 
 function isLocale(value: unknown): value is Locale {
-  return value === 'en' || value === 'zh-CN' || value === 'zh-TW' || value === 'nan-TW';
+  return value === 'en' || value === 'zh-CN' || value === 'zh-TW' || value === 'nan-TW' || value === 'ja' || value === 'ko';
 }
 
 function isMarket(value: unknown): value is Market {
@@ -259,6 +324,52 @@ function verdictLabel(verdict: Pick['verdict']) {
   return t.value[verdict];
 }
 
+function allMarketsFilterLabel() {
+  if (locale.value === 'en') return 'All markets';
+  if (locale.value === 'zh-CN') return '全部市场';
+  if (locale.value === 'ja') return 'すべての市場';
+  if (locale.value === 'ko') return '전체 시장';
+  if (locale.value === 'nan-TW') return '全部市場';
+  return '全部市場';
+}
+
+function resultVerdictFilterLabel(option: ResultVerdictFilter) {
+  if (option !== 'all') return verdictLabel(option);
+  if (locale.value === 'en') return 'All calls';
+  if (locale.value === 'zh-CN') return '全部判断';
+  if (locale.value === 'ja') return 'すべての判断';
+  if (locale.value === 'ko') return '전체 판단';
+  if (locale.value === 'nan-TW') return '全部判斷';
+  return '全部判斷';
+}
+
+function resultCountLabel() {
+  if (locale.value === 'en') return `${filteredPicks.value.length}/${picks.value.length} shown`;
+  if (locale.value === 'zh-CN') return `显示 ${filteredPicks.value.length}/${picks.value.length}`;
+  if (locale.value === 'ja') return `${filteredPicks.value.length}/${picks.value.length} 件表示`;
+  if (locale.value === 'ko') return `${filteredPicks.value.length}/${picks.value.length}개 표시`;
+  if (locale.value === 'nan-TW') return `顯示 ${filteredPicks.value.length}/${picks.value.length}`;
+  return `顯示 ${filteredPicks.value.length}/${picks.value.length}`;
+}
+
+function filteredEmptyTitle() {
+  if (locale.value === 'en') return 'No matches for these filters';
+  if (locale.value === 'zh-CN') return '没有符合筛选的结果';
+  if (locale.value === 'ja') return '条件に合う結果がありません';
+  if (locale.value === 'ko') return '필터에 맞는 결과가 없습니다';
+  if (locale.value === 'nan-TW') return '無符合篩選的結果';
+  return '沒有符合篩選的結果';
+}
+
+function filteredEmptyHint() {
+  if (locale.value === 'en') return 'Change the market or call filter to bring more candidates back.';
+  if (locale.value === 'zh-CN') return '调整市场或判断筛选，就能看到更多候选。';
+  if (locale.value === 'ja') return '市場または判断条件を変えると、候補を戻せます。';
+  if (locale.value === 'ko') return '시장 또는 판단 필터를 바꾸면 더 많은 후보를 볼 수 있습니다.';
+  if (locale.value === 'nan-TW') return '調整市場抑是判斷篩選，就會看著較濟候選。';
+  return '調整市場或判斷篩選，就能看到更多候選。';
+}
+
 function factorLabel(value: string | number | undefined) {
   const key = String(value ?? '') as keyof StrategyWeights;
   return t.value[key] ?? String(value ?? '');
@@ -277,11 +388,15 @@ function predictionScoreLabel(kind: 'opportunity' | 'downside', pick: Pick) {
   if (kind === 'opportunity') {
     if (locale.value === 'en') return `Advantage ${score}/100`;
     if (locale.value === 'zh-CN') return `相对优势 ${score}/100`;
+    if (locale.value === 'ja') return `相対優位 ${score}/100`;
+    if (locale.value === 'ko') return `상대 우위 ${score}/100`;
     if (locale.value === 'nan-TW') return `相對優勢 ${score}/100`;
     return `相對優勢 ${score}/100`;
   }
   if (locale.value === 'en') return `Downside risk ${score}/100`;
   if (locale.value === 'zh-CN') return `下跌风险 ${score}/100`;
+  if (locale.value === 'ja') return `下落リスク ${score}/100`;
+  if (locale.value === 'ko') return `하락 리스크 ${score}/100`;
   if (locale.value === 'nan-TW') return `下跌風險 ${score}/100`;
   return `下跌風險 ${score}/100`;
 }
@@ -291,6 +406,8 @@ function reasonLabel(reason: ReasonCode) {
   if (reason.key === 'strongestFactors') {
     if (locale.value === 'en') return `${factorLabel(params.first)} and ${factorLabel(params.second)} are the strongest factors.`;
     if (locale.value === 'zh-CN') return `${factorLabel(params.first)} 与 ${factorLabel(params.second)} 是最强的评分因子。`;
+    if (locale.value === 'ja') return `${factorLabel(params.first)} と ${factorLabel(params.second)} が最も強い評価因子です。`;
+    if (locale.value === 'ko') return `${factorLabel(params.first)}와 ${factorLabel(params.second)}가 가장 강한 평가 요인입니다.`;
     if (locale.value === 'nan-TW') return `${factorLabel(params.first)} 佮 ${factorLabel(params.second)} 是較強的評分因子。`;
     return `${factorLabel(params.first)} 與 ${factorLabel(params.second)} 是最強的評分因子。`;
   }
@@ -298,41 +415,55 @@ function reasonLabel(reason: ReasonCode) {
     const delta = Number(params.delta).toFixed(1);
     if (locale.value === 'en') return `Live crawled sentiment changes the score by ${Number(params.delta) >= 0 ? '+' : ''}${delta} points.`;
     if (locale.value === 'zh-CN') return `实时爬文情绪让评分变化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
+    if (locale.value === 'ja') return `リアルタイム取得ニュースの心理でスコアが ${Number(params.delta) >= 0 ? '+' : ''}${delta} 点変化しました。`;
+    if (locale.value === 'ko') return `실시간 수집 뉴스 심리로 점수가 ${Number(params.delta) >= 0 ? '+' : ''}${delta}점 변했습니다.`;
     if (locale.value === 'nan-TW') return `即時爬文的新聞氣口，予評分變化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
     return `即時爬文情緒讓評分變化 ${Number(params.delta) >= 0 ? '+' : ''}${delta} 分。`;
   }
   if (reason.key === 'belowThreshold') {
     if (locale.value === 'en') return `${factorLabel(params.factor)} is below threshold and should be monitored before adding exposure.`;
     if (locale.value === 'zh-CN') return `${factorLabel(params.factor)} 低于门槛，加仓前需要继续观察。`;
+    if (locale.value === 'ja') return `${factorLabel(params.factor)} が基準未満です。追加投資前に確認が必要です。`;
+    if (locale.value === 'ko') return `${factorLabel(params.factor)}가 기준을 밑돌아 비중 확대 전 관찰이 필요합니다.`;
     if (locale.value === 'nan-TW') return `${factorLabel(params.factor)} 低於門檻，加碼前愛閣觀察。`;
     return `${factorLabel(params.factor)} 低於門檻，加碼前需要繼續觀察。`;
   }
   if (reason.key === 'severePriceDrop') {
     if (locale.value === 'en') return `Price action is disqualified for new buying after a ${params.change}% drop.`;
     if (locale.value === 'zh-CN') return `当日跌幅 ${params.change}%，大跌/跌停状态不允许判为优质买入。`;
+    if (locale.value === 'ja') return `当日 ${params.change}% 下落しており、急落中の新規買い候補から除外します。`;
+    if (locale.value === 'ko') return `당일 ${params.change}% 하락해 급락 중 신규 매수 후보로 보지 않습니다.`;
     if (locale.value === 'nan-TW') return `當日跌幅 ${params.change}%，大跌狀態袂當判做會使買入。`;
     return `當日跌幅 ${params.change}%，大跌/跌停狀態不允許判為優質買入。`;
   }
   if (reason.key === 'weakPriceAction') {
     if (locale.value === 'en') return `Price action is weak after a ${params.change}% drop; wait for stabilization.`;
     if (locale.value === 'zh-CN') return `当日跌幅 ${params.change}%，价格未企稳前只能观察。`;
+    if (locale.value === 'ja') return `当日 ${params.change}% 下落しており、価格が落ち着くまで注視します。`;
+    if (locale.value === 'ko') return `당일 ${params.change}% 하락해 가격 안정 전에는 관찰이 우선입니다.`;
     if (locale.value === 'nan-TW') return `當日跌幅 ${params.change}%，價格未徛穩前先觀察。`;
     return `當日跌幅 ${params.change}%，價格未企穩前只能觀察。`;
   }
   if (reason.key === 'clearsBuyThreshold') {
     if (locale.value === 'en') return 'Composite score clears the buy threshold under the selected strategy.';
     if (locale.value === 'zh-CN') return '综合评分已通过当前策略的买入门槛。';
+    if (locale.value === 'ja') return '総合スコアが選択戦略の買い基準を上回っています。';
+    if (locale.value === 'ko') return '종합 점수가 선택 전략의 매수 기준을 넘었습니다.';
     if (locale.value === 'nan-TW') return '綜合評分已經過買入門檻，會使納入候選。';
     return '綜合評分已通過目前策略的買入門檻。';
   }
   if (reason.key === 'rankedTopOpportunity') {
     if (locale.value === 'en') return `Ranked #${params.rank} among strict quality candidates in this scan.`;
     if (locale.value === 'zh-CN') return `本次扫描在严格优质候选中排名第 ${params.rank}。`;
+    if (locale.value === 'ja') return `今回の厳格な高品質候補で第 ${params.rank} 位です。`;
+    if (locale.value === 'ko') return `이번 엄격한 우량 후보 중 ${params.rank}위입니다.`;
     if (locale.value === 'nan-TW') return `這擺掃描佇嚴格優質候選內排名第 ${params.rank}。`;
     return `本次掃描在嚴格優質候選中排名第 ${params.rank}。`;
   }
   if (locale.value === 'en') return 'Composite score is not strong enough for a high-conviction entry.';
   if (locale.value === 'zh-CN') return '综合评分暂不足以支持高信心进场。';
+  if (locale.value === 'ja') return '総合スコアはまだ高い確信で入る水準ではありません。';
+  if (locale.value === 'ko') return '종합 점수는 아직 높은 확신의 진입을 뒷받침하기에 부족합니다.';
   if (locale.value === 'nan-TW') return '綜合評分暫時無夠支持高信心進場。';
   return '綜合評分暫不足以支持高信心進場。';
 }
@@ -497,7 +628,7 @@ function pointLabel(point: DecisionPoint) {
     return nanDecisionPointLabel(point, score, count, hours);
   }
 
-  const text: Record<DecisionPoint['key'], Record<StandardLocale, string>> = {
+  const text: Record<DecisionPoint['key'], LocalizedText> = {
     buySummary: {
       en: `Worth buying: total score ${p.score}/100, with enough relative strength under the selected news-led strategy.`,
       'zh-CN': `值得投资：总分 ${p.score}/100，在当前新闻权重策略下具备相对优势。`,
@@ -814,7 +945,7 @@ function pointLabel(point: DecisionPoint) {
       'zh-TW': '需要新的公司級新聞證據，才適合做高信心判斷。'
     }
   };
-  return text[point.key][locale.value as StandardLocale];
+  return text[point.key][locale.value as StandardLocale] ?? text[point.key].en;
 }
 
 function eventLabel(event: NewsEvent) {
@@ -841,7 +972,7 @@ function eventLabel(event: NewsEvent) {
     return labels[event.key] ?? event.key;
   }
 
-  const labels: Record<string, Record<StandardLocale, string>> = {
+  const labels: Record<string, LocalizedText> = {
     earningsPositive: { en: 'Positive earnings/report event', 'zh-CN': '正面财报/业绩事件', 'zh-TW': '正面財報/業績事件' },
     earningsNegative: { en: 'Negative earnings/report event', 'zh-CN': '负面财报/业绩事件', 'zh-TW': '負面財報/業績事件' },
     guidancePositive: { en: 'Guidance raised or outlook improved', 'zh-CN': '指引上修或展望改善', 'zh-TW': '指引上修或展望改善' },
@@ -860,7 +991,7 @@ function eventLabel(event: NewsEvent) {
     generalPositiveNews: { en: 'Broadly positive news tone', 'zh-CN': '整体新闻语气偏正面', 'zh-TW': '整體新聞語氣偏正面' },
     generalNegativeNews: { en: 'Broadly negative news tone', 'zh-CN': '整体新闻语气偏负面', 'zh-TW': '整體新聞語氣偏負面' }
   };
-  return labels[event.key]?.[locale.value as StandardLocale] ?? event.key;
+  return labels[event.key]?.[locale.value as StandardLocale] ?? labels[event.key]?.en ?? event.key;
 }
 
 function financialMetricLabel(metric: FinancialMetric) {
@@ -881,7 +1012,7 @@ function financialMetricLabel(metric: FinancialMetric) {
     return labels[metric.key] ?? metric.key;
   }
 
-  const labels: Record<string, Record<StandardLocale, string>> = {
+  const labels: Record<string, LocalizedText> = {
     pe: { en: 'PE', 'zh-CN': '市盈率', 'zh-TW': '本益比' },
     priceToBook: { en: 'PB', 'zh-CN': '市净率', 'zh-TW': '股價淨值比' },
     revenueGrowth: { en: 'Revenue growth', 'zh-CN': '营收增长', 'zh-TW': '營收成長' },
@@ -894,7 +1025,7 @@ function financialMetricLabel(metric: FinancialMetric) {
     liquidityQuality: { en: 'Liquidity/size proxy', 'zh-CN': '流动性/规模代理', 'zh-TW': '流動性/規模代理' },
     fiftyTwoWeekPosition: { en: '52-week position', 'zh-CN': '52 周区间位置', 'zh-TW': '52 週區間位置' }
   };
-  return labels[metric.key]?.[locale.value as StandardLocale] ?? metric.key;
+  return labels[metric.key]?.[locale.value as StandardLocale] ?? labels[metric.key]?.en ?? metric.key;
 }
 
 function sectorLabel(pick: Pick) {
@@ -947,6 +1078,24 @@ function sectorInsight(sector: SectorAnalysis) {
     }
     return `${factorLabel(strongest.factor)} 有支撑，但 ${factorLabel(weakest.factor)} 仍需确认。`;
   }
+  if (locale.value === 'ja') {
+    if (sector.recommendation === 'overweight') {
+      return `${factorLabel(strongest.factor)} が ${strongest.score.toFixed(1)}/100 でリードし、${factorLabel(weakest.factor)} が主な確認点です。`;
+    }
+    if (sector.recommendation === 'underweight') {
+      return `${factorLabel(weakest.factor)} が ${weakest.score.toFixed(1)}/100 と重く、セクターのエクスポージャーは控えめに。`;
+    }
+    return `${factorLabel(strongest.factor)} は支えになりますが、${factorLabel(weakest.factor)} はまだ確認が必要です。`;
+  }
+  if (locale.value === 'ko') {
+    if (sector.recommendation === 'overweight') {
+      return `${factorLabel(strongest.factor)}가 ${strongest.score.toFixed(1)}/100으로 가장 강하고, ${factorLabel(weakest.factor)}가 주요 점검 항목입니다.`;
+    }
+    if (sector.recommendation === 'underweight') {
+      return `${factorLabel(weakest.factor)}가 ${weakest.score.toFixed(1)}/100으로 부담이어서 섹터 비중은 타이트하게 관리합니다.`;
+    }
+    return `${factorLabel(strongest.factor)}는 지지 요인이지만 ${factorLabel(weakest.factor)}는 추가 확인이 필요합니다.`;
+  }
   if (locale.value === 'nan-TW') {
     if (sector.recommendation === 'overweight') {
       return `${factorLabel(strongest.factor)} 較強，有 ${strongest.score.toFixed(1)}/100；${factorLabel(weakest.factor)} 是主要檢查點。`;
@@ -996,9 +1145,30 @@ function isYogurtLocale(value: Locale) {
   return value === 'zh-TW' || value === 'nan-TW';
 }
 
+function toggleLanguageMenu() {
+  languageMenuOpen.value = !languageMenuOpen.value;
+}
+
+function closeLanguageMenu() {
+  languageMenuOpen.value = false;
+}
+
+function handleDocumentClick(event: MouseEvent) {
+  const target = event.target;
+  if (target instanceof Node && languageMenuRef.value?.contains(target)) return;
+  closeLanguageMenu();
+}
+
+function handleDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    closeLanguageMenu();
+  }
+}
+
 function setLocale(nextLocale: Locale) {
   const shouldPlayAppear = isYogurtLocale(nextLocale);
   locale.value = nextLocale;
+  closeLanguageMenu();
   if (shouldPlayAppear) {
     playYogurtSound('appear');
   }
@@ -1263,12 +1433,18 @@ watch(
 );
 
 onMounted(async () => {
+  document.addEventListener('click', handleDocumentClick);
+  document.addEventListener('keydown', handleDocumentKeydown);
   restoreSettings();
   config.value = await fetchConfig();
   normalizeStrategySelection();
 });
 
-onUnmounted(stopAppTimers);
+onUnmounted(() => {
+  document.removeEventListener('click', handleDocumentClick);
+  document.removeEventListener('keydown', handleDocumentKeydown);
+  stopAppTimers();
+});
 </script>
 
 <template>
@@ -1280,11 +1456,33 @@ onUnmounted(stopAppTimers);
         <p class="subtitle">{{ t.subtitle }}</p>
       </div>
 
-      <div class="locale-switcher" aria-label="Language">
-        <button :class="{ active: locale === 'en' }" @click="setLocale('en')"><span class="flag flag-uk"></span>EN</button>
-        <button :class="{ active: locale === 'zh-CN' }" @click="setLocale('zh-CN')"><span class="flag flag-cn"></span>简</button>
-        <button :class="{ active: locale === 'zh-TW' }" @click="setLocale('zh-TW')"><span class="flag flag-tw"></span>繁</button>
-        <button :class="{ active: locale === 'nan-TW' }" title="臺語" aria-label="臺語" @click="setLocale('nan-TW')"><span class="flag flag-nan"></span>臺語</button>
+      <div ref="languageMenuRef" class="language-menu">
+        <button
+          class="language-trigger"
+          type="button"
+          aria-haspopup="menu"
+          :aria-expanded="languageMenuOpen"
+          @click="toggleLanguageMenu"
+        >
+          <span class="flag" :class="activeLanguageOption.flagClass"></span>
+          <span>{{ activeLanguageOption.label }}</span>
+          <i aria-hidden="true"></i>
+        </button>
+        <div v-if="languageMenuOpen" class="language-options" role="menu" aria-label="Language">
+          <button
+            v-for="option in languageOptions"
+            :key="option.id"
+            type="button"
+            role="menuitemradio"
+            :aria-checked="locale === option.id"
+            :class="{ active: locale === option.id }"
+            @click="setLocale(option.id)"
+          >
+            <span class="flag" :class="option.flagClass"></span>
+            <span>{{ option.label }}</span>
+            <strong aria-hidden="true">{{ option.shortLabel }}</strong>
+          </button>
+        </div>
       </div>
     </header>
 
@@ -1412,7 +1610,7 @@ onUnmounted(stopAppTimers);
           <div class="result-actions">
             <div class="view-toggle" role="tablist" aria-label="Result view">
               <button :class="{ active: activeView === 'stocks' }" type="button" @click="activeView = 'stocks'">
-                {{ t.stockView }} <span>{{ picks.length }}</span>
+                {{ t.stockView }} <span>{{ filteredPicks.length }}</span>
               </button>
               <button :class="{ active: activeView === 'sectors' }" type="button" @click="activeView = 'sectors'">
                 {{ t.sectorView }} <span>{{ sectors.length }}</span>
@@ -1420,6 +1618,34 @@ onUnmounted(stopAppTimers);
             </div>
             <button class="ghost" :disabled="loading" @click="runAnalysis">{{ t.refresh }}</button>
           </div>
+        </div>
+
+        <div v-if="activeView === 'stocks' && (picks.length || resultFiltersActive)" class="result-filter-bar">
+          <label class="filter-field">
+            <span>{{ t.marketCoverage }}</span>
+            <select v-model="resultMarketFilter">
+              <option value="all">{{ allMarketsFilterLabel() }}</option>
+              <option v-for="market in marketOptions" :key="`filter-${market.id}`" :value="market.id">
+                {{ market.id }} · {{ marketLabel(market.id) }}
+              </option>
+            </select>
+          </label>
+          <div class="filter-field">
+            <span>{{ t.reasonTitle }}</span>
+            <div class="filter-segment" role="group">
+              <button
+                v-for="option in verdictFilterOptions"
+                :key="`verdict-filter-${option}`"
+                type="button"
+                :aria-pressed="resultVerdictFilter === option"
+                :class="{ active: resultVerdictFilter === option }"
+                @click="resultVerdictFilter = option"
+              >
+                {{ resultVerdictFilterLabel(option) }}
+              </button>
+            </div>
+          </div>
+          <strong class="filter-count">{{ resultCountLabel() }}</strong>
         </div>
 
         <div v-if="loading" class="analysis-wait" role="status" aria-live="polite">
@@ -1438,12 +1664,17 @@ onUnmounted(stopAppTimers);
             <p>{{ t.emptyHint }}</p>
           </article>
 
+          <article v-else-if="!loading && picks.length && !filteredPicks.length" class="empty-card">
+            <strong>{{ filteredEmptyTitle() }}</strong>
+            <p>{{ filteredEmptyHint() }}</p>
+          </article>
+
           <article v-if="dataIssues.length" class="issue-card">
             <strong>{{ t.failures }}</strong>
             <p v-for="issue in dataIssues" :key="issue.symbol">{{ issue.symbol }}: {{ issue.error }}</p>
           </article>
 
-          <article v-for="pick in picks" :key="pick.symbol" class="pick-card" :class="pick.verdict">
+          <article v-for="pick in filteredPicks" :key="pick.symbol" class="pick-card" :class="pick.verdict">
             <div class="pick-heading">
               <div>
                 <span class="market-tag">{{ pick.market }}</span>

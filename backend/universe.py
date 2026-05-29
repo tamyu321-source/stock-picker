@@ -79,6 +79,50 @@ FALLBACK_SEARCH_TERMS = {
         "Kuaishou Hong Kong",
         "Xiaomi Hong Kong",
     ],
+    "JP": [
+        "7203.T",
+        "6758.T",
+        "8306.T",
+        "6861.T",
+        "9984.T",
+        "6098.T",
+        "9432.T",
+        "8035.T",
+        "9983.T",
+        "7974.T",
+        "Toyota Motor Japan",
+        "Sony Group Japan",
+        "Mitsubishi UFJ Japan",
+        "Keyence Japan",
+        "SoftBank Group Japan",
+        "Recruit Holdings Japan",
+        "NTT Japan",
+        "Tokyo Electron Japan",
+        "Fast Retailing Japan",
+        "Nintendo Japan",
+    ],
+    "KR": [
+        "005930.KS",
+        "000660.KS",
+        "035420.KS",
+        "051910.KS",
+        "005380.KS",
+        "006400.KS",
+        "068270.KS",
+        "035720.KS",
+        "207940.KS",
+        "373220.KS",
+        "Samsung Electronics Korea",
+        "SK hynix Korea",
+        "NAVER Korea",
+        "LG Chem Korea",
+        "Hyundai Motor Korea",
+        "Samsung SDI Korea",
+        "Celltrion Korea",
+        "Kakao Korea",
+        "Samsung Biologics Korea",
+        "LG Energy Solution Korea",
+    ],
 }
 
 CURATED_FALLBACK_SYMBOLS = {
@@ -127,6 +171,30 @@ CURATED_FALLBACK_SYMBOLS = {
         "1024.HK",
         "1810.HK",
     ],
+    "JP": [
+        "7203.T",
+        "6758.T",
+        "8306.T",
+        "6861.T",
+        "9984.T",
+        "6098.T",
+        "9432.T",
+        "8035.T",
+        "9983.T",
+        "7974.T",
+    ],
+    "KR": [
+        "005930.KS",
+        "000660.KS",
+        "035420.KS",
+        "051910.KS",
+        "005380.KS",
+        "006400.KS",
+        "068270.KS",
+        "035720.KS",
+        "207940.KS",
+        "373220.KS",
+    ],
     "SG": [
         "D05.SI",
         "O39.SI",
@@ -163,6 +231,18 @@ MARKET_NEWS_QUERIES = {
         "site:cnyes.com 台股 營收",
         "site:moneydj.com 台股 公司",
     ],
+    "JP": [
+        "日本株 決算 業績 上方修正",
+        "東証 上場企業 株価 決算",
+        "site:nikkei.com 日本株 決算",
+        "site:kabutan.jp 決算 業績",
+    ],
+    "KR": [
+        "한국 주식 실적 주가 목표주가",
+        "코스피 코스닥 상장사 실적",
+        "site:mk.co.kr 주식 실적",
+        "site:businesskorea.co.kr stock earnings",
+    ],
     "SG": [
         "Singapore stocks earnings results dividend SGX",
         "Singapore market company results shares",
@@ -190,6 +270,14 @@ LOCAL_MARKET_NEWS_URLS = {
     "TW": [
         "https://news.cnyes.com/news/cat/tw_stock_news",
         "https://www.moneydj.com/KMDJ/News/NewsRealList.aspx",
+    ],
+    "JP": [
+        "https://finance.yahoo.co.jp/news",
+        "https://kabutan.jp/news/marketnews/",
+    ],
+    "KR": [
+        "https://www.koreaherald.com/list.php?ct=020000000000",
+        "https://www.businesskorea.co.kr/news/articleList.html?sc_section_code=S1N1",
     ],
     "SG": [
         "https://www.businesstimes.com.sg/rss/companies-markets",
@@ -488,9 +576,31 @@ class MarketUniverseProvider:
             return self._discover_eastmoney_hk(limit)
         if market == "TW":
             return self._discover_twse(limit)
+        if market in {"JP", "KR"}:
+            return self._discover_curated_market(market, limit)
         if market == "SG":
             return self._discover_sgx(limit)
         return []
+
+    def _discover_curated_market(self, market: str, limit: int) -> list[DiscoveredSymbol]:
+        symbols = [*CURATED_FALLBACK_SYMBOLS.get(market, []), *DEFAULT_SYMBOLS.get(market, [])]
+        seen = set()
+        output = []
+        for symbol in symbols:
+            if symbol in seen or infer_market(symbol) != market or not is_common_equity_symbol(symbol, market):
+                continue
+            output.append(
+                DiscoveredSymbol(
+                    symbol=symbol,
+                    name=local_company_name(symbol, symbol),
+                    market=market,
+                    source="curated-liquid-universe",
+                )
+            )
+            seen.add(symbol)
+            if len(output) >= limit:
+                break
+        return output
 
     def _discover_fallback_search(self, market: str, limit: int) -> list[DiscoveredSymbol]:
         output: list[DiscoveredSymbol] = []
@@ -661,6 +771,10 @@ def is_common_equity_symbol(symbol: str, market: str) -> bool:
         return base.startswith(("600", "601", "603", "605", "688", "000", "001", "002", "003", "300", "301"))
     if market == "HK":
         return base.isdigit() and len(base) == 4 and not base.startswith("8")
+    if market == "JP":
+        return base.isdigit() and len(base) == 4 and symbol.upper().endswith(".T")
+    if market == "KR":
+        return base.isdigit() and len(base) == 6 and symbol.upper().endswith((".KS", ".KQ"))
     return True
 
 
@@ -672,6 +786,8 @@ def _market_locale_symbol(market: str) -> str:
     return {
         "CN": "600519.SS",
         "HK": "0700.HK",
+        "JP": "7203.T",
+        "KR": "005930.KS",
         "TW": "2330.TW",
         "SG": "D05.SI",
         "US": "AAPL",
@@ -709,6 +825,13 @@ def _symbols_from_code_mentions(text: str, market: str) -> list[str]:
         return [f"{int(code):04d}.HK" for code in re.findall(r"(?<!\d)(\d{4,5})\.?hk(?![a-z0-9])", text)]
     if market == "TW":
         return [f"{code}.TW" for code in re.findall(r"(?<!\d)(\d{4})\.?tw(?![a-z0-9])", text)]
+    if market == "JP":
+        return [f"{code}.T" for code in re.findall(r"(?<!\d)(\d{4})\.?t(?![a-z0-9])", text)]
+    if market == "KR":
+        return [
+            f"{code}.{suffix.upper()}"
+            for code, suffix in re.findall(r"(?<!\d)(\d{6})\.?(ks|kq)(?![a-z0-9])", text)
+        ]
     if market == "SG":
         return [f"{code.upper()}.SI" for code in re.findall(r"(?<![a-z0-9])([a-z0-9]{3,4})\.?si(?![a-z0-9])", text)]
     return []
@@ -735,15 +858,39 @@ def _manual_symbol_candidates(query: str, allowed_markets: set[str]) -> list[str
     if re.fullmatch(r"\d{4}\.TW", normalized):
         return [normalized] if "TW" in allowed_markets else []
 
+    if re.fullmatch(r"\d{4}\.T", normalized):
+        return [normalized] if "JP" in allowed_markets else []
+
+    if re.fullmatch(r"\d{6}\.(?:KS|KQ)", normalized):
+        symbol = normalized
+        market = infer_market(symbol)
+        return [symbol] if market in allowed_markets and is_common_equity_symbol(symbol, market) else []
+
     if re.fullmatch(r"[A-Z0-9]{2,5}\.SI", normalized):
         return [normalized] if "SG" in allowed_markets else []
 
     if re.fullmatch(r"\d{4,5}", normalized):
+        known_symbols = set(LOCAL_COMPANY_NAMES)
+        for symbols in [*CURATED_FALLBACK_SYMBOLS.values(), *DEFAULT_SYMBOLS.values()]:
+            known_symbols.update(symbols)
+        market_symbols = []
+        if len(normalized) == 4:
+            market_symbols.extend([("TW", f"{normalized}.TW"), ("JP", f"{normalized}.T")])
+        if "HK" in allowed_markets:
+            market_symbols.append(("HK", f"{int(normalized):04d}.HK"))
+        for market, symbol in market_symbols:
+            if market in allowed_markets and symbol in known_symbols and is_common_equity_symbol(symbol, market):
+                return [symbol]
+        if "JP" in allowed_markets and "TW" not in allowed_markets and "HK" not in allowed_markets and len(normalized) == 4:
+            return [f"{normalized}.T"]
         if "TW" in allowed_markets and "HK" not in allowed_markets and len(normalized) == 4:
             return [f"{normalized}.TW"]
         if "HK" in allowed_markets:
             symbol = f"{int(normalized):04d}.HK"
             return [symbol] if is_common_equity_symbol(symbol, "HK") else []
+
+    if re.fullmatch(r"\d{6}", normalized) and "KR" in allowed_markets and "CN" not in allowed_markets:
+        return [f"{normalized}.KS"]
 
     if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", normalized) and "." not in normalized and "US" in allowed_markets:
         return [normalized]
@@ -752,7 +899,7 @@ def _manual_symbol_candidates(query: str, allowed_markets: set[str]) -> list[str
 
 
 def _preferred_manual_markets(allowed_markets: set[str]) -> list[str]:
-    preferred = ["CN", "HK", "TW", "SG", "US"]
+    preferred = ["CN", "HK", "TW", "JP", "KR", "SG", "US"]
     return [market for market in preferred if market in allowed_markets]
 
 

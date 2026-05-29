@@ -1,6 +1,8 @@
 MARKETS = [
     {"id": "CN", "label": "China A-shares", "currency": "CNY"},
     {"id": "HK", "label": "Hong Kong", "currency": "HKD"},
+    {"id": "JP", "label": "Japan", "currency": "JPY"},
+    {"id": "KR", "label": "South Korea", "currency": "KRW"},
     {"id": "SG", "label": "Singapore", "currency": "SGD"},
     {"id": "US", "label": "United States", "currency": "USD"},
     {"id": "TW", "label": "Taiwan", "currency": "TWD"},
@@ -34,6 +36,8 @@ DEFAULT_SYMBOLS = {
     "US": ["AAPL", "MSFT", "NVDA"],
     "CN": ["600519.SS", "300750.SZ"],
     "HK": ["0700.HK", "9988.HK"],
+    "JP": ["7203.T", "6758.T"],
+    "KR": ["005930.KS", "000660.KS"],
     "SG": ["D05.SI", "C38U.SI"],
     "TW": ["2330.TW", "2317.TW"],
 }

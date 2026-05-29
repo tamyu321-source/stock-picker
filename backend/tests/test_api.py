@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from backend.app import create_app
-from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _parse_eastmoney_datetime, fallback_market_data_provider, is_recent_article, local_company_name, news_queries, news_query
+from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _parse_eastmoney_datetime, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
 from backend.services import _financial_analysis, _friendly_data_error, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
-from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _symbols_from_code_mentions
+from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _manual_symbol_candidates, _symbols_from_code_mentions
 
 
 class FakeMarketProvider:
@@ -85,12 +85,16 @@ class ApiTestCase(unittest.TestCase):
         response = self.client.get("/api/config")
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(len(payload["markets"]), 5)
+        self.assertEqual(len(payload["markets"]), 7)
         self.assertGreaterEqual(len(payload["strategies"]), 3)
         self.assertIn("defaultSymbols", payload)
         self.assertIn("scanUniverseSize", payload)
         self.assertIn("2330.TW", payload["defaultSymbols"]["TW"])
+        self.assertIn("7203.T", payload["defaultSymbols"]["JP"])
+        self.assertIn("005930.KS", payload["defaultSymbols"]["KR"])
         self.assertEqual(payload["scanUniverseSize"]["TW"], "dynamic")
+        self.assertEqual(payload["scanUniverseSize"]["JP"], "dynamic")
+        self.assertEqual(payload["scanUniverseSize"]["KR"], "dynamic")
 
     def test_analyze_filters_market_and_returns_verdicts(self):
         response = self.client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["2330.TW", "AAPL"], "strategyId": "balanced"})
@@ -117,6 +121,13 @@ class ApiTestCase(unittest.TestCase):
         self.assertTrue(any("\u8d35\u5dde\u8305\u53f0" in query for query in news_queries("600519.SS", "Kweichow Moutai")))
         self.assertTrue(any("\u817e\u8baf\u63a7\u80a1" in query for query in news_queries("0700.HK", "Tencent Holdings")))
         self.assertTrue(any("\u9a30\u8a0a\u63a7\u80a1" in query for query in news_queries("0700.HK", "Tencent Holdings")))
+
+    def test_japan_and_korea_symbols_infer_and_query_local_markets(self):
+        self.assertEqual(infer_market("7203.T"), "JP")
+        self.assertEqual(infer_market("005930.KS"), "KR")
+        self.assertEqual(infer_market("035720.KQ"), "KR")
+        self.assertTrue(any("\u65e5\u672c\u682a" in query or "\u682a\u5f0f" in query for query in news_queries("7203.T", "Toyota Motor")))
+        self.assertTrue(any("\ud55c\uad6d" in query or "\uc8fc\uc2dd" in query for query in news_queries("005930.KS", "Samsung Electronics")))
 
     def test_manual_china_symbols_resolve_to_company_names(self):
         provider = MarketUniverseProvider()
@@ -237,6 +248,25 @@ class ApiTestCase(unittest.TestCase):
         symbols = MarketUniverseProvider()._discover_fallback_search("TW", 5)
         self.assertEqual([item.symbol for item in symbols], ["2330.TW", "2317.TW"])
         self.assertTrue(all(item.source == "curated-liquid-fallback" for item in symbols))
+
+    def test_fallback_search_has_japan_and_korea_liquid_symbols(self):
+        class OfflineUniverse(MarketUniverseProvider):
+            def _json(self, url, insecure=False):
+                raise OSError("offline")
+
+        japan = OfflineUniverse()._discover_fallback_search("JP", 5)
+        korea = OfflineUniverse()._discover_fallback_search("KR", 5)
+        self.assertIn("7203.T", [item.symbol for item in japan])
+        self.assertIn("005930.KS", [item.symbol for item in korea])
+        self.assertTrue(all(item.market == "JP" for item in japan))
+        self.assertTrue(all(item.market == "KR" for item in korea))
+
+    def test_manual_japan_and_korea_symbols_resolve(self):
+        self.assertEqual(_manual_symbol_candidates("7203.T", {"JP"}), ["7203.T"])
+        self.assertEqual(_manual_symbol_candidates("7203", {"JP"}), ["7203.T"])
+        self.assertEqual(_manual_symbol_candidates("7203", {"CN", "HK", "JP", "KR", "SG", "TW", "US"}), ["7203.T"])
+        self.assertEqual(_manual_symbol_candidates("005930.KS", {"KR"}), ["005930.KS"])
+        self.assertEqual(_manual_symbol_candidates("005930", {"KR"}), ["005930.KS"])
 
     def test_discover_prefers_local_news_then_google_news(self):
         class SparseNewsUniverse(MarketUniverseProvider):
@@ -371,6 +401,11 @@ class ApiTestCase(unittest.TestCase):
         )
         symbols = MarketUniverseProvider()._symbols_from_news_articles("US", [article], 10)
         self.assertEqual(symbols, [])
+
+    def test_news_mentions_extract_japan_and_korea_suffixes(self):
+        text = "Toyota 7203.T and Samsung 005930.KS both report earnings."
+        self.assertEqual(_symbols_from_code_mentions(text.lower(), "JP"), ["7203.T"])
+        self.assertEqual(_symbols_from_code_mentions(text.lower(), "KR"), ["005930.KS"])
 
     def test_custom_weights_are_accepted(self):
         response = self.client.post(

@@ -1,4 +1,4 @@
-export type Market = 'US' | 'CN' | 'HK' | 'SG' | 'TW';
+export type Market = 'US' | 'CN' | 'HK' | 'JP' | 'KR' | 'SG' | 'TW';
 export type Verdict = 'buy' | 'watch' | 'sell';
 export type SectorRecommendation = 'overweight' | 'neutral' | 'underweight';
 
@@ -293,6 +293,8 @@ const fallbackConfig: AppConfig = {
   markets: [
     { id: 'CN', label: 'China A-shares', currency: 'CNY' },
     { id: 'HK', label: 'Hong Kong', currency: 'HKD' },
+    { id: 'JP', label: 'Japan', currency: 'JPY' },
+    { id: 'KR', label: 'South Korea', currency: 'KRW' },
     { id: 'SG', label: 'Singapore', currency: 'SGD' },
     { id: 'US', label: 'United States', currency: 'USD' },
     { id: 'TW', label: 'Taiwan', currency: 'TWD' }
@@ -324,12 +326,16 @@ const fallbackConfig: AppConfig = {
     US: ['AAPL', 'MSFT', 'NVDA'],
     CN: ['600519.SS', '300750.SZ'],
     HK: ['0700.HK', '9988.HK'],
+    JP: ['7203.T', '6758.T'],
+    KR: ['005930.KS', '000660.KS'],
     SG: ['D05.SI', 'C38U.SI'],
     TW: ['2330.TW', '2317.TW']
   },
   scanUniverseSize: {
     CN: 'dynamic',
     HK: 'dynamic',
+    JP: 'dynamic',
+    KR: 'dynamic',
     SG: 'dynamic',
     US: 'dynamic',
     TW: 'dynamic'
@@ -350,7 +356,7 @@ function fallbackStrategy(payload: { strategyId?: string; customWeights?: Strate
 }
 
 function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; customWeights?: StrategyWeights }): AnalysisResponse {
-  const markets: Market[] = payload.markets.length ? payload.markets : ['US', 'CN', 'HK', 'SG', 'TW'];
+  const markets: Market[] = payload.markets.length ? payload.markets : ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
   const strategy = fallbackStrategy(payload);
   const demoPicks: Pick[] = [
     {

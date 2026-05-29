@@ -75,6 +75,12 @@ POSITIVE_WORDS = {
     "dividend",
     "rebound",
     "acceleration",
+    "増益",
+    "上方修正",
+    "最高益",
+    "실적개선",
+    "상향",
+    "호실적",
 }
 
 NEGATIVE_WORDS = {
@@ -98,6 +104,12 @@ NEGATIVE_WORDS = {
     "plunge",
     "investigation",
     "default",
+    "減益",
+    "下方修正",
+    "急落",
+    "실적부진",
+    "하향",
+    "급락",
     "亏损",
     "下滑",
     "下跌",
@@ -120,6 +132,14 @@ POSITIVE_PHRASES = [
     "strong demand",
     "profit rises",
     "earnings beat",
+    "上方修正",
+    "最高益",
+    "増益",
+    "自社株買い",
+    "실적 개선",
+    "목표주가 상향",
+    "자사주 매입",
+    "호실적",
     "業績增長",
     "营收增长",
     "獲利成長",
@@ -150,6 +170,14 @@ NEGATIVE_PHRASES = [
     "revenue falls",
     "margin pressure",
     "downgraded",
+    "下方修正",
+    "減益",
+    "業績悪化",
+    "急落",
+    "실적 부진",
+    "목표주가 하향",
+    "급락",
+    "매도 의견",
     "業績下滑",
     "营收下滑",
     "獲利衰退",
@@ -190,6 +218,12 @@ SOURCE_CREDIBILITY = {
     "business times": 0.8,
     "straits times": 0.78,
     "channel newsasia": 0.78,
+    "nikkei": 0.84,
+    "kabutan": 0.74,
+    "finance.yahoo.co.jp": 0.74,
+    "mk.co.kr": 0.76,
+    "businesskorea": 0.74,
+    "koreaherald": 0.76,
 }
 
 LOCAL_COMPANY_NAMES = {
@@ -250,6 +284,26 @@ LOCAL_COMPANY_NAMES = {
     "2886.TW": "兆豐金",
     "2344.TW": "華邦電",
     "3481.TW": "群創",
+    "7203.T": "Toyota Motor",
+    "6758.T": "Sony Group",
+    "8306.T": "Mitsubishi UFJ Financial Group",
+    "6861.T": "Keyence",
+    "9984.T": "SoftBank Group",
+    "6098.T": "Recruit Holdings",
+    "9432.T": "Nippon Telegraph and Telephone",
+    "8035.T": "Tokyo Electron",
+    "9983.T": "Fast Retailing",
+    "7974.T": "Nintendo",
+    "005930.KS": "Samsung Electronics",
+    "000660.KS": "SK hynix",
+    "035420.KS": "NAVER",
+    "051910.KS": "LG Chem",
+    "005380.KS": "Hyundai Motor",
+    "006400.KS": "Samsung SDI",
+    "068270.KS": "Celltrion",
+    "035720.KS": "Kakao",
+    "207940.KS": "Samsung Biologics",
+    "373220.KS": "LG Energy Solution",
 }
 
 COMPANY_SEARCH_ALIASES = {
@@ -323,6 +377,26 @@ COMPANY_SEARCH_ALIASES = {
     "F34.SI": ["Wilmar"],
     "G13.SI": ["Genting Singapore"],
     "Y92.SI": ["Thai Beverage", "ThaiBev"],
+    "7203.T": ["Toyota", "Toyota Motor", "トヨタ自動車"],
+    "6758.T": ["Sony", "Sony Group", "ソニーグループ"],
+    "8306.T": ["Mitsubishi UFJ", "MUFG", "三菱UFJフィナンシャル・グループ"],
+    "6861.T": ["Keyence", "キーエンス"],
+    "9984.T": ["SoftBank Group", "ソフトバンクグループ"],
+    "6098.T": ["Recruit Holdings", "リクルートホールディングス"],
+    "9432.T": ["NTT", "Nippon Telegraph and Telephone", "日本電信電話"],
+    "8035.T": ["Tokyo Electron", "東京エレクトロン"],
+    "9983.T": ["Fast Retailing", "ファーストリテイリング"],
+    "7974.T": ["Nintendo", "任天堂"],
+    "005930.KS": ["Samsung Electronics", "삼성전자"],
+    "000660.KS": ["SK hynix", "SK하이닉스"],
+    "035420.KS": ["NAVER", "네이버"],
+    "051910.KS": ["LG Chem", "LG화학"],
+    "005380.KS": ["Hyundai Motor", "현대차"],
+    "006400.KS": ["Samsung SDI", "삼성SDI"],
+    "068270.KS": ["Celltrion", "셀트리온"],
+    "035720.KS": ["Kakao", "카카오"],
+    "207940.KS": ["Samsung Biologics", "삼성바이오로직스"],
+    "373220.KS": ["LG Energy Solution", "LG에너지솔루션"],
 }
 
 KNOWN_SECTORS = {
@@ -396,6 +470,26 @@ KNOWN_SECTORS = {
     "6239.TW": "Semiconductors",
     "2891.TW": "Financial Services",
     "2886.TW": "Financial Services",
+    "7203.T": "Automobiles",
+    "6758.T": "Consumer Electronics",
+    "8306.T": "Banking",
+    "6861.T": "Factory Automation",
+    "9984.T": "Telecommunications and Investments",
+    "6098.T": "Human Capital Technology",
+    "9432.T": "Telecommunications",
+    "8035.T": "Semiconductor Equipment",
+    "9983.T": "Retail",
+    "7974.T": "Interactive Entertainment",
+    "005930.KS": "Semiconductors",
+    "000660.KS": "Semiconductors",
+    "035420.KS": "Internet Platforms",
+    "051910.KS": "Chemicals",
+    "005380.KS": "Automobiles",
+    "006400.KS": "Battery Manufacturing",
+    "068270.KS": "Biopharmaceuticals",
+    "035720.KS": "Internet Platforms",
+    "207940.KS": "Biopharmaceuticals",
+    "373220.KS": "Battery Manufacturing",
 }
 
 
@@ -405,6 +499,10 @@ def infer_market(symbol: str) -> str:
         return "CN"
     if upper.endswith(".HK"):
         return "HK"
+    if upper.endswith(".T"):
+        return "JP"
+    if upper.endswith((".KS", ".KQ")):
+        return "KR"
     if upper.endswith(".SI"):
         return "SG"
     if upper.endswith(".TW"):
@@ -1166,6 +1264,8 @@ def news_queries(symbol: str, name: str) -> list[str]:
         "CN": ["site:finance.eastmoney.com", "site:stcn.com", "site:cnstock.com", "site:wallstreetcn.com", "site:sina.com.cn/finance"],
         "TW": ["site:cnyes.com", "site:moneydj.com", "site:tw.stock.yahoo.com"],
         "HK": ["site:aastocks.com", "site:etnet.com.hk", "site:hket.com", "site:hk.finance.yahoo.com", "site:futunn.com"],
+        "JP": ["site:nikkei.com", "site:finance.yahoo.co.jp", "site:kabutan.jp", "site:reuters.com/markets/asia"],
+        "KR": ["site:mk.co.kr", "site:businesskorea.co.kr", "site:koreaherald.com", "site:reuters.com/markets/asia"],
         "SG": ["site:businesstimes.com.sg", "site:straitstimes.com", "site:channelnewsasia.com", "site:sg.finance.yahoo.com"],
         "US": ["site:reuters.com", "site:finance.yahoo.com", "site:marketwatch.com"],
     }.get(market, [])
@@ -1177,6 +1277,10 @@ def news_queries(symbol: str, name: str) -> list[str]:
         queries.extend([f'"{name}" 港股 業績 公告', f'"{name}" 股價 目標價'])
     elif market == "TW":
         queries.extend([f'"{name}" 台股 法說 財報', f'"{name}" 股價 營收'])
+    elif market == "JP":
+        queries.extend([f'"{name}" 日本株 決算 業績', f'"{name}" 株価 目標株価'])
+    elif market == "KR":
+        queries.extend([f'"{name}" 한국 주식 실적 주가', f'"{name}" 목표주가 매수'])
     elif market == "SG":
         queries.extend([f'"{name}" Singapore stock earnings', f'"{name}" SGX results dividend'])
     return list(dict.fromkeys(queries))
@@ -1187,8 +1291,13 @@ def news_query(symbol: str, name: str) -> str:
     phrase = company_phrase(symbol, name)
     if phrase or tokens:
         company = phrase or " ".join(tokens[:4])
-        if infer_market(symbol) in {"CN", "HK", "TW"}:
+        market = infer_market(symbol)
+        if market in {"CN", "HK", "TW"}:
             return f'"{company}" 股票 財報 業績 OR "{symbol}"'
+        if market == "JP":
+            return f'"{company}" 株式 決算 業績 OR "{symbol}"'
+        if market == "KR":
+            return f'"{company}" 주식 실적 주가 OR "{symbol}"'
         return f'"{company}" OR "{symbol}" stock earnings revenue'
     return f'"{symbol}" stock earnings revenue'
 
@@ -1197,6 +1306,8 @@ def google_news_url(symbol: str, query_text: str) -> str:
     locale = {
         "CN": ("zh-CN", "CN", "CN:zh-Hans"),
         "HK": ("zh-HK", "HK", "HK:zh-Hant"),
+        "JP": ("ja-JP", "JP", "JP:ja"),
+        "KR": ("ko-KR", "KR", "KR:ko"),
         "TW": ("zh-TW", "TW", "TW:zh-Hant"),
         "SG": ("en-SG", "SG", "SG:en"),
         "US": ("en-US", "US", "US:en"),
