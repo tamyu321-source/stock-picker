@@ -1254,10 +1254,13 @@ onUnmounted(stopAppTimers);
       @click="primeYogurtSecret"
     >
       <span v-if="yogurtSecretLocalized" class="yogurt-logo-mark" aria-hidden="true">
-        <i class="yogurt-logo-swoop"></i>
-        <i class="yogurt-logo-face"></i>
+        <img :src="ugoodaysLogo" alt="" />
+        <i class="yogurt-energy-ring ring-one"></i>
+        <i class="yogurt-energy-ring ring-two"></i>
+        <i class="yogurt-energy-burst"></i>
         <i class="yogurt-logo-bubble bubble-one"></i>
         <i class="yogurt-logo-bubble bubble-two"></i>
+        <i class="yogurt-logo-bubble bubble-three"></i>
       </span>
       <span v-else aria-hidden="true"></span>
       <small v-if="yogurtSecretLocalized">{{ yogurtSecretTriggerLabel }}</small>
