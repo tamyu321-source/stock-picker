@@ -613,7 +613,7 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(verdicts.count("sell"), 8)
         self.assertEqual(verdicts.count("watch"), 8)
 
-    def test_blank_market_scan_promotes_relative_best_names(self):
+    def test_blank_market_scan_does_not_promote_mediocre_names_to_buy(self):
         class MediocreUniverseProvider:
             def discover(self, markets, limit_per_market=18):
                 return [
@@ -668,18 +668,208 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
 
-        self.assertIn("buy", {pick["verdict"] for pick in payload["picks"]})
-        self.assertEqual([pick["verdict"] for pick in payload["picks"]].count("buy"), 1)
-        self.assertEqual(payload["sectors"][0]["recommendation"], "overweight")
+        self.assertNotIn("buy", {pick["verdict"] for pick in payload["picks"]})
+        self.assertEqual([pick["verdict"] for pick in payload["picks"]].count("watch"), 8)
+        self.assertEqual(payload["sectors"][0]["recommendation"], "neutral")
         self.assertEqual(len(payload["picks"]), 8)
         self.assertEqual(payload["scan"]["displayed"], 8)
         self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
+
+    def test_blank_market_scan_expands_until_quality_candidates_are_found(self):
+        class ExpandingUniverseProvider:
+            def __init__(self):
+                self.limits = []
+
+            def discover(self, markets, limit_per_market=18):
+                self.limits.append(limit_per_market)
+                symbols = [
+                    DiscoveredSymbol(f"5{index:03d}.TW", f"Mediocre Corp {index}", "TW", "test-expanding")
+                    for index in range(6)
+                ]
+                if limit_per_market >= 120:
+                    symbols.extend(
+                        DiscoveredSymbol(f"7{index:03d}.TW", f"Quality Corp {index}", "TW", "test-expanding")
+                        for index in range(4)
+                    )
+                return symbols, []
+
+        class ExpandingMarketProvider:
+            def fetch(self, symbol):
+                if symbol.startswith("7"):
+                    closes = [80 + index * 0.5 for index in range(130)]
+                    info = {
+                        "trailingPE": 18,
+                        "priceToBook": 2.0,
+                        "beta": 1.0,
+                        "returnOnEquity": 0.30,
+                        "profitMargins": 0.24,
+                        "revenueGrowth": 0.22,
+                        "earningsGrowth": 0.20,
+                        "debtToEquity": 18,
+                        "regularMarketVolume": 8_000_000,
+                        "marketCap": 80_000_000_000,
+                        "fiftyTwoWeekHigh": 150,
+                        "fiftyTwoWeekLow": 70,
+                    }
+                else:
+                    closes = [100 + (index % 5) * 0.2 for index in range(130)]
+                    info = {
+                        "trailingPE": 28,
+                        "priceToBook": 3.6,
+                        "beta": 1.2,
+                        "returnOnEquity": 0.08,
+                        "profitMargins": 0.06,
+                        "revenueGrowth": 0.02,
+                        "earningsGrowth": 0.01,
+                        "debtToEquity": 90,
+                        "regularMarketVolume": 900_000,
+                        "marketCap": 4_000_000_000,
+                        "fiftyTwoWeekHigh": 140,
+                        "fiftyTwoWeekLow": 80,
+                    }
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name=symbol,
+                    market="TW",
+                    sector="Technology",
+                    price=100,
+                    change=1.0,
+                    currency="TWD",
+                    closes=closes,
+                    info=info,
+                )
+
+        class ExpandingNewsCrawler:
+            def fetch(self, symbol, name):
+                if symbol.startswith("7"):
+                    return [
+                        Article(
+                            source="Test RSS",
+                            title=f"{name} earnings beat and analyst upgrade",
+                            summary="Revenue growth, strong demand, and target price raised",
+                            link=f"https://example.com/{symbol}",
+                            published_at=datetime.now(timezone.utc),
+                            sentiment=0.8,
+                            credibility=0.9,
+                            relevance=1.0,
+                        )
+                    ]
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} mixed results",
+                        summary="Stable but limited growth",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.0,
+                        credibility=0.7,
+                        relevance=1.0,
+                    )
+                ]
+
+        universe = ExpandingUniverseProvider()
+        client = create_app(ExpandingMarketProvider(), ExpandingNewsCrawler(), universe).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        buy_symbols = {pick["symbol"] for pick in payload["picks"] if pick["verdict"] == "buy"}
+
+        self.assertGreaterEqual(max(universe.limits), 120)
+        self.assertEqual(len(buy_symbols), 4)
+        self.assertTrue(all(symbol.startswith("7") for symbol in buy_symbols))
+        self.assertEqual(payload["scan"]["requested"], 10)
+
+    def test_limit_down_stock_is_not_marked_as_quality_buy(self):
+        class LimitDownProvider(FakeMarketProvider):
+            def fetch(self, symbol):
+                snapshot = super().fetch(symbol)
+                return MarketSnapshot(
+                    symbol=snapshot.symbol,
+                    name=snapshot.name,
+                    market=snapshot.market,
+                    sector=snapshot.sector,
+                    price=snapshot.price,
+                    change=-10.0,
+                    currency=snapshot.currency,
+                    closes=[80 + index * 0.5 for index in range(130)],
+                    info={
+                        "trailingPE": 18,
+                        "priceToBook": 2.0,
+                        "beta": 1.0,
+                        "returnOnEquity": 0.28,
+                        "profitMargins": 0.24,
+                        "revenueGrowth": 0.20,
+                        "earningsGrowth": 0.18,
+                        "debtToEquity": 20,
+                    },
+                )
+
+        client = create_app(LimitDownProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["2330.TW"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+
+        self.assertEqual(pick["verdict"], "sell")
+        self.assertIn("severePriceDrop", {reason["key"] for reason in pick["reasonCodes"]})
+        self.assertIn("actionAvoidLimitDown", {item["key"] for item in pick["actionPlan"]["riskControls"]})
+
+    def test_downside_prediction_marks_likely_falling_stock_as_sell(self):
+        class WeakTrendProvider(FakeMarketProvider):
+            def fetch(self, symbol):
+                snapshot = super().fetch(symbol)
+                return MarketSnapshot(
+                    symbol=snapshot.symbol,
+                    name=snapshot.name,
+                    market=snapshot.market,
+                    sector=snapshot.sector,
+                    price=70,
+                    change=-4.2,
+                    currency=snapshot.currency,
+                    closes=[130 - index * 0.45 for index in range(130)],
+                    info={
+                        "trailingPE": 55,
+                        "priceToBook": 7,
+                        "beta": 2.2,
+                        "returnOnEquity": 0.02,
+                        "profitMargins": 0.01,
+                        "revenueGrowth": -0.18,
+                        "earningsGrowth": -0.25,
+                        "debtToEquity": 220,
+                    },
+                )
+
+        class NegativeNewsCrawler:
+            def fetch(self, symbol, name):
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} profit warning and analyst downgrade",
+                        summary="Weak demand, target price cut, and institutional selling",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=-0.8,
+                        credibility=0.9,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(WeakTrendProvider(), NegativeNewsCrawler(), FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["2330.TW"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+
+        self.assertEqual(pick["verdict"], "sell")
+        self.assertGreater(pick["downsideRiskScore"], pick["opportunityScore"])
+        self.assertGreaterEqual(pick["downsideRiskScore"], 72)
 
     def test_response_contains_detailed_100_point_scoring_and_actions(self):
         response = self.client.post("/api/analyze", json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "balanced"})
         self.assertEqual(response.status_code, 200)
         pick = response.get_json()["picks"][0]
         self.assertIn("scoreBreakdown", pick)
+        self.assertIn("opportunityScore", pick)
+        self.assertIn("downsideRiskScore", pick)
+        self.assertAlmostEqual(pick["prediction"]["edge"], pick["opportunityScore"] - pick["downsideRiskScore"], delta=0.1)
         self.assertEqual({item["factor"] for item in pick["scoreBreakdown"]}, {"sentiment", "momentum", "value", "risk", "quality"})
         self.assertAlmostEqual(sum(item["contribution"] for item in pick["scoreBreakdown"]), pick["score"], delta=0.5)
         self.assertIn("decision", pick)

@@ -12,11 +12,23 @@ from backend.universe import DiscoveredSymbol, MarketUniverseProvider
 
 
 FACTOR_ORDER = ["sentiment", "momentum", "value", "risk", "quality"]
-AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET = 30
+AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET = 72
+AUTO_SCAN_EXPANSION_LIMITS_PER_MARKET = (72, 120, 180)
+AUTO_SCAN_TARGET_QUALITY_BUYS = 4
 AUTO_SCAN_RESULT_LIMIT = 36
 AUTO_SCAN_BUY_LIMIT = 12
 AUTO_SCAN_SELL_LIMIT = 8
 AUTO_SCAN_WATCH_LIMIT = 16
+SEVERE_PRICE_DROP_PCT = -8.5
+LARGE_PRICE_DROP_PCT = -5.0
+STRICT_BUY_SCORE_FLOOR = 68
+STRICT_BUY_PRIORITY_FLOOR = 68
+STRICT_BUY_RISK_FLOOR = 50
+STRICT_BUY_QUALITY_FLOOR = 62
+STRICT_BUY_SENTIMENT_FLOOR = 52
+OPPORTUNITY_BUY_FLOOR = 70
+DOWNSIDE_EXIT_FLOOR = 62
+DOWNSIDE_URGENT_EXIT_FLOOR = 72
 
 
 def get_config() -> dict:
@@ -44,6 +56,16 @@ def _metric_number(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_severe_price_drop(value) -> bool:
+    change = _metric_number(value)
+    return change is not None and change <= SEVERE_PRICE_DROP_PCT
+
+
+def _is_large_price_drop(value) -> bool:
+    change = _metric_number(value)
+    return change is not None and change <= LARGE_PRICE_DROP_PCT
 
 
 def _strategy_from_payload(payload: dict) -> dict:
@@ -277,38 +299,52 @@ def _score_breakdown(metrics: dict[str, float], weights: dict[str, float], avail
     ]
 
 
-def _verdict(score: float, risk_metric: float) -> str:
-    if score >= 72 and risk_metric >= 45:
-        return "buy"
+def _verdict(
+    score: float,
+    risk_metric: float,
+    quality_metric: float | None = None,
+    sentiment_metric: float | None = None,
+    price_change: float | None = None,
+) -> str:
+    if _is_severe_price_drop(price_change):
+        return "sell"
     if score < 52 or (risk_metric < 35 and score < 58):
         return "sell"
+    if _is_large_price_drop(price_change):
+        return "watch"
+    if (
+        score >= 72
+        and risk_metric >= STRICT_BUY_RISK_FLOOR
+        and (quality_metric is None or quality_metric >= 58)
+        and (sentiment_metric is None or sentiment_metric >= STRICT_BUY_SENTIMENT_FLOOR)
+    ):
+        return "buy"
     return "watch"
 
 
 def _relative_verdicts(picks: list[dict]) -> None:
     if not picks:
         return
-    sorted_scores = sorted([pick["score"] for pick in picks], reverse=True)
-    buy_cutoff = sorted_scores[max(0, min(len(sorted_scores) - 1, round(len(sorted_scores) * 0.18) - 1))]
-    bought = 0
-    for index, pick in enumerate(picks):
-        risk = pick["metrics"]["risk"]
+    for pick in picks:
         pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
-        if pick["score"] >= max(55, buy_cutoff) and risk >= 42 and bought < max(1, round(len(picks) * 0.18)):
+        if _is_quality_investment_candidate(pick):
             pick["verdict"] = "buy"
-            bought += 1
             pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}]
-            pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index + 1}})
         elif _is_exit_candidate(pick):
             pick["verdict"] = "sell"
         else:
             pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"])
-        pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
+        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"))
+        pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"], pick.get("change"))
+
+    for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
+        pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index}})
 
 
 def _investment_priority(pick: dict) -> float:
     metrics = pick["metrics"]
+    if "opportunityScore" in pick:
+        return float(pick["opportunityScore"])
     return round(
         pick["score"] * 0.52
         + metrics["quality"] * 0.18
@@ -321,25 +357,36 @@ def _investment_priority(pick: dict) -> float:
 
 def _sell_priority(pick: dict) -> float:
     metrics = pick["metrics"]
+    if "downsideRiskScore" in pick:
+        return float(pick["downsideRiskScore"])
+    price_penalty = 14 if _is_severe_price_drop(pick.get("change")) else 7 if _is_large_price_drop(pick.get("change")) else 0
     return round(
         (100 - pick["score"]) * 0.45
         + (100 - metrics["risk"]) * 0.25
         + (100 - metrics["sentiment"]) * 0.15
         + (100 - metrics["momentum"]) * 0.10
-        + (100 - metrics["quality"]) * 0.05,
+        + (100 - metrics["quality"]) * 0.05
+        + price_penalty,
         3,
     )
 
 
 def _is_exit_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
-    return pick["score"] < 52 or (metrics["risk"] < 35 and pick["score"] < 58)
+    return (
+        _is_severe_price_drop(pick.get("change"))
+        or float(pick.get("downsideRiskScore") or 0) >= DOWNSIDE_EXIT_FLOOR
+        or pick["score"] < 52
+        or (metrics["risk"] < 35 and pick["score"] < 58)
+    )
 
 
 def _is_urgent_exit_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
     return (
-        pick["score"] <= 48
+        _is_severe_price_drop(pick.get("change"))
+        or float(pick.get("downsideRiskScore") or 0) >= DOWNSIDE_URGENT_EXIT_FLOOR
+        or pick["score"] <= 48
         or metrics["sentiment"] <= 35
         or metrics["momentum"] <= 35
         or (metrics["risk"] < 35 and pick["score"] < 58)
@@ -359,15 +406,84 @@ def _investable_factor_count(metrics: dict[str, float]) -> int:
     )
 
 
+def _news_strengths(news: dict) -> tuple[float, float, float]:
+    positive_news = float(news.get("positiveScore") or 0)
+    negative_news = float(news.get("negativeScore") or 0)
+    net_news = float(news.get("netScore", positive_news - negative_news) or 0)
+    return positive_news, negative_news, net_news
+
+
+def _price_action_bonus(change) -> float:
+    value = _metric_number(change)
+    if value is None:
+        return 0
+    if value <= SEVERE_PRICE_DROP_PCT:
+        return -30
+    if value <= LARGE_PRICE_DROP_PCT:
+        return -18
+    if value < 0:
+        return max(-8, value * 1.2)
+    return min(6, value * 0.8)
+
+
+def _price_action_risk(change) -> float:
+    value = _metric_number(change)
+    if value is None:
+        return 0
+    if value <= SEVERE_PRICE_DROP_PCT:
+        return 45
+    if value <= LARGE_PRICE_DROP_PCT:
+        return 25
+    if value < 0:
+        return min(12, abs(value) * 1.8)
+    return max(-8, -value * 0.8)
+
+
+def _prediction_scores(metrics: dict[str, float], score: float, news: dict, price_change) -> tuple[float, float]:
+    positive_news, negative_news, net_news = _news_strengths(news)
+    opportunity = _clamp_score(
+        score * 0.28
+        + metrics["quality"] * 0.20
+        + metrics["momentum"] * 0.16
+        + metrics["risk"] * 0.14
+        + metrics["value"] * 0.10
+        + metrics["sentiment"] * 0.08
+        + positive_news * 0.08
+        + max(0, net_news) * 0.06
+        + _price_action_bonus(price_change)
+        - negative_news * 0.10
+    )
+    downside = _clamp_score(
+        (100 - score) * 0.22
+        + (100 - metrics["risk"]) * 0.24
+        + (100 - metrics["momentum"]) * 0.16
+        + (100 - metrics["sentiment"]) * 0.12
+        + (100 - metrics["quality"]) * 0.10
+        + negative_news * 0.16
+        + max(0, -net_news) * 0.08
+        + _price_action_risk(price_change)
+        - positive_news * 0.06
+    )
+    return round(opportunity, 1), round(downside, 1)
+
+
 def _is_quality_investment_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
+    news = pick.get("newsAnalysis") or {}
+    positive_news, negative_news, _ = _news_strengths(news)
+    downside_score = pick.get("downsideRiskScore")
     return (
-        pick["score"] >= 62
-        and _investment_priority(pick) >= 64
-        and metrics["quality"] >= 58
-        and metrics["risk"] >= 48
+        float(pick.get("opportunityScore") or 0) >= OPPORTUNITY_BUY_FLOOR
+        and float(downside_score if downside_score is not None else 100) <= 45
+        and pick["score"] >= STRICT_BUY_SCORE_FLOOR
+        and _investment_priority(pick) >= STRICT_BUY_PRIORITY_FLOOR
+        and metrics["quality"] >= STRICT_BUY_QUALITY_FLOOR
+        and metrics["risk"] >= STRICT_BUY_RISK_FLOOR
+        and metrics["sentiment"] >= STRICT_BUY_SENTIMENT_FLOOR
         and _investable_factor_count(metrics) >= 4
-        and (metrics["sentiment"] >= 54 or metrics["momentum"] >= 62)
+        and (metrics["sentiment"] >= 58 or metrics["momentum"] >= 62)
+        and not _is_large_price_drop(pick.get("change"))
+        and negative_news <= positive_news + 8
     )
 
 
@@ -379,25 +495,6 @@ def _is_watch_candidate(pick: dict) -> bool:
             pick["score"] >= 55
             or _investment_priority(pick) >= 58
             or _investable_factor_count(metrics) >= 3
-        )
-    )
-
-
-def _relative_buy_target(count: int) -> int:
-    if count <= 0:
-        return 0
-    return min(AUTO_SCAN_BUY_LIMIT, max(1, round(count * 0.18)))
-
-
-def _is_relative_investment_candidate(pick: dict) -> bool:
-    metrics = pick["metrics"]
-    return (
-        not _is_urgent_exit_candidate(pick)
-        and metrics["risk"] >= 35
-        and (
-            pick["score"] >= 50
-            or _investment_priority(pick) >= 54
-            or _investable_factor_count(metrics) >= 2
         )
     )
 
@@ -416,26 +513,8 @@ def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
             pick["verdict"] = "sell"
         else:
             pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"])
-        pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
-
-    buy_count = sum(1 for pick in picks if pick["verdict"] == "buy")
-    target_buy_count = _relative_buy_target(len(picks))
-    if buy_count < target_buy_count:
-        relative_candidates = sorted(
-            [pick for pick in picks if pick["verdict"] != "buy" and _is_relative_investment_candidate(pick)],
-            key=_investment_priority,
-            reverse=True,
-        )
-        for pick in relative_candidates[: target_buy_count - buy_count]:
-            pick["verdict"] = "buy"
-            pick["reasonCodes"] = [
-                reason
-                for reason in pick["reasonCodes"]
-                if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}
-            ]
-            pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"])
-            pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"])
+        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"))
+        pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"], pick.get("change"))
 
     for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
         pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index}})
@@ -466,7 +545,7 @@ def _sector_id(name: str) -> str:
 def _sector_recommendation(score: float, metrics: dict[str, float], verdict_counts: dict[str, int], count: int) -> str:
     sell_ratio = verdict_counts.get("sell", 0) / count if count else 0
     buy_ratio = verdict_counts.get("buy", 0) / count if count else 0
-    if score >= 66 and metrics["risk"] >= 45 and metrics["sentiment"] >= 50 and sell_ratio < 0.34:
+    if buy_ratio > 0 and score >= 66 and metrics["risk"] >= 48 and metrics["sentiment"] >= 52 and sell_ratio < 0.34:
         return "overweight"
     if score < 54 or metrics["risk"] < 38 or sell_ratio >= 0.45:
         return "underweight"
@@ -496,17 +575,11 @@ def _apply_relative_sector_recommendations(sectors: list[dict]) -> None:
     candidates = [
         sector
         for sector in sectors
-        if sector["score"] >= 50
-        and sector["metrics"]["risk"] >= 35
+        if sector["verdictCounts"].get("buy", 0) > 0
+        and sector["score"] >= 62
+        and sector["metrics"]["risk"] >= 45
         and sector["verdictCounts"].get("sell", 0) < sector["count"]
     ]
-    if not candidates:
-        candidates = [
-            sector
-            for sector in sectors
-            if sector["metrics"]["risk"] >= 30
-            and sector["verdictCounts"].get("sell", 0) < sector["count"]
-        ]
     if candidates:
         sorted(candidates, key=_sector_priority, reverse=True)[0]["recommendation"] = "overweight"
 
@@ -583,7 +656,10 @@ def _sector_analysis(picks: list[dict]) -> list[dict]:
 
 def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
     if len(picks) <= 2:
-        return sorted(picks, key=_display_priority_key)
+        return sorted(
+            [pick for pick in picks if _is_quality_investment_candidate(pick) or _is_urgent_exit_candidate(pick) or _is_watch_candidate(pick)],
+            key=_display_priority_key,
+        )
 
     buy_candidates = sorted(
         [pick for pick in picks if _is_quality_investment_candidate(pick)],
@@ -610,15 +686,6 @@ def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
     if remaining > 0:
         selected.extend(watch_candidates[: min(AUTO_SCAN_WATCH_LIMIT, remaining)])
 
-    selected_symbols = {pick["symbol"] for pick in selected}
-    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
-    if remaining > 0:
-        supplemental = [pick for pick in sorted(picks, key=_display_priority_key) if pick["symbol"] not in selected_symbols]
-        selected.extend(supplemental[:remaining])
-
-    if not selected:
-        selected = sorted(picks, key=_investment_priority, reverse=True)[: min(AUTO_SCAN_RESULT_LIMIT, len(picks))]
-
     seen = set()
     unique_selected = []
     for pick in selected:
@@ -628,13 +695,18 @@ def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
     return sorted(unique_selected, key=_display_priority_key)
 
 
-def _reason_codes(metrics: dict[str, float], score: float, sentiment_delta: float) -> list[dict]:
+def _reason_codes(metrics: dict[str, float], score: float, sentiment_delta: float, price_change: float | None = None) -> list[dict]:
     strongest = sorted(metrics.items(), key=lambda item: item[1], reverse=True)[:2]
     weakest = min(metrics.items(), key=lambda item: item[1])
     reasons: list[dict] = [
         {"key": "strongestFactors", "params": {"first": strongest[0][0], "second": strongest[1][0]}},
         {"key": "sentimentImpact", "params": {"delta": round(sentiment_delta, 1)}},
     ]
+    change = _metric_number(price_change)
+    if _is_severe_price_drop(change):
+        reasons.append({"key": "severePriceDrop", "params": {"change": round(change, 1)}})
+    elif _is_large_price_drop(change):
+        reasons.append({"key": "weakPriceAction", "params": {"change": round(change, 1)}})
     if weakest[1] < 50:
         reasons.append({"key": "belowThreshold", "params": {"factor": weakest[0]}})
     elif score >= 72:
@@ -644,7 +716,14 @@ def _reason_codes(metrics: dict[str, float], score: float, sentiment_delta: floa
     return reasons
 
 
-def _decision_details(verdict: str, score: float, metrics: dict[str, float], signals: list[dict], news_analysis: dict) -> dict:
+def _decision_details(
+    verdict: str,
+    score: float,
+    metrics: dict[str, float],
+    signals: list[dict],
+    news_analysis: dict,
+    price_change: float | None = None,
+) -> dict:
     positives = []
     negatives = []
     watch_items = []
@@ -660,6 +739,12 @@ def _decision_details(verdict: str, score: float, metrics: dict[str, float], sig
         "negativeScore": round(negative_news, 1),
         "netScore": round(net_news, 1),
     }
+    change = _metric_number(price_change)
+
+    if _is_severe_price_drop(change):
+        negatives.append({"key": "priceActionSevereDrop", "params": {"change": round(change, 1)}})
+    elif _is_large_price_drop(change):
+        watch_items.append({"key": "priceActionWeak", "params": {"change": round(change, 1)}})
 
     if positive_news >= 18 and net_news >= 8:
         positives.append({"key": "newsSupport", "params": news_params})
@@ -725,16 +810,34 @@ def _english_reasons(reason_codes: list[dict]) -> list[str]:
             output.append(f"Live crawled sentiment changes the score by {params['delta']:+.1f} points.")
         elif reason["key"] == "belowThreshold":
             output.append(f"{labels[params['factor']]} is below threshold and should be monitored before adding exposure.")
+        elif reason["key"] == "severePriceDrop":
+            output.append(f"Price action is disqualified for new buying after a {params['change']:.1f}% drop.")
+        elif reason["key"] == "weakPriceAction":
+            output.append(f"Price action is weak after a {params['change']:.1f}% drop; wait for stabilization.")
         elif reason["key"] == "clearsBuyThreshold":
             output.append("Composite score clears the buy threshold under the selected strategy.")
         elif reason["key"] == "notHighConviction":
             output.append("Composite score is not strong enough for a high-conviction entry.")
         elif reason["key"] == "rankedTopOpportunity":
-            output.append(f"Ranked #{params['rank']} within this scan, making it a relative buy candidate.")
+            output.append(f"Ranked #{params['rank']} among strict quality candidates in this scan.")
     return output
 
 
-def _symbols_from_payload(payload: dict, universe_provider=None) -> tuple[list[DiscoveredSymbol], list[dict], str]:
+def _dedupe_discovered_symbols(symbols: list[DiscoveredSymbol]) -> list[DiscoveredSymbol]:
+    seen = set()
+    deduped = []
+    for item in symbols:
+        if item.symbol not in seen:
+            deduped.append(item)
+            seen.add(item.symbol)
+    return deduped
+
+
+def _symbols_from_payload(
+    payload: dict,
+    universe_provider=None,
+    limit_per_market: int = AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET,
+) -> tuple[list[DiscoveredSymbol], list[dict], str]:
     manual_inputs = [str(symbol).strip() for symbol in payload.get("symbols", []) if str(symbol).strip()]
     if manual_inputs:
         provider = universe_provider or MarketUniverseProvider()
@@ -746,14 +849,9 @@ def _symbols_from_payload(payload: dict, universe_provider=None) -> tuple[list[D
         return [DiscoveredSymbol(symbol=symbol, name=symbol, market=infer_market(symbol), source="manual") for symbol in symbols[:25]], [], "manual"
     markets = payload.get("markets") or [market["id"] for market in MARKETS]
     provider = universe_provider or MarketUniverseProvider()
-    discovered, discovery_errors = provider.discover(markets, limit_per_market=AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET)
-    seen = set()
-    deduped = []
-    for item in discovered:
-        if item.symbol not in seen:
-            deduped.append(item)
-            seen.add(item.symbol)
-    return deduped[: AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET * max(1, len(markets))], discovery_errors, "market-news"
+    discovered, discovery_errors = provider.discover(markets, limit_per_market=limit_per_market)
+    deduped = _dedupe_discovered_symbols(discovered)
+    return deduped[: limit_per_market * max(1, len(markets))], discovery_errors, "market-news"
 
 
 def _price_return(closes: list[float], lookback: int) -> float:
@@ -1043,7 +1141,7 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
     }
 
 
-def _action_plan(verdict: str, score: float, metrics: dict[str, float], news: dict, financials: dict) -> dict:
+def _action_plan(verdict: str, score: float, metrics: dict[str, float], news: dict, financials: dict, price_change: float | None = None) -> dict:
     negative_news = float(news.get("negativeScore", news.get("negativeCount", 0) * 10) or 0)
     positive_news = float(news.get("positiveScore", news.get("positiveCount", 0) * 10) or 0)
     net_news = float(news.get("netScore", positive_news - negative_news) or 0)
@@ -1075,6 +1173,11 @@ def _action_plan(verdict: str, score: float, metrics: dict[str, float], news: di
 
     if negative_fundamentals:
         watch_items.append({"key": "actionWatchFinancialRepair", "params": {"count": negative_fundamentals}})
+    change = _metric_number(price_change)
+    if _is_severe_price_drop(change):
+        risk_controls.append({"key": "actionAvoidLimitDown", "params": {"change": round(change, 1)}})
+    elif _is_large_price_drop(change):
+        risk_controls.append({"key": "actionWaitPriceStabilization", "params": {"change": round(change, 1)}})
     if metrics["momentum"] < 55:
         watch_items.append({"key": "actionWatchMomentumTurn", "params": {}})
     if metrics["risk"] < 45:
@@ -1096,12 +1199,18 @@ def _analysis_context(payload: dict, market_provider=None, news_crawler=None, un
     weights = _normalize_weights(strategy["weights"])
     market_provider = market_provider or YFinanceMarketDataProvider()
     news_crawler = news_crawler or RssNewsCrawler()
+    universe_provider = universe_provider or MarketUniverseProvider()
 
     picks = []
     errors = []
     requested_symbols = [str(symbol).strip() for symbol in payload.get("symbols", []) if str(symbol).strip()]
     auto_scan = not requested_symbols
-    discovered_symbols, discovery_errors, universe_source = _symbols_from_payload(payload, universe_provider)
+    requested_markets = payload.get("markets") or [market["id"] for market in MARKETS]
+    discovered_symbols, discovery_errors, universe_source = _symbols_from_payload(
+        payload,
+        universe_provider,
+        AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET,
+    )
     symbols = [item for item in discovered_symbols if infer_market(item.symbol) in markets]
 
     return {
@@ -1109,11 +1218,53 @@ def _analysis_context(payload: dict, market_provider=None, news_crawler=None, un
         "weights": weights,
         "market_provider": market_provider,
         "news_crawler": news_crawler,
+        "universe_provider": universe_provider,
+        "markets_filter": markets,
+        "requested_markets": requested_markets,
         "symbols": symbols,
         "auto_scan": auto_scan,
         "discovery_errors": discovery_errors,
         "universe_source": universe_source,
+        "discovery_limit": AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET,
     }
+
+
+def _auto_scan_quality_target(context: dict) -> int:
+    return min(AUTO_SCAN_BUY_LIMIT, AUTO_SCAN_TARGET_QUALITY_BUYS)
+
+
+def _quality_buy_count(picks: list[dict]) -> int:
+    return sum(1 for pick in picks if pick.get("verdict") == "buy" and _is_quality_investment_candidate(pick))
+
+
+def _next_auto_scan_limit(context: dict, picks: list[dict]) -> int | None:
+    if not context["auto_scan"]:
+        return None
+    if _quality_buy_count(picks) >= _auto_scan_quality_target(context):
+        return None
+    current_limit = int(context.get("discovery_limit") or AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET)
+    for limit in AUTO_SCAN_EXPANSION_LIMITS_PER_MARKET:
+        if limit > current_limit:
+            return limit
+    return None
+
+
+def _expand_auto_scan_symbols(context: dict, limit_per_market: int) -> int:
+    discovered, discovery_errors = context["universe_provider"].discover(
+        context["requested_markets"],
+        limit_per_market=limit_per_market,
+    )
+    context["discovery_errors"].extend(discovery_errors)
+    existing_symbols = {item.symbol for item in context["symbols"]}
+    new_symbols = []
+    for item in _dedupe_discovered_symbols(discovered):
+        if item.symbol in existing_symbols or infer_market(item.symbol) not in context["markets_filter"]:
+            continue
+        new_symbols.append(item)
+        existing_symbols.add(item.symbol)
+    context["symbols"].extend(new_symbols)
+    context["discovery_limit"] = limit_per_market
+    return len(new_symbols)
 
 
 def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weights: dict[str, float]) -> dict:
@@ -1125,10 +1276,11 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
     availability = _metric_availability(snapshot, articles)
     sentiment_delta = _sentiment_boost(articles)
     score = round(_score_stock(metrics, weights, availability), 1)
-    verdict = _verdict(score, metrics["risk"])
-    reason_codes = _reason_codes(metrics, score, sentiment_delta)
     signals = _signals_for(articles)
     news_analysis = _news_analysis(articles)
+    opportunity_score, downside_risk_score = _prediction_scores(metrics, score, news_analysis, snapshot.change)
+    verdict = _verdict(score, metrics["risk"], metrics["quality"], metrics["sentiment"], snapshot.change)
+    reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change)
     financial_analysis = _financial_analysis(snapshot)
     return {
         "symbol": snapshot.symbol,
@@ -1139,6 +1291,13 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "change": snapshot.change,
         "currency": snapshot.currency,
         "score": score,
+        "opportunityScore": opportunity_score,
+        "downsideRiskScore": downside_risk_score,
+        "prediction": {
+            "opportunityScore": opportunity_score,
+            "downsideRiskScore": downside_risk_score,
+            "edge": round(opportunity_score - downside_risk_score, 1),
+        },
         "verdict": verdict,
         "confidence": round(min(96, 45 + abs(score - 50) * 0.68 + metrics["quality"] * 0.2)),
         "reasons": _english_reasons(reason_codes),
@@ -1146,10 +1305,10 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "signals": signals,
         "metrics": metrics,
         "scoreBreakdown": _score_breakdown(metrics, weights, availability),
-        "decision": _decision_details(verdict, score, metrics, signals, news_analysis),
+        "decision": _decision_details(verdict, score, metrics, signals, news_analysis, snapshot.change),
         "newsAnalysis": news_analysis,
         "financialAnalysis": financial_analysis,
-        "actionPlan": _action_plan(verdict, score, metrics, news_analysis, financial_analysis),
+        "actionPlan": _action_plan(verdict, score, metrics, news_analysis, financial_analysis, snapshot.change),
     }
 
 
@@ -1200,6 +1359,20 @@ def _finish_picks(picks: list[dict], auto_scan: bool = False) -> list[dict]:
     return display_picks
 
 
+def _process_symbol_batch(symbols: list[DiscoveredSymbol], market_provider, news_crawler, weights: dict[str, float]) -> tuple[list[dict], list[dict]]:
+    picks = []
+    errors = []
+    with ThreadPoolExecutor(max_workers=min(6, max(1, len(symbols)))) as executor:
+        futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights): item.symbol for item in symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                picks.append(future.result())
+            except Exception as exc:
+                errors.append({"symbol": symbol, "error": _friendly_data_error(symbol, exc)})
+    return picks, errors
+
+
 def analyze(payload: dict, market_provider=None, news_crawler=None, universe_provider=None) -> dict:
     context = _analysis_context(payload, market_provider, news_crawler, universe_provider)
     strategy = context["strategy"]
@@ -1211,17 +1384,25 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
     picks = []
     errors = []
 
-    with ThreadPoolExecutor(max_workers=min(6, max(1, len(symbols)))) as executor:
-        futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights): item.symbol for item in symbols}
-        for future in as_completed(futures):
-            symbol = futures[future]
-            try:
-                picks.append(future.result())
-            except Exception as exc:
-                errors.append({"symbol": symbol, "error": _friendly_data_error(symbol, exc)})
+    evaluated_symbols = set()
+    display_picks: list[dict] = []
+    while True:
+        pending_symbols = [item for item in symbols if item.symbol not in evaluated_symbols]
+        if pending_symbols:
+            batch_picks, batch_errors = _process_symbol_batch(pending_symbols, market_provider, news_crawler, weights)
+            picks.extend(batch_picks)
+            errors.extend(batch_errors)
+            evaluated_symbols.update(item.symbol for item in pending_symbols)
 
-    context["evaluated"] = len(picks)
-    display_picks = _finish_picks(picks, context["auto_scan"])
+        context["evaluated"] = len(picks)
+        display_picks = _finish_picks(picks, context["auto_scan"])
+        next_limit = _next_auto_scan_limit(context, display_picks)
+        if next_limit is None:
+            break
+        if _expand_auto_scan_symbols(context, next_limit) <= 0:
+            break
+        symbols = context["symbols"]
+
     sectors = _sector_analysis(display_picks)
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -1256,26 +1437,41 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
         scan=_scan_state(context, picks, errors),
     )
 
-    with ThreadPoolExecutor(max_workers=min(6, max(1, len(symbols)))) as executor:
-        futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights): item.symbol for item in symbols}
-        for future in as_completed(futures):
-            symbol = futures[future]
-            try:
-                pick = future.result()
-                picks.append(pick)
-                context["evaluated"] = len(picks)
-                display_picks = _finish_picks(picks, context["auto_scan"])
-                sectors = _sector_analysis(display_picks)
-                rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
-                yield event("pick", pick=pick, picks=display_picks, sectors=sectors, rank=rank, scan=_scan_state(context, display_picks, errors))
-            except Exception as exc:
-                error_message = _friendly_data_error(symbol, exc)
-                errors.append({"symbol": symbol, "error": error_message})
-                display_picks = _finish_picks(picks, context["auto_scan"])
-                yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(display_picks), scan=_scan_state(context, display_picks, errors))
+    evaluated_symbols = set()
+    display_picks: list[dict] = []
+    while True:
+        pending_symbols = [item for item in symbols if item.symbol not in evaluated_symbols]
+        if pending_symbols:
+            with ThreadPoolExecutor(max_workers=min(6, max(1, len(pending_symbols)))) as executor:
+                futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights): item.symbol for item in pending_symbols}
+                for future in as_completed(futures):
+                    symbol = futures[future]
+                    try:
+                        pick = future.result()
+                        picks.append(pick)
+                        context["evaluated"] = len(picks)
+                        display_picks = _finish_picks(picks, context["auto_scan"])
+                        sectors = _sector_analysis(display_picks)
+                        rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
+                        yield event("pick", pick=pick, picks=display_picks, sectors=sectors, rank=rank, scan=_scan_state(context, display_picks, errors))
+                    except Exception as exc:
+                        error_message = _friendly_data_error(symbol, exc)
+                        errors.append({"symbol": symbol, "error": error_message})
+                        display_picks = _finish_picks(picks, context["auto_scan"])
+                        yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(display_picks), scan=_scan_state(context, display_picks, errors))
+            evaluated_symbols.update(item.symbol for item in pending_symbols)
+
+        context["evaluated"] = len(picks)
+        display_picks = _finish_picks(picks, context["auto_scan"])
+        next_limit = _next_auto_scan_limit(context, display_picks)
+        if next_limit is None:
+            break
+        if _expand_auto_scan_symbols(context, next_limit) <= 0:
+            break
+        symbols = context["symbols"]
 
     context["evaluated"] = len(picks)
-    display_picks = _finish_picks(picks, context["auto_scan"])
+    display_picks = display_picks or _finish_picks(picks, context["auto_scan"])
     sectors = _sector_analysis(display_picks)
     yield event(
         "complete",

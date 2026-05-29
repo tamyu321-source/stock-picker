@@ -36,7 +36,15 @@ export interface Signal {
 }
 
 export interface ReasonCode {
-  key: 'strongestFactors' | 'sentimentImpact' | 'belowThreshold' | 'clearsBuyThreshold' | 'notHighConviction' | 'rankedTopOpportunity';
+  key:
+    | 'strongestFactors'
+    | 'sentimentImpact'
+    | 'belowThreshold'
+    | 'severePriceDrop'
+    | 'weakPriceAction'
+    | 'clearsBuyThreshold'
+    | 'notHighConviction'
+    | 'rankedTopOpportunity';
   params: Record<string, string | number>;
 }
 
@@ -67,6 +75,8 @@ export interface DecisionPoint {
     | 'riskControlled'
     | 'riskHigh'
     | 'watchRisk'
+    | 'priceActionSevereDrop'
+    | 'priceActionWeak'
     | 'qualitySupport'
     | 'weakQuality'
     | 'watchNewsFlow'
@@ -109,6 +119,8 @@ export interface DecisionPoint {
     | 'actionWatchFinancialRepair'
     | 'actionWatchMomentumTurn'
     | 'actionRespectRisk'
+    | 'actionAvoidLimitDown'
+    | 'actionWaitPriceStabilization'
     | 'actionRequireNewsEvidence';
   params: Record<string, string | number>;
 }
@@ -172,6 +184,13 @@ export interface Pick {
   change: number;
   currency: string;
   score: number;
+  opportunityScore?: number;
+  downsideRiskScore?: number;
+  prediction?: {
+    opportunityScore: number;
+    downsideRiskScore: number;
+    edge: number;
+  };
   verdict: Verdict;
   confidence: number;
   reasons: string[];

@@ -130,7 +130,7 @@ const analysisSteps = computed(() => {
           'Discovering candidates across selected markets',
           'Cross-checking local finance news sources',
           'Loading price and fundamentals data',
-          'Ranking quality investment candidates'
+          'Strictly vetting quality candidates'
         ]
       : [
           'Loading recent company news',
@@ -141,16 +141,16 @@ const analysisSteps = computed(() => {
   }
   if (locale.value === 'zh-CN') {
     return isAutoScan.value
-      ? ['正在直接扫描所选市场', '正在交叉检查当地财经新闻源', '正在拉取行情与基本面', '正在排序优质投资候选']
+      ? ['正在深度扫描所选市场', '正在交叉检查当地财经新闻源', '正在拉取行情与基本面', '正在严格筛选优质投资候选']
       : ['正在拉取个股近期新闻', '正在获取行情与基本面', '正在计算策略评分', '正在整理判断与风险提示'];
   }
   if (locale.value === 'nan-TW') {
     return isAutoScan.value
-      ? ['直接掃所選市場', '交叉檢查在地財經新聞', '取得行情佮基本面', '排序較好的投資候選']
+      ? ['深入掃所選市場', '交叉檢查在地財經新聞', '取得行情佮基本面', '嚴格篩選優質投資候選']
       : ['取得個股近期新聞', '取得行情佮基本面', '計算策略分數', '整理判斷佮風險提示'];
   }
   return isAutoScan.value
-    ? ['正在直接掃描所選市場', '正在交叉檢查當地財經新聞源', '正在拉取行情與基本面', '正在排序優質投資候選']
+    ? ['正在深度掃描所選市場', '正在交叉檢查當地財經新聞源', '正在拉取行情與基本面', '正在嚴格篩選優質投資候選']
     : ['正在拉取個股近期新聞', '正在取得行情與基本面', '正在計算策略評分', '正在整理判斷與風險提示'];
 });
 const activeAnalysisStep = computed(() => analysisSteps.value[Math.min(loadingStepIndex.value, analysisSteps.value.length - 1)]);
@@ -271,6 +271,21 @@ function scoreWeightLabel(item: { weight: number; baseWeight?: number; available
   return base !== effective ? `${base}% -> ${effective}%` : `${effective}%`;
 }
 
+function predictionScoreLabel(kind: 'opportunity' | 'downside', pick: Pick) {
+  const value = kind === 'opportunity' ? pick.opportunityScore : pick.downsideRiskScore;
+  const score = value === undefined ? '-' : Number(value).toFixed(1);
+  if (kind === 'opportunity') {
+    if (locale.value === 'en') return `Advantage ${score}/100`;
+    if (locale.value === 'zh-CN') return `相对优势 ${score}/100`;
+    if (locale.value === 'nan-TW') return `相對優勢 ${score}/100`;
+    return `相對優勢 ${score}/100`;
+  }
+  if (locale.value === 'en') return `Downside risk ${score}/100`;
+  if (locale.value === 'zh-CN') return `下跌风险 ${score}/100`;
+  if (locale.value === 'nan-TW') return `下跌風險 ${score}/100`;
+  return `下跌風險 ${score}/100`;
+}
+
 function reasonLabel(reason: ReasonCode) {
   const params = reason.params;
   if (reason.key === 'strongestFactors') {
@@ -292,6 +307,18 @@ function reasonLabel(reason: ReasonCode) {
     if (locale.value === 'nan-TW') return `${factorLabel(params.factor)} 低於門檻，加碼前愛閣觀察。`;
     return `${factorLabel(params.factor)} 低於門檻，加碼前需要繼續觀察。`;
   }
+  if (reason.key === 'severePriceDrop') {
+    if (locale.value === 'en') return `Price action is disqualified for new buying after a ${params.change}% drop.`;
+    if (locale.value === 'zh-CN') return `当日跌幅 ${params.change}%，大跌/跌停状态不允许判为优质买入。`;
+    if (locale.value === 'nan-TW') return `當日跌幅 ${params.change}%，大跌狀態袂當判做會使買入。`;
+    return `當日跌幅 ${params.change}%，大跌/跌停狀態不允許判為優質買入。`;
+  }
+  if (reason.key === 'weakPriceAction') {
+    if (locale.value === 'en') return `Price action is weak after a ${params.change}% drop; wait for stabilization.`;
+    if (locale.value === 'zh-CN') return `当日跌幅 ${params.change}%，价格未企稳前只能观察。`;
+    if (locale.value === 'nan-TW') return `當日跌幅 ${params.change}%，價格未徛穩前先觀察。`;
+    return `當日跌幅 ${params.change}%，價格未企穩前只能觀察。`;
+  }
   if (reason.key === 'clearsBuyThreshold') {
     if (locale.value === 'en') return 'Composite score clears the buy threshold under the selected strategy.';
     if (locale.value === 'zh-CN') return '综合评分已通过当前策略的买入门槛。';
@@ -299,10 +326,10 @@ function reasonLabel(reason: ReasonCode) {
     return '綜合評分已通過目前策略的買入門檻。';
   }
   if (reason.key === 'rankedTopOpportunity') {
-    if (locale.value === 'en') return `Ranked #${params.rank} within this scan, making it a relative buy candidate.`;
-    if (locale.value === 'zh-CN') return `本次扫描排名第 ${params.rank}，属于相对更值得关注的买入候选。`;
-    if (locale.value === 'nan-TW') return `這擺掃描排名第 ${params.rank}，是相對較值得看的買入候選。`;
-    return `本次掃描排名第 ${params.rank}，屬於相對更值得關注的買入候選。`;
+    if (locale.value === 'en') return `Ranked #${params.rank} among strict quality candidates in this scan.`;
+    if (locale.value === 'zh-CN') return `本次扫描在严格优质候选中排名第 ${params.rank}。`;
+    if (locale.value === 'nan-TW') return `這擺掃描佇嚴格優質候選內排名第 ${params.rank}。`;
+    return `本次掃描在嚴格優質候選中排名第 ${params.rank}。`;
   }
   if (locale.value === 'en') return 'Composite score is not strong enough for a high-conviction entry.';
   if (locale.value === 'zh-CN') return '综合评分暂不足以支持高信心进场。';
@@ -324,6 +351,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
   const positiveScore = Number(p.positiveScore ?? 0).toFixed(1);
   const negativeScore = Number(p.negativeScore ?? 0).toFixed(1);
   const netScore = signedScore(p.netScore);
+  const change = Number(p.change ?? 0).toFixed(1);
   switch (point.key) {
     case 'buySummary':
       return `會使買入：總分 ${p.score}/100，這个方案相對有力。`;
@@ -357,6 +385,10 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
       return `風險分偏低，只有 ${score}/100，下行保護較弱。`;
     case 'watchRisk':
       return '觀察波動率和回撤是否收斂。';
+    case 'priceActionSevereDrop':
+      return `當日跌幅 ${change}%，大跌狀態袂當判做會使買入。`;
+    case 'priceActionWeak':
+      return `當日跌幅 ${change}%，價格未徛穩前先觀察。`;
     case 'qualitySupport':
       return `基本面品質 ${score}/100，對中期持有有支撐。`;
     case 'weakQuality':
@@ -441,6 +473,10 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
       return '加碼前觀察價格動能是否轉強。';
     case 'actionRespectRisk':
       return `風險分 ${p.risk}/100，必須優先控制下行風險。`;
+    case 'actionAvoidLimitDown':
+      return `當日跌幅 ${change}%，避免接跌停或急跌中的股票。`;
+    case 'actionWaitPriceStabilization':
+      return `當日跌幅 ${change}%，等待價格企穩才重新評估。`;
     case 'actionRequireNewsEvidence':
       return '需要新的公司級新聞證據，才適合做高信心判斷。';
     default:
@@ -456,6 +492,7 @@ function pointLabel(point: DecisionPoint) {
   const positiveScore = Number(p.positiveScore ?? 0).toFixed(1);
   const negativeScore = Number(p.negativeScore ?? 0).toFixed(1);
   const netScore = signedScore(p.netScore);
+  const change = Number(p.change ?? 0).toFixed(1);
   if (locale.value === 'nan-TW') {
     return nanDecisionPointLabel(point, score, count, hours);
   }
@@ -540,6 +577,16 @@ function pointLabel(point: DecisionPoint) {
       en: 'Watch volatility and whether drawdowns stabilize.',
       'zh-CN': '观察波动率和回撤是否收敛。',
       'zh-TW': '觀察波動率和回撤是否收斂。'
+    },
+    priceActionSevereDrop: {
+      en: `Price fell ${change}% today; severe downside action blocks a quality-buy call.`,
+      'zh-CN': `当日跌幅 ${change}%，大跌/跌停状态会拦截优质买入判断。`,
+      'zh-TW': `當日跌幅 ${change}%，大跌/跌停狀態會攔截優質買入判斷。`
+    },
+    priceActionWeak: {
+      en: `Price fell ${change}% today; wait for stabilization before considering entry.`,
+      'zh-CN': `当日跌幅 ${change}%，价格企稳前只适合观察。`,
+      'zh-TW': `當日跌幅 ${change}%，價格企穩前只適合觀察。`
     },
     qualitySupport: {
       en: `Quality score is strong at ${score}/100.`,
@@ -750,6 +797,16 @@ function pointLabel(point: DecisionPoint) {
       en: `Respect downside risk because risk score is ${p.risk}/100.`,
       'zh-CN': `风险分 ${p.risk}/100，必须优先控制下行风险。`,
       'zh-TW': `風險分 ${p.risk}/100，必須優先控制下行風險。`
+    },
+    actionAvoidLimitDown: {
+      en: `Avoid new buying while the stock is down ${change}% today.`,
+      'zh-CN': `当日跌幅 ${change}%，避免接跌停或急跌中的股票。`,
+      'zh-TW': `當日跌幅 ${change}%，避免接跌停或急跌中的股票。`
+    },
+    actionWaitPriceStabilization: {
+      en: `Wait for price stabilization after today's ${change}% drop.`,
+      'zh-CN': `当日跌幅 ${change}%，等待价格企稳后再重新评估。`,
+      'zh-TW': `當日跌幅 ${change}%，等待價格企穩後再重新評估。`
     },
     actionRequireNewsEvidence: {
       en: 'Require fresh company-specific news before making a strong call.',
@@ -1402,6 +1459,8 @@ onUnmounted(stopAppTimers);
             <div class="metric-row">
               <span>{{ verdictLabel(pick.verdict) }}</span>
               <span>{{ t.confidence }} {{ pick.confidence }}%</span>
+              <span>{{ predictionScoreLabel('opportunity', pick) }}</span>
+              <span>{{ predictionScoreLabel('downside', pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
             </div>
 
