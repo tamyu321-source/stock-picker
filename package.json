@@ -1,7 +1,22 @@
 {
   "name": "stock-picker",
   "version": "0.1.0",
+  "description": "Multilingual AI-assisted stock research web app with no-code market scanning and explainable scoring.",
   "private": false,
+  "license": "MIT",
+  "homepage": "https://tamyu321-source.github.io/stock-picker/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tamyu321-source/stock-picker.git"
+  },
+  "keywords": [
+    "stock-research",
+    "market-scanner",
+    "vue",
+    "flask",
+    "finance",
+    "explainable-ai"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",

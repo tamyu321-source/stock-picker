@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type Strategy, type StrategyWeights } from './api';
+import { analyzeStocksStream, currentDataMode, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -33,6 +33,7 @@ const loadingElapsedSeconds = ref(0);
 const loadingStepIndex = ref(0);
 const scanRunId = ref(0);
 const signalRefreshStartedAt = ref('');
+const dataMode = ref(currentDataMode());
 const yogurtSecretPrimed = ref(false);
 const yogurtSecretOpen = ref(false);
 let loadingTimer: number | undefined;
@@ -140,6 +141,9 @@ const filteredPicks = computed(() => picks.value.filter((pick) => {
 }));
 const flattenedSignals = computed(() => filteredPicks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
 const resultFiltersActive = computed(() => resultMarketFilter.value !== 'all' || resultVerdictFilter.value !== 'all');
+const isDemoDataMode = computed(() => dataMode.value === 'demo');
+const dataModeLabel = computed(() => (isDemoDataMode.value ? t.value.demoPreview : t.value.liveBackend));
+const dataModeDescription = computed(() => (isDemoDataMode.value ? t.value.demoPreviewDetail : t.value.liveBackendDetail));
 const yogurtSecretLocalized = computed(() => locale.value === 'zh-TW' || locale.value === 'nan-TW');
 const yogurtSecretTriggerLabel = computed(() => (locale.value === 'nan-TW' ? '活菌雷達' : '菌群雷達'));
 const yogurtSecretClueLabel = computed(() => {
@@ -252,6 +256,10 @@ function persistSettings() {
   } catch {
     // Ignore storage failures so the scanner remains usable in private or restricted contexts.
   }
+}
+
+function refreshDataMode() {
+  dataMode.value = currentDataMode();
 }
 
 function restoreSettings() {
@@ -1415,6 +1423,7 @@ async function runAnalysis() {
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unknown error';
   } finally {
+    refreshDataMode();
     stopLoadingFeedback();
   }
 }
@@ -1437,6 +1446,7 @@ onMounted(async () => {
   document.addEventListener('keydown', handleDocumentKeydown);
   restoreSettings();
   config.value = await fetchConfig();
+  refreshDataMode();
   normalizeStrategySelection();
 });
 
@@ -1490,6 +1500,11 @@ onUnmounted(() => {
       <div>
         <span>{{ t.backendStatus }}</span>
         <strong>{{ t.liveData }}</strong>
+      </div>
+      <div class="mode-status" :class="{ demo: isDemoDataMode }">
+        <span>{{ t.dataMode }}</span>
+        <strong>{{ dataModeLabel }}</strong>
+        <small>{{ dataModeDescription }}</small>
       </div>
       <div>
         <span>{{ t.marketCoverage }}</span>

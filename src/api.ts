@@ -285,6 +285,10 @@ const headers = { 'Content-Type': 'application/json' };
 let usingStaticFallback = false;
 const staticDemoBuild = import.meta.env.PROD && import.meta.env.BASE_URL === '/stock-picker/';
 
+export function currentDataMode() {
+  return staticDemoBuild || usingStaticFallback ? 'demo' : 'live';
+}
+
 function hasContentType(response: Response, expected: string) {
   return response.headers.get('content-type')?.toLowerCase().includes(expected) ?? false;
 }

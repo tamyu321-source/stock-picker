@@ -358,6 +358,23 @@ h1 {
   font-size: 0.82rem;
 }
 
+.status-strip small {
+  display: block;
+  margin-top: 4px;
+  color: #667268;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.status-strip .mode-status.demo {
+  border-color: #e2c15d;
+  background: #fff8df;
+}
+
+.status-strip .mode-status.demo strong {
+  color: #74520b;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(286px, 320px) minmax(0, 1fr) minmax(260px, 310px);

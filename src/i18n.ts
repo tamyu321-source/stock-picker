@@ -66,6 +66,11 @@ type MessageKey =
   | 'riskControls'
   | 'weight'
   | 'contribution'
+  | 'dataMode'
+  | 'liveBackend'
+  | 'demoPreview'
+  | 'liveBackendDetail'
+  | 'demoPreviewDetail'
   | 'liveData'
   | 'failures'
   | 'sectorUnavailable';
@@ -137,6 +142,11 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     riskControls: 'Risk controls',
     weight: 'Weight',
     contribution: 'Contribution',
+    dataMode: 'Data mode',
+    liveBackend: 'Live backend',
+    demoPreview: 'Static demo',
+    liveBackendDetail: 'Connected to the Python API',
+    demoPreviewDetail: 'Sample data for hosted preview',
     liveData: 'Live market data and RSS crawling',
     failures: 'Data issues',
     sectorUnavailable: 'Sector unavailable'
@@ -207,6 +217,11 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     riskControls: '风险控制',
     weight: '权重',
     contribution: '贡献分',
+    dataMode: '数据模式',
+    liveBackend: '实时后端',
+    demoPreview: '静态演示',
+    liveBackendDetail: '已连接 Python API',
+    demoPreviewDetail: '托管预览使用示例数据',
     liveData: '真实行情与 RSS 爬文',
     failures: '数据问题',
     sectorUnavailable: '行业资料暂缺'
@@ -277,6 +292,11 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     riskControls: '風險控制',
     weight: '權重',
     contribution: '貢獻分',
+    dataMode: '資料模式',
+    liveBackend: '即時後端',
+    demoPreview: '靜態示範',
+    liveBackendDetail: '已連線 Python API',
+    demoPreviewDetail: '托管預覽使用範例資料',
     liveData: '真實行情與 RSS 爬文',
     failures: '資料問題',
     sectorUnavailable: '產業資料暫缺'
@@ -347,6 +367,11 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     riskControls: '風險控制',
     weight: '權重',
     contribution: '貢獻分',
+    dataMode: '資料模式',
+    liveBackend: '即時後端',
+    demoPreview: '靜態示範',
+    liveBackendDetail: '已連線 Python API',
+    demoPreviewDetail: '線頂預覽用範例資料',
     liveData: '即時行情佮 RSS 爬文',
     failures: '資料問題',
     sectorUnavailable: '產業資料暫缺'
@@ -417,6 +442,11 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     riskControls: 'リスク管理',
     weight: '重み',
     contribution: '寄与',
+    dataMode: 'データモード',
+    liveBackend: 'ライブバックエンド',
+    demoPreview: '静的デモ',
+    liveBackendDetail: 'Python API に接続中',
+    demoPreviewDetail: 'ホスト版プレビュー用サンプルデータ',
     liveData: 'リアルタイム市場データと RSS クロール',
     failures: 'データ問題',
     sectorUnavailable: 'セクター情報なし'
@@ -487,6 +517,11 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     riskControls: '리스크 관리',
     weight: '가중치',
     contribution: '기여도',
+    dataMode: '데이터 모드',
+    liveBackend: '실시간 백엔드',
+    demoPreview: '정적 데모',
+    liveBackendDetail: 'Python API에 연결됨',
+    demoPreviewDetail: '호스팅 미리보기용 샘플 데이터',
     liveData: '실시간 시장 데이터와 RSS 수집',
     failures: '데이터 문제',
     sectorUnavailable: '섹터 정보 없음'

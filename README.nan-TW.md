@@ -7,60 +7,79 @@
 
 # Open Stock Picker
 
-Open Stock Picker 是一套用 AI 幫咱做股票研究的 Web App。主要流程是免寫程式的市場掃描：揀好市場佮策略了後，後端會即時去揣股票、評分、照分數排序，幫咱整理較有品質、適合投資研究的候選股，範圍包含中國、香港、新加坡、美國佮臺灣。
+[![CI](https://github.com/tamyu321-source/stock-picker/actions/workflows/ci.yml/badge.svg)](https://github.com/tamyu321-source/stock-picker/actions/workflows/ci.yml)
+[![Deploy GitHub Pages](https://github.com/tamyu321-source/stock-picker/actions/workflows/deploy.yml/badge.svg)](https://github.com/tamyu321-source/stock-picker/actions/workflows/deploy.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+
+Open Stock Picker 是一套用 AI 幫咱做股票研究的 Web App。主要流程是免寫程式的市場掃描：揀市場佮策略了後，予 Python 後端即時揣股票、評分、照分數排序，幫咱整理較有品質、適合投資研究的候選股。範圍包含中國 A 股、香港、日本、韓國、新加坡、美國佮臺灣。
 
 這个 app 是照實際研究流程設計，毋是靜態作品集展示。它袂執行交易，嘛袂保存券商帳號抑是憑證。
+
+**線頂預覽：** [tamyu321-source.github.io/stock-picker](https://tamyu321-source.github.io/stock-picker/)
+
+GitHub Pages 版是靜態示範模式，用範例資料。若欲用即時行情、RSS/新聞爬取佮串流掃描，請佇本機啟動 Flask 後端。
+
+![Open Stock Picker preview](./preview-stock-picker.png)
 
 ## 臺語版用字
 
 這份 README 用臺灣閩南語常見漢字佮白話語氣，技術名詞保留英文或通用寫法，予內容較好讀。若遇著無好寫的語氣，才用注音符號；這版先以漢字為主，避免變做整段注音。
 
+## 為啥物值得用
+
+- 毋免先輸入股票代號，就會使直接掃市場。
+- 後端猶咧分析的時陣，前端會逐步顯示已經產生的候選股。
+- 同一批評分結果會使看個股，也會使看板塊分析。
+- 100 分制評分會拆做動能、估值、新聞氣口、風險佮品質。
+- UI 支援英文、簡體中文、繁體中文、臺語、日文佮韓文。
+- 若已經有指定標的，也會使用股票代號抑是公司名縮小掃描範圍。
+
 ## 功能
 
-- Vue 3 + Vite Web 介面，支援英文、簡體中文、繁體中文佮臺語版 UI。
-- Python Flask 後端，串接即時資料來源佮會使解說的評分模型。
-- 毋免先輸入股票代號，就會使直接掃市場。
-- 若使用者已經有指定股票，嘛會使選填股票代號抑是公司名，予掃描範圍較精準。
-- 自動揣市場股票池，毋是靠寫死的股票清單。
-- 透過 Yahoo Finance chart endpoints 取得即時價位歷史；若有安裝 `yfinance`，嘛會使選擇使用。
-- 透過 Google News 佮在地來源篩選，做市場別 RSS / 新聞爬取；有資料時會使用公司名佮文章摘要。
-- 內建平衡型、成長型佮防禦價值型投資策略。
-- 家己調策略滑桿，會使調整 momentum、valuation、sentiment、risk 佮 quality 權重。
-- 產生買入、觀察、退出風險判斷，閣附決策理由佮來源連結。
+- Vue 3 + Vite Web 介面，會保存設定，嘛支援響應式研究工作區。
+- Python Flask 後端，連接即時資料來源、RSS/新聞爬取佮會使解釋的評分模型。
+- 自動探索市場股票池，毋是靠寫死的股票清單。
+- 串流 NDJSON API，掃描較久嘛會逐步顯示結果。
+- 透過 Yahoo Finance chart endpoints 取得價格歷史；若有安裝 `yfinance`，嘛會使選擇使用。
+- 透過 Google News、Eastmoney fallback 佮在地來源篩選做市場別新聞爬取。
+- 內建平衡型、成長型佮防守價值型投資策略。
+- 家己調策略滑桿，會使調整動能、估值、新聞氣口、風險佮品質權重。
+- 產生買入、觀察、退出風險判斷，閣附決策理由、來源連結、做法佮風控提醒。
+
+## 市場範圍
+
+| 市場 | 代號例 | 探索方式 |
+| --- | --- | --- |
+| 美國 | `AAPL`, `MSFT`, `NVDA` | Yahoo Finance 篩選器佮新聞搜尋 |
+| 中國 A 股 | `600519.SS`, `300750.SZ` | Eastmoney 市場清單、在地名佮備援 metadata |
+| 香港 | `0700.HK`, `9988.HK` | Eastmoney 港股清單佮公司別名 |
+| 日本 | `7203.T`, `6758.T` | 高流動性備援股票池佮 Yahoo 代號 |
+| 韓國 | `005930.KS`, `000660.KS` | 高流動性備援股票池佮 Yahoo 代號 |
+| 新加坡 | `D05.SI`, `C38U.SI` | SGX securities API，照成交量排序 |
+| 臺灣 | `2330.TW`, `2317.TW` | TWSE 開放資料、在地公司名佮 Yahoo/TWSE fallback |
 
 ## 架構
 
 ```text
 Vue 3 web app
-  -> /api/config       strategy, market, and default ticker metadata
-  -> /api/analyze      live data fetch, RSS crawl, scoring, verdicts, explanations
+  -> /api/config          strategy, market, and default ticker metadata
+  -> /api/analyze         live data fetch, RSS crawl, scoring, verdicts, explanations
+  -> /api/analyze/stream  incremental NDJSON scan events
 
 Flask backend
   -> backend/universe.py   dynamic market-universe discovery
-  -> backend/providers.py  Yahoo Finance market provider and RSS crawler
+  -> backend/providers.py  market data providers and RSS/news crawlers
   -> backend/services.py   metric calculation, strategy selection, explainable scoring
   -> backend/app.py        REST API
 ```
 
 ## 本機開發
 
-安裝 frontend 相依套件：
-
 ```powershell
 npm install
-```
-
-安裝 backend 相依套件：
-
-```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-啟動 backend：
-
-```powershell
 python -m backend.app
 ```
 
@@ -72,66 +91,47 @@ npm run dev
 
 開 `http://127.0.0.1:5173`。
 
-## 免寫程式的市場掃描
+## 靜態示範佮即時後端
 
-主要使用方式是共選填股票欄位留空。Backend 會佇 request 的時陣揣候選股票，閣照分數排做投資研究想法：
+- GitHub Pages 只服務 Vue 靜態檔，所以用內建範例資料，予訪客先看介面。
+- 本機開發啟動 `python -m backend.app` 了後，才會使用即時 `/api/config`、`/api/analyze` 佮 `/api/analyze/stream`。
+- App 頂懸會顯示資料模式，予使用者知影這馬是範例資料抑是即時後端結果。
 
-- 美國：Yahoo Finance 預設篩選器，親像 most active 佮 day gainers。
-- 臺灣：TWSE open data，照成交金額排序。
-- 新加坡：SGX securities API，照成交量排序。
-- 中國 A 股佮香港：若連線有通，使用 Eastmoney 動態市場清單；若來源擋 request，就用明確的 fallback metadata。
+## 免寫程式掃市場
 
-API 回應有 `scan.source`、`scan.requested`、`scan.succeeded`、`scan.failed` 佮 `scan.discoveryErrors`，予 UI 會使顯示掃描是來自即時股票池探索，抑是 fallback 資料。
+主要使用方式是共選填股票欄位留空。後端會佇 request 的時陣揣候選股票，閣照分數排做投資研究想法。
 
-## 選填股票代號格式
+空白掃描的探索順序：
 
-預設資料提供者照 Yahoo Finance 股票代號 suffix：
+1. 在地財經新聞來源。
+2. Google News 市場搜尋。
+3. Yahoo、Eastmoney、SGX、TWSE 等市場股票池 API。
+4. 即時來源不可用的時，用高流動性備援清單。
 
-- 美國：`AAPL`、`MSFT`、`NVDA`
-- 中國 A 股：`600519.SS`、`300750.SZ`
-- 香港：`0700.HK`、`9988.HK`
-- 新加坡：`D05.SI`、`C38U.SI`
-- 臺灣：`2330.TW`、`2317.TW`
-
-股票輸入是選填的。只有想欲共掃描範圍縮到已知公司時才需要用，親像 `AAPL`、`0700.HK`、`D05.SI`、`2330.TW`、`600519.SS` 佮 `300750.SZ`。
+API 回應有 `scan.source`、`scan.requested`、`scan.succeeded`、`scan.displayed`、`scan.failed` 佮 `scan.discoveryErrors`，予 UI 會使顯示掃描是來自即時探索、新聞帶路探索，抑是備援資料。
 
 ## 評分模型
 
-評分設計故意保持會使解說：
+- `momentum`：用歷史收盤價計算近期價格趨勢。
+- `value`：用 trailing PE、forward PE、price-to-book 佮可用替代指標計算估值分數。
+- `sentiment`：近期市場別新聞內容，照來源可信度、文章新鮮度、公司相關性、標題佮摘要加權。
+- `risk`：beta、實現波動率佮嚴重價格走弱檢查。
+- `quality`：若資料有，就用 ROE、利潤率、負債權益比、成長、規模佮流動性。
 
-- `momentum`：用即時歷史收盤價算近期價位趨勢。
-- `value`：用 trailing 抑是 forward PE 算 valuation score。
-- `sentiment`：近期市場別新聞內容，照來源可信度、文章新鮮度、公司相關性、標題佮 RSS 摘要加權。
-- `risk`：beta 佮 realized volatility。
-- `quality`：若資料有，使用 ROE、profit margin 佮 debt-to-equity。
-
-策略權重決定遮的指標按怎合做最後分數。結果是研究輔助，毋是財務建議。
+策略權重決定這寡指標按怎合做最後分數。結果是研究輔助，毋是財務建議。
 
 ## 測試
 
-Backend API 測試使用 dependency-injected fake providers，所以 CI 毋免靠外部網路呼叫：
-
 ```powershell
 python -m unittest discover backend/tests
-```
-
-Frontend production build：
-
-```powershell
 npm run build
 ```
 
-## Production 注意事項
-
-- 掃描大型 watchlist 進前，先加 cache。第一版 production 用 Redis 抑是 SQLite cache 就夠。
-- 替每个外部資料來源加 rate limit 佮 request timeout。
-- 若需要較高可靠性，用付費 market-data API 取代抑是補強 Yahoo Finance。
-- 所有 API key 攏愛放佇環境變數，毋通提交 `.env` 檔案。
-- 佇完成身份驗證、稽核紀錄、合規審查佮風控進前，毋通加入券商下單功能。
+Pull request 愛通過 GitHub Actions 內底的後端測試佮前端 build。
 
 ## 部署筆記
 
-Linux 範例：
+Linux 例：
 
 ```bash
 python -m venv .venv
@@ -142,7 +142,7 @@ npm run build
 gunicorn 'backend.app:app' --bind 127.0.0.1:8000
 ```
 
-Windows 範例：
+Windows 例：
 
 ```powershell
 python -m venv .venv
@@ -155,6 +155,11 @@ waitress-serve --listen=127.0.0.1:8000 backend.app:app
 
 用 Nginx、IIS 抑是其他 reverse proxy 服務 `dist/`，閣共 `/api` 轉送去 Flask service。
 
+## 參與貢獻佮安全
+
+- [CONTRIBUTING.md](./CONTRIBUTING.md) 說明本機流程、驗證命令佮貢獻範圍。
+- [SECURITY.md](./SECURITY.md) 說明回報方式佮目前安全模型。
+
 ## 免責聲明
 
-這个 app 只提供投資研究流程輔助，毋是財務建議，嘛袂執行交易。
+這个 app 干焦提供投資研究流程輔助，毋是財務建議，嘛袂執行交易。
