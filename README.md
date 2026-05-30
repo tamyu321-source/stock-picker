@@ -38,6 +38,7 @@ The hosted GitHub Pages build runs in static demo mode with sample data. Run the
 - Direct market scanning without requiring users to enter stock codes first.
 - Automatic market-universe discovery instead of a hard-coded stock list.
 - Streaming NDJSON API so picks appear progressively during longer scans.
+- Shared in-memory TTL cache for repeated market-data and news requests.
 - Local saved-scan history plus Markdown and JSON export for follow-up research.
 - Live price history through Yahoo Finance chart endpoints, with optional `yfinance` support when installed.
 - Market-specific RSS/news crawling through Google News, Eastmoney fallbacks, and local source filters.
@@ -68,6 +69,7 @@ Vue 3 web app
 Flask backend
   -> backend/universe.py   dynamic market-universe discovery
   -> backend/providers.py  market data providers and RSS/news crawlers
+  -> backend/cache.py      short-lived in-memory cache for repeated provider calls
   -> backend/services.py   metric calculation, strategy selection, explainable scoring
   -> backend/app.py        REST API
 ```
@@ -152,6 +154,7 @@ Pull requests are expected to pass both checks in GitHub Actions.
 ## Production Notes
 
 - Add caching before scanning large watchlists. A Redis or SQLite cache is enough for a first production version.
+- The default Flask app already includes a short-lived in-memory cache for repeated scans in one process.
 - Add rate limits and request timeouts for every external provider.
 - For higher reliability, replace or supplement Yahoo Finance with a paid market-data API.
 - Keep all API keys in environment variables and never commit `.env` files.

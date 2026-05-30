@@ -1,14 +1,23 @@
 from flask import Flask, Response, jsonify, request, stream_with_context
 
+from backend.cache import CachedMarketDataProvider, CachedNewsCrawler
+from backend.providers import RssNewsCrawler, YFinanceMarketDataProvider
 from backend.services import analyze, get_config, stream_analyze
 
 
 def create_app(market_provider=None, news_crawler=None, universe_provider=None) -> Flask:
+    market_provider = market_provider if market_provider is not None else CachedMarketDataProvider(YFinanceMarketDataProvider())
+    news_crawler = news_crawler if news_crawler is not None else CachedNewsCrawler(RssNewsCrawler())
     app = Flask(__name__)
 
     @app.get("/api/health")
     def health():
-        return jsonify({"status": "ok", "service": "open-stock-picker"})
+        cache = {}
+        if hasattr(market_provider, "stats"):
+            cache["marketData"] = market_provider.stats()
+        if hasattr(news_crawler, "stats"):
+            cache["news"] = news_crawler.stats()
+        return jsonify({"status": "ok", "service": "open-stock-picker", "cache": cache})
 
     @app.get("/api/config")
     def config():

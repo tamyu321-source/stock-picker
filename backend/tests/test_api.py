@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from backend.app import create_app
+from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
 from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _parse_eastmoney_datetime, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
 from backend.services import _financial_analysis, _friendly_data_error, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _manual_symbol_candidates, _symbols_from_code_mentions
@@ -95,6 +96,78 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scanUniverseSize"]["TW"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["JP"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["KR"], "dynamic")
+
+    def test_health_reports_cache_stats_for_default_app(self):
+        response = create_app().test_client().get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("marketData", payload["cache"])
+        self.assertIn("news", payload["cache"])
+        self.assertGreater(payload["cache"]["marketData"]["ttlSeconds"], 0)
+
+    def test_ttl_cache_expires_entries(self):
+        now = [100.0]
+        cache = TtlCache(ttl_seconds=10, timer=lambda: now[0])
+        cache.set("AAPL", "cached")
+        self.assertEqual(cache.get("AAPL"), "cached")
+        now[0] = 111.0
+        self.assertIsNone(cache.get("AAPL"))
+
+    def test_cached_providers_reuse_recent_fetches(self):
+        class CountingMarketProvider:
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, symbol):
+                self.calls.append(symbol)
+                return MarketSnapshot(
+                    symbol=symbol.upper(),
+                    name="Apple",
+                    market="US",
+                    sector="Technology",
+                    price=100,
+                    change=1.0,
+                    currency="USD",
+                    closes=[90, 95, 100],
+                    info={"trailingPE": 20},
+                )
+
+        class CountingNewsCrawler:
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, symbol, name, limit=8):
+                self.calls.append((symbol, name, limit))
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} update",
+                        summary="Growth remains steady",
+                        link="https://example.com/aapl",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.2,
+                        credibility=0.8,
+                        relevance=1.0,
+                    )
+                ]
+
+        market_provider = CountingMarketProvider()
+        news_crawler = CountingNewsCrawler()
+        cached_market = CachedMarketDataProvider(market_provider, ttl_seconds=60)
+        cached_news = CachedNewsCrawler(news_crawler, ttl_seconds=60)
+
+        first_snapshot = cached_market.fetch("aapl")
+        first_snapshot.info["trailingPE"] = 999
+        second_snapshot = cached_market.fetch("AAPL")
+        self.assertEqual(market_provider.calls, ["aapl"])
+        self.assertEqual(second_snapshot.info["trailingPE"], 20)
+
+        first_articles = cached_news.fetch("AAPL", "Apple", limit=8)
+        second_articles = cached_news.fetch("aapl", " apple ", limit=8)
+        self.assertEqual(news_crawler.calls, [("AAPL", "Apple", 8)])
+        self.assertEqual(first_articles, second_articles)
+        self.assertIsNot(first_articles, second_articles)
 
     def test_analyze_filters_market_and_returns_verdicts(self):
         response = self.client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["2330.TW", "AAPL"], "strategyId": "balanced"})
