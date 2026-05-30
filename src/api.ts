@@ -564,14 +564,25 @@ export async function analyzeStocksStream(
     strategyId?: string;
     customWeights?: StrategyWeights;
   },
-  onEvent: (event: AnalysisStreamEvent) => void
+  onEvent: (event: AnalysisStreamEvent) => void,
+  options: { signal?: AbortSignal } = {}
 ): Promise<AnalysisResponse> {
+  const ensureNotAborted = () => {
+    if (!options.signal?.aborted) return;
+    const error = new Error('Analysis cancelled');
+    error.name = 'AbortError';
+    throw error;
+  };
+
+  ensureNotAborted();
   if (staticDemoBuild || usingStaticFallback) {
     const result = fallbackAnalysis(payload);
     onEvent({ type: 'started', generatedAt: result.generatedAt, markets: result.markets, strategy: result.strategy, scan: result.scan as AnalysisScan });
     result.picks.forEach((pick, index) => {
+      ensureNotAborted();
       onEvent({ type: 'pick', pick, picks: result.picks.slice(0, index + 1), sectors: result.sectors, rank: index + 1, scan: result.scan as AnalysisScan });
     });
+    ensureNotAborted();
     onEvent({ type: 'complete', ...result, scan: result.scan as AnalysisScan });
     return result;
   }
@@ -580,21 +591,27 @@ export async function analyzeStocksStream(
     response = await fetch('/api/analyze/stream', {
       method: 'POST',
       headers,
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: options.signal
     });
     if (!response.ok) throw new Error('Failed to analyze stocks');
     if (!hasContentType(response, 'application/x-ndjson')) throw new Error('Static preview fallback');
-  } catch {
+  } catch (cause) {
+    if (cause instanceof Error && cause.name === 'AbortError') throw cause;
     usingStaticFallback = true;
+    ensureNotAborted();
     const result = fallbackAnalysis(payload);
     onEvent({ type: 'started', generatedAt: result.generatedAt, markets: result.markets, strategy: result.strategy, scan: result.scan as AnalysisScan });
     result.picks.forEach((pick, index) => {
+      ensureNotAborted();
       onEvent({ type: 'pick', pick, picks: result.picks.slice(0, index + 1), sectors: result.sectors, rank: index + 1, scan: result.scan as AnalysisScan });
     });
+    ensureNotAborted();
     onEvent({ type: 'complete', ...result, scan: result.scan as AnalysisScan });
     return result;
   }
   if (!response.body) {
+    ensureNotAborted();
     const result = await analyzeStocks(payload);
     onEvent({ type: 'complete', ...result, scan: result.scan as AnalysisScan });
     return result;
@@ -615,6 +632,7 @@ export async function analyzeStocksStream(
   };
 
   while (true) {
+    ensureNotAborted();
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });

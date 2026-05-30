@@ -59,6 +59,7 @@ const yogurtSecretPrimed = ref(false);
 const yogurtSecretOpen = ref(false);
 let loadingTimer: number | undefined;
 let loadingRunId = 0;
+let analysisAbortController: AbortController | undefined;
 let yogurtSecretTimer: number | undefined;
 let yogurtAudioContext: AudioContext | undefined;
 const yogurtAudioDataUris: Partial<Record<YogurtSoundCue, string>> = {};
@@ -1355,6 +1356,21 @@ function stopLoadingFeedback() {
   loading.value = false;
 }
 
+function abortActiveAnalysis() {
+  if (!analysisAbortController) return;
+  analysisAbortController.abort();
+  analysisAbortController = undefined;
+}
+
+function cancelAnalysis() {
+  if (!loading.value) return;
+  abortActiveAnalysis();
+}
+
+function isAnalysisAbort(cause: unknown) {
+  return cause instanceof Error && cause.name === 'AbortError';
+}
+
 function isYogurtLocale(value: Locale) {
   return value === 'zh-TW' || value === 'nan-TW';
 }
@@ -1554,6 +1570,7 @@ function closeYogurtSecret() {
 }
 
 function stopAppTimers() {
+  abortActiveAnalysis();
   stopLoadingFeedback();
   clearYogurtSecretTimer();
 }
@@ -1610,6 +1627,8 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
 
 async function runAnalysis() {
   if (loading.value) return;
+  const controller = new AbortController();
+  analysisAbortController = controller;
   scanRunId.value += 1;
   signalRefreshStartedAt.value = new Date().toLocaleString();
   startLoadingFeedback();
@@ -1625,10 +1644,13 @@ async function runAnalysis() {
       symbols: symbols.value,
       strategyId: useCustom.value ? undefined : selectedStrategyId.value,
       customWeights: useCustom.value ? { ...customWeights } : undefined
-    }, handleAnalysisEvent);
+    }, handleAnalysisEvent, { signal: controller.signal });
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Unknown error';
+    error.value = isAnalysisAbort(cause) ? t.value.scanCancelled : (cause instanceof Error ? cause.message : 'Unknown error');
   } finally {
+    if (analysisAbortController === controller) {
+      analysisAbortController = undefined;
+    }
     refreshDataMode();
     stopLoadingFeedback();
   }
@@ -1814,10 +1836,13 @@ onUnmounted(() => {
         </div>
 
         <div class="control-actions">
-          <button class="primary-action" :disabled="loading" @click="runAnalysis">
-            <span v-if="loading" class="spinner" aria-hidden="true"></span>
-            {{ loading ? t.loading : t.analyze }}
-          </button>
+          <div class="action-row">
+            <button class="primary-action" type="button" :disabled="loading" @click="runAnalysis">
+              <span v-if="loading" class="spinner" aria-hidden="true"></span>
+              {{ loading ? t.loading : t.analyze }}
+            </button>
+            <button v-if="loading" class="ghost cancel-action" type="button" @click="cancelAnalysis">{{ t.cancelScan }}</button>
+          </div>
           <div v-if="loading" class="analysis-inline" role="status" aria-live="polite">
             <span>{{ activeAnalysisStep }}</span>
             <strong>{{ loadingElapsedLabel }}</strong>
@@ -1896,6 +1921,7 @@ onUnmounted(() => {
             <strong>{{ activeAnalysisStep }}</strong>
             <p>{{ loadingElapsedLabel }} · {{ scanLabel }}</p>
           </div>
+          <button class="ghost wait-cancel" type="button" @click="cancelAnalysis">{{ t.cancelScan }}</button>
         </div>
 
         <div v-if="activeView === 'stocks'" class="pick-list">

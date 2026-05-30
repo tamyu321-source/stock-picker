@@ -25,6 +25,7 @@ The hosted GitHub Pages build runs in static demo mode with sample data. Run the
 
 - Scan markets directly without entering tickers first.
 - See live, incremental picks while the backend is still analyzing.
+- Cancel longer scans without losing any picks that already streamed in.
 - Compare stock-level and sector-level results from the same scored candidate set.
 - Save recent scans locally and export research notes as Markdown or JSON.
 - Inspect explainable 100-point scoring across momentum, value, news sentiment, risk, and quality.
@@ -38,6 +39,7 @@ The hosted GitHub Pages build runs in static demo mode with sample data. Run the
 - Direct market scanning without requiring users to enter stock codes first.
 - Automatic market-universe discovery instead of a hard-coded stock list.
 - Streaming NDJSON API so picks appear progressively during longer scans.
+- Cancellable scan requests wired through browser `AbortController`.
 - Shared in-memory TTL cache for repeated market-data and news requests.
 - Local saved-scan history plus Markdown and JSON export for follow-up research.
 - Live price history through Yahoo Finance chart endpoints, with optional `yfinance` support when installed.

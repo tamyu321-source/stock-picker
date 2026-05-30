@@ -60,6 +60,8 @@ type MessageKey =
   | 'credibility'
   | 'hoursAgo'
   | 'loading'
+  | 'cancelScan'
+  | 'scanCancelled'
   | 'openSource'
   | 'backendStatus'
   | 'allMarkets'
@@ -144,6 +146,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     credibility: 'Credibility',
     hoursAgo: 'h ago',
     loading: 'Scanning investment candidates',
+    cancelScan: 'Cancel scan',
+    scanCancelled: 'Scan cancelled. Partial picks, if any, remain visible.',
     openSource: 'Live no-code stock discovery workflow',
     backendStatus: 'Python AI scoring API',
     allMarkets: 'China, Hong Kong, Japan, South Korea, Singapore, United States, Taiwan',
@@ -227,6 +231,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     credibility: '可信度',
     hoursAgo: '小时前',
     loading: '正在扫描投资候选',
+    cancelScan: '取消扫描',
+    scanCancelled: '扫描已取消；已出现的候选会保留在页面上。',
     openSource: '无需代码输入的实时选股流程',
     backendStatus: 'Python AI 评分 API',
     allMarkets: '中国、香港、日本、韩国、新加坡、美国、台湾',
@@ -310,6 +316,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     credibility: '可信度',
     hoursAgo: '小時前',
     loading: '正在掃描投資候選',
+    cancelScan: '取消掃描',
+    scanCancelled: '掃描已取消；已出現的候選會保留在頁面上。',
     openSource: '無需代碼輸入的即時選股流程',
     backendStatus: 'Python AI 評分 API',
     allMarkets: '中國、香港、日本、韓國、新加坡、美國、台灣',
@@ -393,6 +401,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     credibility: '可信度',
     hoursAgo: ' 小時前',
     loading: '咧掃投資候選',
+    cancelScan: '取消掃描',
+    scanCancelled: '掃描已取消；已出現的候選會留佇頁面頂懸。',
     openSource: '免寫程式的即時揣股流程',
     backendStatus: 'Python AI 評分 API',
     allMarkets: '中國、香港、日本、韓國、新加坡、美國、臺灣',
@@ -476,6 +486,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     credibility: '信頼性',
     hoursAgo: '時間前',
     loading: '投資候補をスキャン中',
+    cancelScan: 'キャンセル',
+    scanCancelled: 'スキャンをキャンセルしました。表示済みの候補は残ります。',
     openSource: 'コード入力不要のリアルタイム株式探索',
     backendStatus: 'Python AI スコアリング API',
     allMarkets: '中国、香港、日本、韓国、シンガポール、米国、台湾',
@@ -559,6 +571,8 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     credibility: '신뢰도',
     hoursAgo: '시간 전',
     loading: '투자 후보 스캔 중',
+    cancelScan: '스캔 취소',
+    scanCancelled: '스캔을 취소했습니다. 이미 표시된 후보는 유지됩니다.',
     openSource: '코드 입력 없는 실시간 주식 탐색',
     backendStatus: 'Python AI 점수 API',
     allMarkets: '중국, 홍콩, 일본, 한국, 싱가포르, 미국, 대만',

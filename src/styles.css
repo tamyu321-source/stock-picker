@@ -690,8 +690,24 @@ select {
   box-shadow: 0 -12px 22px rgb(23 33 27 / 6%);
 }
 
+.action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
 .ghost {
   background: #ffffff;
+}
+
+.cancel-action,
+.wait-cancel {
+  color: #8a2e24;
+  white-space: nowrap;
+}
+
+.wait-cancel {
+  justify-self: start;
 }
 
 .ghost:disabled {
@@ -2125,6 +2141,14 @@ h3 {
   .result-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .action-row {
+    grid-template-columns: 1fr;
+  }
+
+  .cancel-action {
+    width: 100%;
   }
 
   .view-toggle {
