@@ -26,6 +26,7 @@ The hosted GitHub Pages build runs in static demo mode with sample data. Run the
 - Scan markets directly without entering tickers first.
 - See live, incremental picks while the backend is still analyzing.
 - Compare stock-level and sector-level results from the same scored candidate set.
+- Save recent scans locally and export research notes as Markdown or JSON.
 - Inspect explainable 100-point scoring across momentum, value, news sentiment, risk, and quality.
 - Use English, Simplified Chinese, Traditional Chinese, Taiwanese, Japanese, or Korean UI.
 - Narrow a scan with ticker or company-name input when you already know what to research.
@@ -37,6 +38,7 @@ The hosted GitHub Pages build runs in static demo mode with sample data. Run the
 - Direct market scanning without requiring users to enter stock codes first.
 - Automatic market-universe discovery instead of a hard-coded stock list.
 - Streaming NDJSON API so picks appear progressively during longer scans.
+- Local saved-scan history plus Markdown and JSON export for follow-up research.
 - Live price history through Yahoo Finance chart endpoints, with optional `yfinance` support when installed.
 - Market-specific RSS/news crawling through Google News, Eastmoney fallbacks, and local source filters.
 - Default strategies for balanced, growth, and defensive value investing.

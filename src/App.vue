@@ -9,6 +9,26 @@ type LocalizedText = Partial<Record<StandardLocale, string>> & { en: string };
 type YogurtSoundCue = 'appear' | 'tap';
 type ResultMarketFilter = 'all' | Market;
 type ResultVerdictFilter = 'all' | Pick['verdict'];
+type DataMode = ReturnType<typeof currentDataMode>;
+type DataIssue = { symbol: string; error: string };
+type SavedScan = {
+  id: string;
+  title: string;
+  savedAt: string;
+  generatedAt: string;
+  dataMode: DataMode;
+  locale: Locale;
+  markets: Market[];
+  symbols: string[];
+  strategyId: string;
+  strategyName: string;
+  useCustom: boolean;
+  customWeights: StrategyWeights;
+  picks: Pick[];
+  sectors: SectorAnalysis[];
+  errors: DataIssue[];
+  scanInfo: { auto: boolean; requested: number; succeeded: number; failed: number } | null;
+};
 
 const locale = ref<Locale>('en');
 const languageMenuOpen = ref(false);
@@ -26,7 +46,7 @@ const sectors = ref<SectorAnalysis[]>([]);
 const activeView = ref<'stocks' | 'sectors'>('stocks');
 const resultMarketFilter = ref<ResultMarketFilter>('all');
 const resultVerdictFilter = ref<ResultVerdictFilter>('all');
-const dataIssues = ref<Array<{ symbol: string; error: string }>>([]);
+const dataIssues = ref<DataIssue[]>([]);
 const scanInfo = ref<{ auto: boolean; requested: number; succeeded: number; failed: number } | null>(null);
 const loadingStartedAt = ref(0);
 const loadingElapsedSeconds = ref(0);
@@ -34,6 +54,7 @@ const loadingStepIndex = ref(0);
 const scanRunId = ref(0);
 const signalRefreshStartedAt = ref('');
 const dataMode = ref(currentDataMode());
+const savedScans = ref<SavedScan[]>([]);
 const yogurtSecretPrimed = ref(false);
 const yogurtSecretOpen = ref(false);
 let loadingTimer: number | undefined;
@@ -43,6 +64,8 @@ let yogurtAudioContext: AudioContext | undefined;
 const yogurtAudioDataUris: Partial<Record<YogurtSoundCue, string>> = {};
 
 const SETTINGS_STORAGE_KEY = 'open-stock-picker.settings.v1';
+const SAVED_SCANS_STORAGE_KEY = 'open-stock-picker.saved-scans.v1';
+const SAVED_SCAN_LIMIT = 6;
 const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
 const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 'watch', 'sell'];
@@ -144,6 +167,7 @@ const resultFiltersActive = computed(() => resultMarketFilter.value !== 'all' ||
 const isDemoDataMode = computed(() => dataMode.value === 'demo');
 const dataModeLabel = computed(() => (isDemoDataMode.value ? t.value.demoPreview : t.value.liveBackend));
 const dataModeDescription = computed(() => (isDemoDataMode.value ? t.value.demoPreviewDetail : t.value.liveBackendDetail));
+const canSaveScan = computed(() => picks.value.length > 0 && !loading.value);
 const yogurtSecretLocalized = computed(() => locale.value === 'zh-TW' || locale.value === 'nan-TW');
 const yogurtSecretTriggerLabel = computed(() => (locale.value === 'nan-TW' ? '活菌雷達' : '菌群雷達'));
 const yogurtSecretClueLabel = computed(() => {
@@ -300,6 +324,36 @@ function restoreSettings() {
   }
 }
 
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function restoreSavedScans() {
+  try {
+    const raw = localStorage.getItem(SAVED_SCANS_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    savedScans.value = parsed
+      .filter((item): item is SavedScan => item && typeof item.id === 'string' && Array.isArray(item.picks))
+      .slice(0, SAVED_SCAN_LIMIT);
+  } catch {
+    try {
+      localStorage.removeItem(SAVED_SCANS_STORAGE_KEY);
+    } catch {
+      // Ignore storage failures so export and scanning still work.
+    }
+  }
+}
+
+function persistSavedScans() {
+  try {
+    localStorage.setItem(SAVED_SCANS_STORAGE_KEY, JSON.stringify(savedScans.value.slice(0, SAVED_SCAN_LIMIT)));
+  } catch {
+    // Ignore storage failures so export and scanning still work.
+  }
+}
+
 function normalizeStrategySelection() {
   if (!strategies.value.length) return;
   if (!strategies.value.some((strategy) => strategy.id === selectedStrategyId.value)) {
@@ -358,6 +412,158 @@ function resultCountLabel() {
   if (locale.value === 'ko') return `${filteredPicks.value.length}/${picks.value.length}개 표시`;
   if (locale.value === 'nan-TW') return `顯示 ${filteredPicks.value.length}/${picks.value.length}`;
   return `顯示 ${filteredPicks.value.length}/${picks.value.length}`;
+}
+
+function scanGeneratedAtLabel() {
+  return generatedAt.value || new Date().toLocaleString();
+}
+
+function scanStrategyLabel() {
+  if (useCustom.value) return t.value.customWeights;
+  return selectedStrategy.value ? strategyName(selectedStrategy.value) : selectedStrategyId.value;
+}
+
+function savedScanTitle(scan: SavedScan) {
+  const first = scan.picks[0];
+  const lead = first ? `${first.symbol} ${first.name}` : scan.strategyName;
+  return `${lead} · ${scan.picks.length}`;
+}
+
+function makeSavedScan(): SavedScan {
+  const generated = scanGeneratedAtLabel();
+  return {
+    id: window.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: `${scanStrategyLabel()} · ${generated}`,
+    savedAt: new Date().toLocaleString(),
+    generatedAt: generated,
+    dataMode: dataMode.value,
+    locale: locale.value,
+    markets: [...(selectedMarkets.value.length ? selectedMarkets.value : defaultMarkets)],
+    symbols: [...symbols.value],
+    strategyId: selectedStrategyId.value,
+    strategyName: scanStrategyLabel(),
+    useCustom: useCustom.value,
+    customWeights: { ...customWeights },
+    picks: cloneJson(picks.value),
+    sectors: cloneJson(sectors.value),
+    errors: cloneJson(dataIssues.value),
+    scanInfo: scanInfo.value ? { ...scanInfo.value } : null
+  };
+}
+
+function saveCurrentScan() {
+  if (!canSaveScan.value) return;
+  const snapshot = makeSavedScan();
+  savedScans.value = [snapshot, ...savedScans.value.filter((scan) => scan.title !== snapshot.title)].slice(0, SAVED_SCAN_LIMIT);
+  persistSavedScans();
+}
+
+function loadSavedScan(scan: SavedScan) {
+  picks.value = cloneJson(scan.picks);
+  sectors.value = cloneJson(scan.sectors);
+  dataIssues.value = cloneJson(scan.errors);
+  scanInfo.value = scan.scanInfo ? { ...scan.scanInfo } : null;
+  generatedAt.value = scan.generatedAt;
+  dataMode.value = scan.dataMode;
+  selectedMarkets.value = scan.markets.filter(isMarket);
+  symbolText.value = scan.symbols.join(', ');
+  selectedStrategyId.value = scan.strategyId || selectedStrategyId.value;
+  useCustom.value = scan.useCustom;
+  weightKeys.forEach((key) => {
+    customWeights[key] = normalizeWeight(scan.customWeights?.[key]) ?? customWeights[key];
+  });
+  resultMarketFilter.value = 'all';
+  resultVerdictFilter.value = 'all';
+  activeView.value = 'stocks';
+}
+
+function deleteSavedScan(id: string) {
+  savedScans.value = savedScans.value.filter((scan) => scan.id !== id);
+  persistSavedScans();
+}
+
+function safeFilePart(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 42) || 'scan';
+}
+
+function downloadText(filename: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function scanFilename(extension: 'md' | 'json') {
+  const lead = picks.value[0]?.symbol ?? 'stock-picker';
+  return `open-stock-picker-${safeFilePart(lead)}-${new Date().toISOString().slice(0, 10)}.${extension}`;
+}
+
+function markdownLine(value: string | number | undefined) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function currentScanMarkdown() {
+  const lines = [
+    '# Open Stock Picker Scan',
+    '',
+    `- Generated: ${scanGeneratedAtLabel()}`,
+    `- Data mode: ${dataModeLabel.value}`,
+    `- Strategy: ${scanStrategyLabel()}`,
+    `- Markets: ${(selectedMarkets.value.length ? selectedMarkets.value : defaultMarkets).map(marketLabel).join(', ')}`,
+    `- Symbols: ${symbols.value.length ? symbols.value.join(', ') : 'Automatic market scan'}`,
+    `- Results: ${picks.value.length} stocks, ${sectors.value.length} sectors`,
+    ''
+  ];
+
+  picks.value.forEach((pick, index) => {
+    lines.push(`## ${index + 1}. ${pick.symbol} · ${pick.name}`);
+    lines.push('');
+    lines.push(`- Market: ${marketLabel(pick.market)}`);
+    lines.push(`- Verdict: ${verdictLabel(pick.verdict)}`);
+    lines.push(`- Score: ${pick.score}/100`);
+    lines.push(`- Confidence: ${pick.confidence}%`);
+    lines.push(`- Price: ${pick.currency} ${pick.price} (${pick.change > 0 ? '+' : ''}${pick.change}%)`);
+    if (pick.decision) lines.push(`- Decision: ${markdownLine(pointLabel(pick.decision.summary))}`);
+    if (pick.actionPlan) lines.push(`- Action: ${markdownLine(pointLabel(pick.actionPlan.summary))}`);
+    const reasons = reasonLabels(pick).slice(0, 3);
+    if (reasons.length) {
+      lines.push('- Reasons:');
+      reasons.forEach((reason) => lines.push(`  - ${markdownLine(reason)}`));
+    }
+    const signals = pick.signals.slice(0, 3);
+    if (signals.length) {
+      lines.push('- Signals:');
+      signals.forEach((signal) => lines.push(`  - [${markdownLine(signal.title)}](${signal.link}) · ${signal.source}`));
+    }
+    lines.push('');
+  });
+
+  if (sectors.value.length) {
+    lines.push('## Sectors');
+    lines.push('');
+    sectors.value.forEach((sector) => {
+      lines.push(`- ${sector.name}: ${sector.score}/100 · ${sectorRecommendationLabel(sector.recommendation)} · ${sector.count} constituents`);
+    });
+    lines.push('');
+  }
+
+  lines.push('This export is research support only, not financial advice.');
+  return lines.join('\n');
+}
+
+function exportMarkdown() {
+  if (!canSaveScan.value) return;
+  downloadText(scanFilename('md'), currentScanMarkdown(), 'text/markdown');
+}
+
+function exportJson() {
+  if (!canSaveScan.value) return;
+  downloadText(scanFilename('json'), JSON.stringify(makeSavedScan(), null, 2), 'application/json');
 }
 
 function filteredEmptyTitle() {
@@ -1445,6 +1651,7 @@ onMounted(async () => {
   document.addEventListener('click', handleDocumentClick);
   document.addEventListener('keydown', handleDocumentKeydown);
   restoreSettings();
+  restoreSavedScans();
   config.value = await fetchConfig();
   refreshDataMode();
   normalizeStrategySelection();
@@ -1631,7 +1838,25 @@ onUnmounted(() => {
                 {{ t.sectorView }} <span>{{ sectors.length }}</span>
               </button>
             </div>
+            <button class="ghost" :disabled="!canSaveScan" type="button" @click="saveCurrentScan">{{ t.saveScan }}</button>
+            <button class="ghost" :disabled="!canSaveScan" type="button" @click="exportMarkdown">{{ t.exportMarkdown }}</button>
+            <button class="ghost" :disabled="!canSaveScan" type="button" @click="exportJson">{{ t.exportJson }}</button>
             <button class="ghost" :disabled="loading" @click="runAnalysis">{{ t.refresh }}</button>
+          </div>
+        </div>
+
+        <div v-if="savedScans.length" class="saved-scan-bar">
+          <strong>{{ t.savedScans }}</strong>
+          <div class="saved-scan-list">
+            <article v-for="scan in savedScans" :key="scan.id" class="saved-scan-item">
+              <button type="button" @click="loadSavedScan(scan)">
+                <span>{{ savedScanTitle(scan) }}</span>
+                <small>{{ scan.savedAt }} · {{ scan.strategyName }}</small>
+              </button>
+              <button class="saved-scan-delete" type="button" :aria-label="t.deleteSavedScan" @click="deleteSavedScan(scan.id)">
+                {{ t.deleteSavedScan }}
+              </button>
+            </article>
           </div>
         </div>
 

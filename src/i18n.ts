@@ -16,6 +16,14 @@ type MessageKey =
   | 'customWeights'
   | 'analyze'
   | 'refresh'
+  | 'saveScan'
+  | 'savedScan'
+  | 'exportMarkdown'
+  | 'exportJson'
+  | 'savedScans'
+  | 'loadScan'
+  | 'deleteSavedScan'
+  | 'noSavedScans'
   | 'topIdeas'
   | 'stockView'
   | 'sectorView'
@@ -92,6 +100,14 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     customWeights: 'Custom weights',
     analyze: 'Scan for quality stocks',
     refresh: 'Refresh',
+    saveScan: 'Save scan',
+    savedScan: 'Saved',
+    exportMarkdown: 'Markdown',
+    exportJson: 'JSON',
+    savedScans: 'Saved scans',
+    loadScan: 'Load',
+    deleteSavedScan: 'Delete',
+    noSavedScans: 'Saved scans will appear here after you save a result.',
     topIdeas: 'AI-ranked investment candidates',
     stockView: 'Stocks',
     sectorView: 'Sectors',
@@ -167,6 +183,14 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     customWeights: '自定义权重',
     analyze: '扫描优质投资标的',
     refresh: '刷新',
+    saveScan: '保存扫描',
+    savedScan: '已保存',
+    exportMarkdown: 'Markdown',
+    exportJson: 'JSON',
+    savedScans: '已保存扫描',
+    loadScan: '载入',
+    deleteSavedScan: '删除',
+    noSavedScans: '保存结果后，会显示在这里。',
     topIdeas: 'AI 排名投资候选',
     stockView: '个股',
     sectorView: '板块',
@@ -242,6 +266,14 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     customWeights: '自訂權重',
     analyze: '掃描優質投資標的',
     refresh: '刷新',
+    saveScan: '保存掃描',
+    savedScan: '已保存',
+    exportMarkdown: 'Markdown',
+    exportJson: 'JSON',
+    savedScans: '已保存掃描',
+    loadScan: '載入',
+    deleteSavedScan: '刪除',
+    noSavedScans: '保存結果後，會顯示在這裡。',
     topIdeas: 'AI 排名投資候選',
     stockView: '個股',
     sectorView: '板塊',
@@ -317,6 +349,14 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     customWeights: '家己調權重',
     analyze: '掃好投資標的',
     refresh: '閣再刷新',
+    saveScan: '保存掃描',
+    savedScan: '已保存',
+    exportMarkdown: 'Markdown',
+    exportJson: 'JSON',
+    savedScans: '已保存掃描',
+    loadScan: '載入',
+    deleteSavedScan: '刪除',
+    noSavedScans: '保存結果了後，會顯示佇遮。',
     topIdeas: 'AI 排名投資候選',
     stockView: '個股',
     sectorView: '板塊',
@@ -392,6 +432,14 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     customWeights: 'カスタム配分',
     analyze: '高品質株をスキャン',
     refresh: '更新',
+    saveScan: '保存',
+    savedScan: '保存済み',
+    exportMarkdown: 'Markdown',
+    exportJson: 'JSON',
+    savedScans: '保存済みスキャン',
+    loadScan: '読み込み',
+    deleteSavedScan: '削除',
+    noSavedScans: '結果を保存するとここに表示されます。',
     topIdeas: 'AI ランク投資候補',
     stockView: '個別株',
     sectorView: 'セクター',
@@ -467,6 +515,14 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     customWeights: '사용자 가중치',
     analyze: '우량 투자 후보 스캔',
     refresh: '새로고침',
+    saveScan: '스캔 저장',
+    savedScan: '저장됨',
+    exportMarkdown: 'Markdown',
+    exportJson: 'JSON',
+    savedScans: '저장된 스캔',
+    loadScan: '불러오기',
+    deleteSavedScan: '삭제',
+    noSavedScans: '결과를 저장하면 여기에 표시됩니다.',
     topIdeas: 'AI 순위 투자 후보',
     stockView: '종목',
     sectorView: '섹터',

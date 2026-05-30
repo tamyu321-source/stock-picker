@@ -285,7 +285,7 @@ const headers = { 'Content-Type': 'application/json' };
 let usingStaticFallback = false;
 const staticDemoBuild = import.meta.env.PROD && import.meta.env.BASE_URL === '/stock-picker/';
 
-export function currentDataMode() {
+export function currentDataMode(): 'demo' | 'live' {
   return staticDemoBuild || usingStaticFallback ? 'demo' : 'live';
 }
 

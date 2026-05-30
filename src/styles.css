@@ -446,6 +446,7 @@ h2 {
 .result-actions {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -693,6 +694,10 @@ select {
   background: #ffffff;
 }
 
+.ghost:disabled {
+  background: #f6f8f6;
+}
+
 button:disabled {
   cursor: wait;
   opacity: 0.76;
@@ -826,6 +831,72 @@ button:disabled {
   color: #245f46;
   font-size: 0.82rem;
   white-space: nowrap;
+}
+
+.saved-scan-bar {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #dbe4da;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.saved-scan-bar > strong {
+  color: #17211b;
+  font-size: 0.86rem;
+}
+
+.saved-scan-list {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-scan-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.saved-scan-item button {
+  min-height: 40px;
+  border: 1px solid #d9e0d8;
+  border-radius: 8px;
+  background: #f9fbf9;
+  color: #17211b;
+}
+
+.saved-scan-item button:first-child {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.saved-scan-item span,
+.saved-scan-item small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-scan-item span {
+  font-weight: 850;
+}
+
+.saved-scan-item small {
+  color: #667268;
+  font-size: 0.76rem;
+}
+
+.saved-scan-delete {
+  padding: 0 10px;
+  color: #7b372d;
 }
 
 .error {
@@ -2098,6 +2169,14 @@ h3 {
 
   .filter-segment button:nth-child(-n + 2) {
     border-bottom: 1px solid #e3e9e3;
+  }
+
+  .saved-scan-item {
+    grid-template-columns: 1fr;
+  }
+
+  .saved-scan-delete {
+    justify-self: stretch;
   }
 
   .language-menu,
