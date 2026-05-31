@@ -128,7 +128,21 @@ export interface DecisionPoint {
     | 'actionAvoidLimitDown'
     | 'actionWaitPriceStabilization'
     | 'actionWaitPullback'
-    | 'actionRequireNewsEvidence';
+    | 'actionRequireNewsEvidence'
+    | 'tCandidateSummary'
+    | 'tWatchSummary'
+    | 'tAvoidSummary'
+    | 'tLiquidityReady'
+    | 'tLiquidityThin'
+    | 'tVolatilityReady'
+    | 'tVolatilityLow'
+    | 'tSetupReady'
+    | 'tTrendWeak'
+    | 'tPullbackRiskHigh'
+    | 'tDownsideRiskHigh'
+    | 'tNoChase'
+    | 'tUseBasePositionOnly'
+    | 'tCutIfBreaksSupport';
   params: Record<string, string | number>;
 }
 
@@ -182,6 +196,31 @@ export interface ActionPlan {
   riskControls: DecisionPoint[];
 }
 
+export type TTradeSuitability = 'candidate' | 'watch' | 'avoid';
+
+export interface PriceZone {
+  low: number;
+  high: number;
+}
+
+export interface TTradePlan {
+  suitability: TTradeSuitability;
+  summary: DecisionPoint;
+  score: number;
+  components: {
+    liquidityScore: number;
+    volatilityScore: number;
+    volatilityPct: number;
+    turnoverScore: number;
+    turnoverPct?: number | null;
+  };
+  entryZone: PriceZone;
+  takeProfitZone: PriceZone;
+  stopLoss: number;
+  reasons: DecisionPoint[];
+  riskControls: DecisionPoint[];
+}
+
 export interface Pick {
   symbol: string;
   name: string;
@@ -195,11 +234,14 @@ export interface Pick {
   downsideRiskScore?: number;
   breakoutSetupScore?: number;
   pullbackRiskScore?: number;
+  tScore?: number;
+  tPlan?: TTradePlan;
   prediction?: {
     opportunityScore: number;
     downsideRiskScore: number;
     breakoutSetupScore?: number;
     pullbackRiskScore?: number;
+    tScore?: number;
     edge: number;
   };
   verdict: Verdict;
@@ -383,8 +425,29 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
       change: 1.8,
       currency: 'TWD',
       score: 86,
+      opportunityScore: 82,
+      downsideRiskScore: 24,
       breakoutSetupScore: 78,
       pullbackRiskScore: 28,
+      tScore: 74,
+      tPlan: {
+        suitability: 'candidate',
+        summary: { key: 'tCandidateSummary', params: { score: 74 } },
+        score: 74,
+        components: { liquidityScore: 82, volatilityScore: 71, volatilityPct: 4.2, turnoverScore: 76, turnoverPct: 5.8 },
+        entryZone: { low: 852.5, high: 861.4 },
+        takeProfitZone: { low: 876.1, high: 891.2 },
+        stopLoss: 842.5,
+        reasons: [
+          { key: 'tLiquidityReady', params: { score: 82 } },
+          { key: 'tVolatilityReady', params: { score: 71, range: 4.2 } },
+          { key: 'tSetupReady', params: { score: 78 } }
+        ],
+        riskControls: [
+          { key: 'tUseBasePositionOnly', params: {} },
+          { key: 'tCutIfBreaksSupport', params: {} }
+        ]
+      },
       verdict: 'buy',
       confidence: 82,
       reasons: ['Demo mode: quality, momentum, and fresh news signals are supportive.'],
@@ -392,6 +455,14 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
         { key: 'strongestFactors', params: { first: 'quality', second: 'sentiment' } },
         { key: 'clearsBuyThreshold', params: {} }
       ],
+      prediction: {
+        opportunityScore: 82,
+        downsideRiskScore: 24,
+        breakoutSetupScore: 78,
+        pullbackRiskScore: 28,
+        tScore: 74,
+        edge: 58
+      },
       signals: [
         {
           source: 'Static demo',
@@ -470,12 +541,37 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
       change: -0.4,
       currency: 'USD',
       score: 64,
+      opportunityScore: 52,
+      downsideRiskScore: 44,
       breakoutSetupScore: 42,
       pullbackRiskScore: 36,
+      tScore: 48,
+      tPlan: {
+        suitability: 'avoid',
+        summary: { key: 'tAvoidSummary', params: { score: 48 } },
+        score: 48,
+        components: { liquidityScore: 74, volatilityScore: 36, volatilityPct: 1.4, turnoverScore: 48, turnoverPct: null },
+        entryZone: { low: 189.1, high: 191.6 },
+        takeProfitZone: { low: 194.8, high: 197.4 },
+        stopLoss: 187.8,
+        reasons: [{ key: 'tLiquidityReady', params: { score: 74 } }],
+        riskControls: [
+          { key: 'tVolatilityLow', params: { range: 1.4 } },
+          { key: 'tUseBasePositionOnly', params: {} }
+        ]
+      },
       verdict: 'watch',
       confidence: 61,
       reasons: ['Demo mode: quality remains strong, but momentum confirmation is still pending.'],
       reasonCodes: [{ key: 'belowThreshold', params: { factor: 'momentum' } }],
+      prediction: {
+        opportunityScore: 52,
+        downsideRiskScore: 44,
+        breakoutSetupScore: 42,
+        pullbackRiskScore: 36,
+        tScore: 48,
+        edge: 8
+      },
       signals: [],
       metrics: { momentum: 52, value: 58, sentiment: 62, risk: 70, quality: 84 },
       scoreBreakdown: [

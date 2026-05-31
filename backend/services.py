@@ -17,6 +17,7 @@ AUTO_SCAN_EXPANSION_LIMITS_PER_MARKET = (72, 120, 180)
 AUTO_SCAN_TARGET_QUALITY_BUYS = 4
 AUTO_SCAN_RESULT_LIMIT = 36
 AUTO_SCAN_BUY_LIMIT = 12
+AUTO_SCAN_TRADE_LIMIT = 10
 AUTO_SCAN_SELL_LIMIT = 8
 AUTO_SCAN_WATCH_LIMIT = 16
 SEVERE_PRICE_DROP_PCT = -8.5
@@ -35,6 +36,8 @@ EXTREME_PRICE_JUMP_PCT = 18.0
 PULLBACK_RISK_BLOCK_BUY_FLOOR = 62
 DOWNSIDE_EXIT_FLOOR = 62
 DOWNSIDE_URGENT_EXIT_FLOOR = 72
+T_TRADE_CANDIDATE_FLOOR = 68
+T_TRADE_WATCH_FLOOR = 54
 
 
 def get_config() -> dict:
@@ -466,6 +469,38 @@ def _price_action_risk(change) -> float:
     return max(-8, -value * 0.8)
 
 
+def _recent_abs_return_percent(closes: list[float], window: int = 20) -> float:
+    values = closes[-(window + 1) :] if len(closes) > window else closes
+    if len(values) < 2:
+        return 0.0
+    returns = []
+    for previous, current in zip(values, values[1:]):
+        if previous:
+            returns.append(abs(current / previous - 1) * 100)
+    return mean(returns) if returns else 0.0
+
+
+def _t_trade_volatility_percent(snapshot: MarketSnapshot) -> float:
+    change = abs(_metric_number(snapshot.change) or 0)
+    recent_move = _recent_abs_return_percent(snapshot.closes, 20) * 1.55
+    five_day_move = abs(_price_return(snapshot.closes, 5) * 100) / 2.5 if len(snapshot.closes) > 6 else 0.0
+    return round(max(recent_move, change * 0.62, five_day_move), 2)
+
+
+def _t_trade_volatility_score(volatility_percent: float) -> float:
+    if volatility_percent <= 0:
+        return 20.0
+    if volatility_percent < 2.0:
+        return _clamp_score(18 + volatility_percent * 18)
+    if volatility_percent < 3.2:
+        return _clamp_score(54 + (volatility_percent - 2.0) * 22)
+    if volatility_percent <= 8.5:
+        return _clamp_score(82 + min(12, (volatility_percent - 3.2) * 2.2))
+    if volatility_percent <= 12:
+        return _clamp_score(88 - (volatility_percent - 8.5) * 7)
+    return _clamp_score(58 - (volatility_percent - 12) * 9)
+
+
 def _latest_turnover_percent(info: dict) -> float | None:
     value = _metric_number(info.get("latestTurnoverRate"))
     if value is None:
@@ -473,6 +508,20 @@ def _latest_turnover_percent(info: dict) -> float | None:
     if value is None:
         return None
     return value * 100 if value <= 1 else value
+
+
+def _turnover_trade_score(turnover_percent: float | None) -> float:
+    if turnover_percent is None:
+        return 48.0
+    if turnover_percent < 0.6:
+        return _clamp_score(22 + turnover_percent * 24)
+    if turnover_percent < 2.0:
+        return _clamp_score(42 + (turnover_percent - 0.6) * 14)
+    if turnover_percent <= 12.0:
+        return _clamp_score(72 + min(18, (turnover_percent - 2.0) * 1.8))
+    if turnover_percent <= 22.0:
+        return _clamp_score(86 - (turnover_percent - 12.0) * 2.2)
+    return _clamp_score(64 - (turnover_percent - 22.0) * 3.4)
 
 
 def _pullback_risk_score(snapshot: MarketSnapshot, news: dict) -> float:
@@ -664,6 +713,162 @@ def _prediction_scores(
     return round(opportunity, 1), round(downside, 1)
 
 
+def _round_trade_price(value: float) -> float:
+    if value >= 1000:
+        return round(value, 1)
+    if value >= 100:
+        return round(value, 2)
+    if value >= 10:
+        return round(value, 2)
+    return round(value, 3)
+
+
+def _t_trade_score(
+    snapshot: MarketSnapshot,
+    metrics: dict[str, float],
+    news: dict,
+    breakout_setup_score: float,
+    pullback_risk_score: float,
+    downside_risk_score: float,
+) -> tuple[float, dict[str, float | None]]:
+    liquidity = _liquidity_score(snapshot.info)
+    liquidity_score = float(liquidity if liquidity is not None else 42)
+    volatility_percent = _t_trade_volatility_percent(snapshot)
+    volatility_score = _t_trade_volatility_score(volatility_percent)
+    turnover_percent = _latest_turnover_percent(snapshot.info)
+    turnover_score = _turnover_trade_score(turnover_percent)
+    positive_news, negative_news, net_news = _news_strengths(news)
+    change = _metric_number(snapshot.change)
+
+    score = (
+        liquidity_score * 0.22
+        + volatility_score * 0.24
+        + breakout_setup_score * 0.20
+        + metrics["momentum"] * 0.12
+        + metrics["sentiment"] * 0.08
+        + metrics["risk"] * 0.08
+        + turnover_score * 0.06
+        + max(0, net_news) * 0.06
+        + positive_news * 0.04
+        - negative_news * 0.08
+        - pullback_risk_score * 0.22
+        - downside_risk_score * 0.14
+    )
+
+    if liquidity_score < 42:
+        score = min(score, 48)
+    if volatility_score < 45:
+        score = min(score, 52)
+    if downside_risk_score >= DOWNSIDE_URGENT_EXIT_FLOOR or _is_severe_price_drop(change):
+        score = min(score, 32)
+    elif downside_risk_score >= DOWNSIDE_EXIT_FLOOR or _is_large_price_drop(change):
+        score = min(score, 48)
+    if _is_extreme_price_jump(change):
+        score = min(score, 38)
+    elif _is_overheated_price_jump(change) or pullback_risk_score >= 72:
+        score = min(score, 48)
+    elif pullback_risk_score >= PULLBACK_RISK_BLOCK_BUY_FLOOR:
+        score = min(score, 58)
+
+    return round(_clamp_score(score), 1), {
+        "liquidityScore": round(liquidity_score, 1),
+        "volatilityScore": round(volatility_score, 1),
+        "volatilityPct": volatility_percent,
+        "turnoverScore": round(turnover_score, 1),
+        "turnoverPct": round(turnover_percent, 2) if turnover_percent is not None else None,
+    }
+
+
+def _t_trade_suitability(
+    t_score: float,
+    components: dict[str, float | None],
+    pullback_risk_score: float,
+    downside_risk_score: float,
+    price_change: float | None,
+) -> str:
+    if (
+        t_score >= T_TRADE_CANDIDATE_FLOOR
+        and float(components.get("liquidityScore") or 0) >= 55
+        and float(components.get("volatilityScore") or 0) >= 58
+        and pullback_risk_score < PULLBACK_RISK_BLOCK_BUY_FLOOR
+        and downside_risk_score < DOWNSIDE_EXIT_FLOOR
+        and not _is_large_price_drop(price_change)
+        and not _is_overheated_price_jump(price_change)
+    ):
+        return "candidate"
+    if t_score >= T_TRADE_WATCH_FLOOR and not _is_severe_price_drop(price_change):
+        return "watch"
+    return "avoid"
+
+
+def _zone(low: float, high: float) -> dict[str, float]:
+    return {
+        "low": _round_trade_price(min(low, high)),
+        "high": _round_trade_price(max(low, high)),
+    }
+
+
+def _t_trade_plan(
+    snapshot: MarketSnapshot,
+    metrics: dict[str, float],
+    t_score: float,
+    components: dict[str, float | None],
+    breakout_setup_score: float,
+    pullback_risk_score: float,
+    downside_risk_score: float,
+) -> dict:
+    change = _metric_number(snapshot.change)
+    suitability = _t_trade_suitability(t_score, components, pullback_risk_score, downside_risk_score, change)
+    volatility_pct = float(components.get("volatilityPct") or 2.5)
+    entry_deep = min(0.045, max(0.012, volatility_pct * 0.0042))
+    entry_shallow = min(0.020, max(0.004, volatility_pct * 0.0018))
+    take_low = min(0.045, max(0.012, volatility_pct * 0.0032))
+    take_high = min(0.085, max(0.026, volatility_pct * 0.0072))
+    stop_gap = min(0.075, max(0.024, volatility_pct * 0.0065))
+    price = snapshot.price
+
+    reasons = []
+    risk_controls = []
+    if float(components.get("liquidityScore") or 0) >= 60:
+        reasons.append({"key": "tLiquidityReady", "params": {"score": components["liquidityScore"]}})
+    else:
+        risk_controls.append({"key": "tLiquidityThin", "params": {"score": components["liquidityScore"]}})
+    if float(components.get("volatilityScore") or 0) >= 58:
+        reasons.append({"key": "tVolatilityReady", "params": {"score": components["volatilityScore"], "range": components["volatilityPct"]}})
+    else:
+        risk_controls.append({"key": "tVolatilityLow", "params": {"range": components["volatilityPct"]}})
+    if breakout_setup_score >= 62:
+        reasons.append({"key": "tSetupReady", "params": {"score": round(breakout_setup_score, 1)}})
+    elif metrics["momentum"] < 52:
+        risk_controls.append({"key": "tTrendWeak", "params": {"score": metrics["momentum"]}})
+
+    if pullback_risk_score >= PULLBACK_RISK_BLOCK_BUY_FLOOR:
+        risk_controls.append({"key": "tPullbackRiskHigh", "params": {"risk": round(pullback_risk_score, 1)}})
+    if _is_overheated_price_jump(change):
+        risk_controls.append({"key": "tNoChase", "params": {"change": round(change or 0, 1)}})
+    if downside_risk_score >= DOWNSIDE_EXIT_FLOOR:
+        risk_controls.append({"key": "tDownsideRiskHigh", "params": {"risk": round(downside_risk_score, 1)}})
+    risk_controls.append({"key": "tUseBasePositionOnly", "params": {}})
+    risk_controls.append({"key": "tCutIfBreaksSupport", "params": {}})
+
+    summary_key = {
+        "candidate": "tCandidateSummary",
+        "watch": "tWatchSummary",
+        "avoid": "tAvoidSummary",
+    }[suitability]
+    return {
+        "suitability": suitability,
+        "summary": {"key": summary_key, "params": {"score": t_score}},
+        "score": t_score,
+        "components": components,
+        "entryZone": _zone(price * (1 - entry_deep), price * (1 - entry_shallow)),
+        "takeProfitZone": _zone(price * (1 + take_low), price * (1 + take_high)),
+        "stopLoss": _round_trade_price(price * (1 - stop_gap)),
+        "reasons": reasons[:4],
+        "riskControls": risk_controls[:5],
+    }
+
+
 def _is_quality_investment_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
     news = pick.get("newsAnalysis") or {}
@@ -715,12 +920,17 @@ def _is_buy_candidate(pick: dict) -> bool:
     return _is_quality_investment_candidate(pick) or _is_breakout_setup_candidate(pick)
 
 
+def _is_t_trade_candidate(pick: dict) -> bool:
+    return (pick.get("tPlan") or {}).get("suitability") == "candidate"
+
+
 def _is_watch_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
     return (
         not _is_exit_candidate(pick)
         and (
             pick["score"] >= 55
+            or float(pick.get("tScore") or 0) >= T_TRADE_WATCH_FLOOR
             or _investment_priority(pick) >= 58
             or _investable_factor_count(metrics) >= 3
         )
@@ -751,9 +961,11 @@ def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
 def _display_priority_key(pick: dict) -> tuple[int, float]:
     if pick["verdict"] == "buy":
         return (0, -_investment_priority(pick))
+    if _is_t_trade_candidate(pick):
+        return (1, -float(pick.get("tScore") or 0))
     if pick["verdict"] == "sell":
-        return (1, -_sell_priority(pick))
-    return (2, -_investment_priority(pick))
+        return (2, -_sell_priority(pick))
+    return (3, -max(_investment_priority(pick), float(pick.get("tScore") or 0)))
 
 
 def _average(values: list[float]) -> float:
@@ -894,6 +1106,17 @@ def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
         key=_investment_priority,
         reverse=True,
     )
+    t_trade_candidates = sorted(
+        [
+            pick
+            for pick in picks
+            if _is_t_trade_candidate(pick)
+            and not _is_buy_candidate(pick)
+            and not _is_urgent_exit_candidate(pick)
+        ],
+        key=lambda item: float(item.get("tScore") or 0),
+        reverse=True,
+    )
     urgent_sell_candidates = sorted(
         [pick for pick in picks if _is_urgent_exit_candidate(pick)],
         key=_sell_priority,
@@ -919,6 +1142,9 @@ def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
 
     selected: list[dict] = []
     selected.extend(buy_candidates[:AUTO_SCAN_BUY_LIMIT])
+    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+    if remaining > 0:
+        selected.extend(t_trade_candidates[: min(AUTO_SCAN_TRADE_LIMIT, remaining)])
     remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
     if remaining > 0:
         selected.extend(urgent_sell_candidates[: min(AUTO_SCAN_SELL_LIMIT, remaining)])
@@ -1592,6 +1818,8 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
     breakout_setup_score = _breakout_setup_score(snapshot, news_analysis)
     pullback_risk_score = _pullback_risk_score(snapshot, news_analysis)
     opportunity_score, downside_risk_score = _prediction_scores(metrics, score, news_analysis, snapshot.change, breakout_setup_score, pullback_risk_score)
+    t_score, t_components = _t_trade_score(snapshot, metrics, news_analysis, breakout_setup_score, pullback_risk_score, downside_risk_score)
+    t_plan = _t_trade_plan(snapshot, metrics, t_score, t_components, breakout_setup_score, pullback_risk_score, downside_risk_score)
     verdict = _verdict(score, metrics["risk"], metrics["quality"], metrics["sentiment"], snapshot.change)
     reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change, breakout_setup_score, pullback_risk_score)
     financial_analysis = _financial_analysis(snapshot)
@@ -1608,11 +1836,14 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "downsideRiskScore": downside_risk_score,
         "breakoutSetupScore": breakout_setup_score,
         "pullbackRiskScore": pullback_risk_score,
+        "tScore": t_score,
+        "tPlan": t_plan,
         "prediction": {
             "opportunityScore": opportunity_score,
             "downsideRiskScore": downside_risk_score,
             "breakoutSetupScore": breakout_setup_score,
             "pullbackRiskScore": pullback_risk_score,
+            "tScore": t_score,
             "edge": round(opportunity_score - downside_risk_score, 1),
         },
         "verdict": verdict,

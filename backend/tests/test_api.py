@@ -1065,6 +1065,66 @@ class ApiTestCase(unittest.TestCase):
 
         self.assertLess(_breakout_setup_score(snapshot, _news_analysis([])), 50)
 
+    def test_t_trade_plan_identifies_liquid_volatile_candidate(self):
+        class TTradeProvider(FakeMarketProvider):
+            def fetch(self, symbol):
+                closes = [48 + index * 0.08 + (0.9 if index % 2 else -0.5) for index in range(118)]
+                closes.extend([58.2, 58.9, 59.6, 60.8, 62.0])
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Tradable Range Corp",
+                    market="TW",
+                    sector="Technology",
+                    price=62.0,
+                    change=3.6,
+                    currency="TWD",
+                    closes=closes,
+                    info={
+                        "trailingPE": 24,
+                        "priceToBook": 2.8,
+                        "beta": 1.1,
+                        "returnOnEquity": 0.18,
+                        "profitMargins": 0.16,
+                        "revenueGrowth": 0.14,
+                        "earningsGrowth": 0.12,
+                        "debtToEquity": 35,
+                        "regularMarketVolume": 20_000_000,
+                        "turnoverValue": 1_200_000_000,
+                        "marketCap": 12_000_000_000,
+                        "volumeSurge20": 2.7,
+                        "amountSurge20": 2.9,
+                        "turnoverRate": 0.06,
+                    },
+                )
+
+        class PositiveNewsCrawler:
+            def fetch(self, symbol, name):
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} wins large order with institutional buying",
+                        summary="Strong demand, revenue growth, and analyst upgrade support active trading",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.78,
+                        credibility=0.9,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(TTradeProvider(), PositiveNewsCrawler(), FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["6601.TW"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+
+        self.assertGreaterEqual(pick["tScore"], 68)
+        self.assertEqual(pick["tPlan"]["suitability"], "candidate")
+        self.assertLess(pick["tPlan"]["entryZone"]["low"], pick["price"])
+        self.assertGreater(pick["tPlan"]["takeProfitZone"]["high"], pick["price"])
+        self.assertLess(pick["tPlan"]["stopLoss"], pick["tPlan"]["entryZone"]["low"])
+        self.assertIn("tLiquidityReady", {item["key"] for item in pick["tPlan"]["reasons"]})
+        self.assertIn("tUseBasePositionOnly", {item["key"] for item in pick["tPlan"]["riskControls"]})
+
     def test_already_limit_up_stock_is_analyzed_as_pullback_risk_not_buy(self):
         class LimitUpProvider(FakeMarketProvider):
             def fetch(self, symbol):
@@ -1120,6 +1180,8 @@ class ApiTestCase(unittest.TestCase):
         self.assertGreater(pick["downsideRiskScore"], pick["opportunityScore"])
         self.assertIn("overheatedPriceAction", {reason["key"] for reason in pick["reasonCodes"]})
         self.assertIn("actionWaitPullback", {item["key"] for item in pick["actionPlan"]["riskControls"]})
+        self.assertEqual(pick["tPlan"]["suitability"], "avoid")
+        self.assertIn("tNoChase", {item["key"] for item in pick["tPlan"]["riskControls"]})
 
     def test_limit_down_stock_is_not_marked_as_quality_buy(self):
         class LimitDownProvider(FakeMarketProvider):
@@ -1211,7 +1273,14 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("scoreBreakdown", pick)
         self.assertIn("opportunityScore", pick)
         self.assertIn("downsideRiskScore", pick)
+        self.assertIn("tScore", pick)
+        self.assertIn("tPlan", pick)
+        self.assertIn(pick["tPlan"]["suitability"], {"candidate", "watch", "avoid"})
+        self.assertIn("entryZone", pick["tPlan"])
+        self.assertIn("takeProfitZone", pick["tPlan"])
+        self.assertIn("stopLoss", pick["tPlan"])
         self.assertAlmostEqual(pick["prediction"]["edge"], pick["opportunityScore"] - pick["downsideRiskScore"], delta=0.1)
+        self.assertAlmostEqual(pick["prediction"]["tScore"], pick["tScore"], delta=0.1)
         self.assertEqual({item["factor"] for item in pick["scoreBreakdown"]}, {"sentiment", "momentum", "value", "risk", "quality"})
         self.assertAlmostEqual(sum(item["contribution"] for item in pick["scoreBreakdown"]), pick["score"], delta=0.5)
         self.assertIn("decision", pick)

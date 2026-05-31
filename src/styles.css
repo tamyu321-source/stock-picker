@@ -1191,6 +1191,21 @@ h3 {
   font-weight: 800;
 }
 
+.metric-row .t-score-chip.candidate {
+  background: #dff1e6;
+  color: #245f46;
+}
+
+.metric-row .t-score-chip.watch {
+  background: #fff4d6;
+  color: #7a4d0b;
+}
+
+.metric-row .t-score-chip.avoid {
+  background: #fff0ed;
+  color: #8a2d20;
+}
+
 .reason-block strong {
   display: block;
   margin-bottom: 8px;
@@ -1276,6 +1291,52 @@ h3 {
   display: block;
   margin-bottom: 10px;
   line-height: 1.35;
+}
+
+.t-plan-panel {
+  border-color: #d7e5db;
+  background: #f7fbf8;
+}
+
+.t-plan-panel.watch {
+  border-color: #ecd68c;
+  background: #fffaf0;
+}
+
+.t-plan-panel.avoid {
+  border-color: #efc2ba;
+  background: #fff7f5;
+}
+
+.t-zone-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.t-zone-grid div {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #e1e9e2;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.t-zone-grid span {
+  color: #667268;
+  font-size: 0.75rem;
+  font-weight: 850;
+}
+
+.t-zone-grid b {
+  color: #17211b;
+  font-size: 0.95rem;
+}
+
+.t-plan-panel .research-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .research-columns {
@@ -2123,6 +2184,10 @@ h3 {
   .financial-grid {
     grid-template-columns: 1fr 1fr;
   }
+
+  .t-zone-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 680px) {
@@ -2177,6 +2242,11 @@ h3 {
 
   .research-columns,
   .financial-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .t-zone-grid,
+  .t-plan-panel .research-columns {
     grid-template-columns: 1fr;
   }
 

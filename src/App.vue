@@ -8,7 +8,7 @@ type StandardLocale = Exclude<Locale, 'nan-TW'>;
 type LocalizedText = Partial<Record<StandardLocale, string>> & { en: string };
 type YogurtSoundCue = 'appear' | 'tap';
 type ResultMarketFilter = 'all' | Market;
-type ResultVerdictFilter = 'all' | Pick['verdict'];
+type ResultVerdictFilter = 'all' | Pick['verdict'] | 't';
 type DataMode = ReturnType<typeof currentDataMode>;
 type DataIssue = { symbol: string; error: string };
 type SavedScan = {
@@ -69,7 +69,7 @@ const SAVED_SCANS_STORAGE_KEY = 'open-stock-picker.saved-scans.v1';
 const SAVED_SCAN_LIMIT = 6;
 const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
-const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 'watch', 'sell'];
+const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 't', 'watch', 'sell'];
 const languageOptions: Array<{ id: Locale; label: string; shortLabel: string; flagClass: string }> = [
   { id: 'en', label: 'English', shortLabel: 'EN', flagClass: 'flag-uk' },
   { id: 'zh-CN', label: '简体中文', shortLabel: '简', flagClass: 'flag-cn' },
@@ -160,7 +160,8 @@ const selectedStrategy = computed(() => strategies.value.find((item) => item.id 
 const marketOptions = computed(() => config.value?.markets ?? []);
 const filteredPicks = computed(() => picks.value.filter((pick) => {
   const marketMatches = resultMarketFilter.value === 'all' || pick.market === resultMarketFilter.value;
-  const verdictMatches = resultVerdictFilter.value === 'all' || pick.verdict === resultVerdictFilter.value;
+  const verdictMatches = resultVerdictFilter.value === 'all'
+    || (resultVerdictFilter.value === 't' ? pick.tPlan?.suitability === 'candidate' : pick.verdict === resultVerdictFilter.value);
   return marketMatches && verdictMatches;
 }));
 const flattenedSignals = computed(() => filteredPicks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
@@ -397,6 +398,14 @@ function allMarketsFilterLabel() {
 }
 
 function resultVerdictFilterLabel(option: ResultVerdictFilter) {
+  if (option === 't') {
+    if (locale.value === 'en') return 'T candidates';
+    if (locale.value === 'zh-CN') return '做T候选';
+    if (locale.value === 'ja') return 'T候補';
+    if (locale.value === 'ko') return 'T 후보';
+    if (locale.value === 'nan-TW') return '做T候選';
+    return '做T候選';
+  }
   if (option !== 'all') return verdictLabel(option);
   if (locale.value === 'en') return 'All calls';
   if (locale.value === 'zh-CN') return '全部判断';
@@ -531,6 +540,10 @@ function currentScanMarkdown() {
     lines.push(`- Price: ${pick.currency} ${pick.price} (${pick.change > 0 ? '+' : ''}${pick.change}%)`);
     if (pick.decision) lines.push(`- Decision: ${markdownLine(pointLabel(pick.decision.summary))}`);
     if (pick.actionPlan) lines.push(`- Action: ${markdownLine(pointLabel(pick.actionPlan.summary))}`);
+    if (pick.tPlan) {
+      lines.push(`- T plan: ${markdownLine(pointLabel(pick.tPlan.summary))}`);
+      lines.push(`- T range: entry ${pick.currency} ${pick.tPlan.entryZone.low}-${pick.tPlan.entryZone.high}, take profit ${pick.currency} ${pick.tPlan.takeProfitZone.low}-${pick.tPlan.takeProfitZone.high}, stop ${pick.currency} ${pick.tPlan.stopLoss}`);
+    }
     const reasons = reasonLabels(pick).slice(0, 3);
     if (reasons.length) {
       lines.push('- Reasons:');
@@ -597,15 +610,25 @@ function scoreWeightLabel(item: { weight: number; baseWeight?: number; available
   return base !== effective ? `${base}% -> ${effective}%` : `${effective}%`;
 }
 
-function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pullback', pick: Pick) {
+function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pullback' | 't', pick: Pick) {
   const value = kind === 'opportunity'
     ? pick.opportunityScore
     : kind === 'downside'
       ? pick.downsideRiskScore
       : kind === 'setup'
         ? pick.breakoutSetupScore
-        : pick.pullbackRiskScore;
+        : kind === 't'
+          ? pick.tScore
+          : pick.pullbackRiskScore;
   const score = value === undefined ? '-' : Number(value).toFixed(1);
+  if (kind === 't') {
+    if (locale.value === 'en') return `T suitability ${score}/100`;
+    if (locale.value === 'zh-CN') return `做T适配 ${score}/100`;
+    if (locale.value === 'ja') return `T適性 ${score}/100`;
+    if (locale.value === 'ko') return `T 적합도 ${score}/100`;
+    if (locale.value === 'nan-TW') return `做T適配 ${score}/100`;
+    return `做T適配 ${score}/100`;
+  }
   if (kind === 'opportunity') {
     if (locale.value === 'en') return `Advantage ${score}/100`;
     if (locale.value === 'zh-CN') return `相对优势 ${score}/100`;
@@ -636,6 +659,48 @@ function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pull
   if (locale.value === 'ko') return `하락 리스크 ${score}/100`;
   if (locale.value === 'nan-TW') return `下跌風險 ${score}/100`;
   return `下跌風險 ${score}/100`;
+}
+
+function tSuitabilityLabel(pick: Pick) {
+  const suitability = pick.tPlan?.suitability;
+  if (suitability === 'candidate') {
+    if (locale.value === 'en') return 'T-ready';
+    if (locale.value === 'zh-CN') return '适合做T';
+    if (locale.value === 'ja') return 'T向き';
+    if (locale.value === 'ko') return 'T 적합';
+    if (locale.value === 'nan-TW') return '適合做T';
+    return '適合做T';
+  }
+  if (suitability === 'watch') {
+    if (locale.value === 'en') return 'T watch';
+    if (locale.value === 'zh-CN') return '等确认';
+    if (locale.value === 'ja') return '確認待ち';
+    if (locale.value === 'ko') return '확인 대기';
+    if (locale.value === 'nan-TW') return '等確認';
+    return '等確認';
+  }
+  if (locale.value === 'en') return 'Avoid T';
+  if (locale.value === 'zh-CN') return '不适合做T';
+  if (locale.value === 'ja') return 'T回避';
+  if (locale.value === 'ko') return 'T 회피';
+  if (locale.value === 'nan-TW') return '毋適合做T';
+  return '不適合做T';
+}
+
+function priceZoneLabel(pick: Pick, zone?: { low: number; high: number }) {
+  if (!zone) return '-';
+  return `${pick.currency} ${zone.low} - ${zone.high}`;
+}
+
+function tPlanFieldLabel(key: 'entry' | 'takeProfit' | 'stop' | 'basis' | 'riskControls') {
+  const labels: Record<'entry' | 'takeProfit' | 'stop' | 'basis' | 'riskControls', LocalizedText> = {
+    entry: { en: 'Low-buy zone', 'zh-CN': '低吸区', 'zh-TW': '低吸區' },
+    takeProfit: { en: 'High-sell zone', 'zh-CN': '高抛区', 'zh-TW': '高拋區' },
+    stop: { en: 'Stop line', 'zh-CN': '止损线', 'zh-TW': '停損線' },
+    basis: { en: 'Why it can T', 'zh-CN': '做T依据', 'zh-TW': '做T依據' },
+    riskControls: { en: 'T risk control', 'zh-CN': '做T风控', 'zh-TW': '做T風控' }
+  };
+  return labels[key][locale.value as StandardLocale] ?? labels[key].en;
 }
 
 function reasonLabel(reason: ReasonCode) {
@@ -745,6 +810,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
   const netScore = signedScore(p.netScore);
   const change = Number(p.change ?? 0).toFixed(1);
   const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
+  const range = Number(p.range ?? 0).toFixed(1);
   switch (point.key) {
     case 'buySummary':
       return `會使買入：總分 ${p.score}/100，這个方案相對有力。`;
@@ -880,6 +946,34 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
       return `回落風險 ${pullbackRisk}/100，等回踩守穩抑是隔日承接確認。`;
     case 'actionRequireNewsEvidence':
       return '需要新的公司級新聞證據，才適合做高信心判斷。';
+    case 'tCandidateSummary':
+      return `適合做T：T 分 ${p.score}/100，有流動性佮可交易波動。`;
+    case 'tWatchSummary':
+      return `做T等待確認：T 分 ${p.score}/100，條件猶未完整。`;
+    case 'tAvoidSummary':
+      return `毋適合做T：T 分 ${p.score}/100，風險報酬無划算。`;
+    case 'tLiquidityReady':
+      return `流動性分 ${p.score}/100，較有機會順利進出。`;
+    case 'tLiquidityThin':
+      return `流動性分只有 ${p.score}/100，做T容易有滑價。`;
+    case 'tVolatilityReady':
+      return `預估可交易波動約 ${range}%，有做差價空間。`;
+    case 'tVolatilityLow':
+      return `預估波動約 ${range}%，差價空間偏小。`;
+    case 'tSetupReady':
+      return `短線 setup ${p.score}/100，價格佮成交量有配合。`;
+    case 'tTrendWeak':
+      return `動能只有 ${p.score}/100，先等轉強。`;
+    case 'tPullbackRiskHigh':
+      return `回落風險 ${p.risk}/100，毋通追高做T。`;
+    case 'tDownsideRiskHigh':
+      return `下跌風險 ${p.risk}/100，做T防守優先。`;
+    case 'tNoChase':
+      return `股價已經漲 ${p.change}%，做T只等回踩，毋追。`;
+    case 'tUseBasePositionOnly':
+      return '做T應以既有底倉為主，避免用全新倉位追價。';
+    case 'tCutIfBreaksSupport':
+      return '若跌破低吸區仍無承接，應先停損或降倉。';
     default:
       return point.key;
   }
@@ -895,6 +989,7 @@ function pointLabel(point: DecisionPoint) {
   const netScore = signedScore(p.netScore);
   const change = Number(p.change ?? 0).toFixed(1);
   const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
+  const range = Number(p.range ?? 0).toFixed(1);
   if (locale.value === 'nan-TW') {
     return nanDecisionPointLabel(point, score, count, hours);
   }
@@ -1234,6 +1329,76 @@ function pointLabel(point: DecisionPoint) {
       en: 'Require fresh company-specific news before making a strong call.',
       'zh-CN': '需要新的公司级新闻证据，才适合做高信心判断。',
       'zh-TW': '需要新的公司級新聞證據，才適合做高信心判斷。'
+    },
+    tCandidateSummary: {
+      en: `T candidate: T suitability ${p.score}/100 with enough liquidity and tradable movement.`,
+      'zh-CN': `适合做T：T适配 ${p.score}/100，具备流动性与可交易波动。`,
+      'zh-TW': `適合做T：T適配 ${p.score}/100，具備流動性與可交易波動。`
+    },
+    tWatchSummary: {
+      en: `T watch: T suitability ${p.score}/100, but confirmation is incomplete.`,
+      'zh-CN': `做T等待确认：T适配 ${p.score}/100，条件还不完整。`,
+      'zh-TW': `做T等待確認：T適配 ${p.score}/100，條件還不完整。`
+    },
+    tAvoidSummary: {
+      en: `Avoid T: T suitability ${p.score}/100; risk/reward is not clean enough.`,
+      'zh-CN': `不适合做T：T适配 ${p.score}/100，风险收益不够干净。`,
+      'zh-TW': `不適合做T：T適配 ${p.score}/100，風險收益不夠乾淨。`
+    },
+    tLiquidityReady: {
+      en: `Liquidity score is ${p.score}/100, so entries and exits should be more workable.`,
+      'zh-CN': `流动性分 ${p.score}/100，进出场可操作性较好。`,
+      'zh-TW': `流動性分 ${p.score}/100，進出場可操作性較好。`
+    },
+    tLiquidityThin: {
+      en: `Liquidity score is only ${p.score}/100; slippage can hurt T trades.`,
+      'zh-CN': `流动性分只有 ${p.score}/100，做T容易被滑点影响。`,
+      'zh-TW': `流動性分只有 ${p.score}/100，做T容易被滑價影響。`
+    },
+    tVolatilityReady: {
+      en: `Estimated tradable movement is about ${range}%, enough for intraday spread work.`,
+      'zh-CN': `预估可交易波动约 ${range}%，具备日内差价空间。`,
+      'zh-TW': `預估可交易波動約 ${range}%，具備日內差價空間。`
+    },
+    tVolatilityLow: {
+      en: `Estimated tradable movement is only ${range}%, so spread is too thin.`,
+      'zh-CN': `预估可交易波动只有 ${range}%，差价空间偏小。`,
+      'zh-TW': `預估可交易波動只有 ${range}%，差價空間偏小。`
+    },
+    tSetupReady: {
+      en: `Short-term setup scores ${p.score}/100 with price and volume support.`,
+      'zh-CN': `短线 setup ${p.score}/100，价格与成交量有配合。`,
+      'zh-TW': `短線 setup ${p.score}/100，價格與成交量有配合。`
+    },
+    tTrendWeak: {
+      en: `Momentum is only ${p.score}/100; wait for price to turn stronger.`,
+      'zh-CN': `动能只有 ${p.score}/100，先等价格转强。`,
+      'zh-TW': `動能只有 ${p.score}/100，先等價格轉強。`
+    },
+    tPullbackRiskHigh: {
+      en: `Pullback risk is ${p.risk}/100; do not chase for a T trade.`,
+      'zh-CN': `回落风险 ${p.risk}/100，不适合追高做T。`,
+      'zh-TW': `回落風險 ${p.risk}/100，不適合追高做T。`
+    },
+    tDownsideRiskHigh: {
+      en: `Downside risk is ${p.risk}/100, so defense comes before spread trading.`,
+      'zh-CN': `下跌风险 ${p.risk}/100，做T前必须先考虑防守。`,
+      'zh-TW': `下跌風險 ${p.risk}/100，做T前必須先考慮防守。`
+    },
+    tNoChase: {
+      en: `Price is already up ${p.change}%; only consider a controlled pullback, not chasing.`,
+      'zh-CN': `股价已上涨 ${p.change}%，只等受控回踩，不追高。`,
+      'zh-TW': `股價已上漲 ${p.change}%，只等受控回踩，不追高。`
+    },
+    tUseBasePositionOnly: {
+      en: 'Use this as a base-position T trade, not a full fresh chase entry.',
+      'zh-CN': '做T应以已有底仓为主，不要用全新仓位追价。',
+      'zh-TW': '做T應以已有底倉為主，不要用全新倉位追價。'
+    },
+    tCutIfBreaksSupport: {
+      en: 'If price breaks the entry zone without support, cut or reduce first.',
+      'zh-CN': '如果跌破低吸区仍无承接，先止损或降仓。',
+      'zh-TW': '如果跌破低吸區仍無承接，先停損或降倉。'
     }
   };
   return text[point.key][locale.value as StandardLocale] ?? text[point.key].en;
@@ -2037,7 +2202,36 @@ onUnmounted(() => {
               <span>{{ predictionScoreLabel('setup', pick) }}</span>
               <span>{{ predictionScoreLabel('downside', pick) }}</span>
               <span>{{ predictionScoreLabel('pullback', pick) }}</span>
+              <span v-if="pick.tPlan" class="t-score-chip" :class="pick.tPlan.suitability">{{ predictionScoreLabel('t', pick) }} · {{ tSuitabilityLabel(pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
+            </div>
+
+            <div v-if="pick.tPlan" class="research-panel t-plan-panel" :class="pick.tPlan.suitability">
+              <strong>{{ tSuitabilityLabel(pick) }} · {{ pointLabel(pick.tPlan.summary) }}</strong>
+              <div class="t-zone-grid">
+                <div>
+                  <span>{{ tPlanFieldLabel('entry') }}</span>
+                  <b>{{ priceZoneLabel(pick, pick.tPlan.entryZone) }}</b>
+                </div>
+                <div>
+                  <span>{{ tPlanFieldLabel('takeProfit') }}</span>
+                  <b>{{ priceZoneLabel(pick, pick.tPlan.takeProfitZone) }}</b>
+                </div>
+                <div>
+                  <span>{{ tPlanFieldLabel('stop') }}</span>
+                  <b>{{ pick.currency }} {{ pick.tPlan.stopLoss }}</b>
+                </div>
+              </div>
+              <div class="research-columns">
+                <ul>
+                  <li><strong>{{ tPlanFieldLabel('basis') }}</strong></li>
+                  <li v-for="item in pick.tPlan.reasons" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+                <ul>
+                  <li><strong>{{ tPlanFieldLabel('riskControls') }}</strong></li>
+                  <li v-for="item in pick.tPlan.riskControls" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
+                </ul>
+              </div>
             </div>
 
             <div class="reason-block">
