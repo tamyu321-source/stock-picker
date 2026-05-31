@@ -651,11 +651,24 @@ class MarketUniverseProvider:
         return symbols[:limit]
 
     def _discover_eastmoney_cn(self, limit: int) -> list[DiscoveredSymbol]:
+        sources = [
+            ("f10", "eastmoney-cn-volume-ratio"),
+            ("f6", "eastmoney-cn-turnover"),
+            ("f3", "eastmoney-cn-gainers-risk-review"),
+        ]
+        output: list[DiscoveredSymbol] = []
+        for sort_field, source in sources:
+            output = _merge_unique_symbols(output, self._discover_eastmoney_cn_sorted(sort_field, source, max(limit, 18)))
+            if len(output) >= limit:
+                break
+        return output[:limit]
+
+    def _discover_eastmoney_cn_sorted(self, sort_field: str, source: str, limit: int) -> list[DiscoveredSymbol]:
         url = (
             "https://push2.eastmoney.com/api/qt/clist/get"
-            "?pn=1&pz={limit}&po=1&np=1&fltt=2&invt=2&fid=f6"
-            "&fs=m:1+t:2,m:0+t:6,m:0+t:80&fields=f12,f14,f6"
-        ).format(limit=limit * 3)
+            "?pn=1&pz={limit}&po=1&np=1&fltt=2&invt=2&fid={sort_field}"
+            "&fs=m:1+t:2,m:0+t:6,m:0+t:80&fields=f12,f14,f3,f6,f10"
+        ).format(limit=limit * 3, sort_field=sort_field)
         rows = self._json(url).get("data", {}).get("diff", [])
         output = []
         for row in rows:
@@ -663,7 +676,12 @@ class MarketUniverseProvider:
             if not code.isdigit():
                 continue
             suffix = ".SS" if code.startswith("6") else ".SZ"
-            output.append(DiscoveredSymbol(symbol=f"{code}{suffix}", name=str(row.get("f14") or code), market="CN", source="eastmoney-cn-turnover"))
+            symbol = f"{code}{suffix}"
+            if not is_common_equity_symbol(symbol, "CN"):
+                continue
+            output.append(DiscoveredSymbol(symbol=symbol, name=str(row.get("f14") or code), market="CN", source=source))
+            if len(output) >= limit:
+                break
         return output[:limit]
 
     def _discover_eastmoney_hk(self, limit: int) -> list[DiscoveredSymbol]:

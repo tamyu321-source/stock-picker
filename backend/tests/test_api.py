@@ -6,7 +6,7 @@ from unittest.mock import patch
 from backend.app import create_app
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
 from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _parse_eastmoney_datetime, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
-from backend.services import _financial_analysis, _friendly_data_error, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
+from backend.services import _breakout_setup_score, _financial_analysis, _friendly_data_error, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _manual_symbol_candidates, _symbols_from_code_mentions
 
 
@@ -162,12 +162,51 @@ class ApiTestCase(unittest.TestCase):
         second_snapshot = cached_market.fetch("AAPL")
         self.assertEqual(market_provider.calls, ["aapl"])
         self.assertEqual(second_snapshot.info["trailingPE"], 20)
+        refreshed_snapshot = cached_market.fetch("AAPL", refresh=True)
+        self.assertEqual(market_provider.calls, ["aapl", "AAPL"])
+        self.assertEqual(refreshed_snapshot.info["trailingPE"], 20)
 
         first_articles = cached_news.fetch("AAPL", "Apple", limit=8)
         second_articles = cached_news.fetch("aapl", " apple ", limit=8)
         self.assertEqual(news_crawler.calls, [("AAPL", "Apple", 8)])
         self.assertEqual(first_articles, second_articles)
         self.assertIsNot(first_articles, second_articles)
+        cached_news.fetch("AAPL", "Apple", limit=8, refresh=True)
+        self.assertEqual(news_crawler.calls, [("AAPL", "Apple", 8), ("AAPL", "Apple", 8)])
+
+    def test_analyze_refresh_bypasses_cached_news(self):
+        class VersionedNewsCrawler:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch(self, symbol, name, limit=8):
+                self.calls += 1
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} refresh version {self.calls}",
+                        summary="Revenue beats expectations",
+                        link=f"https://example.com/{self.calls}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.5,
+                        credibility=0.8,
+                        relevance=1.0,
+                    )
+                ]
+
+        crawler = VersionedNewsCrawler()
+        cached_news = CachedNewsCrawler(crawler, ttl_seconds=900)
+        client = create_app(FakeMarketProvider(), cached_news, FakeUniverseProvider()).test_client()
+        payload = {"markets": ["US"], "symbols": ["AAPL"], "strategyId": "balanced"}
+
+        first = client.post("/api/analyze", json=payload).get_json()["picks"][0]["signals"][0]["title"]
+        second = client.post("/api/analyze", json=payload).get_json()["picks"][0]["signals"][0]["title"]
+        refreshed = client.post("/api/analyze", json={**payload, "refresh": True}).get_json()["picks"][0]["signals"][0]["title"]
+
+        self.assertEqual(first, "Test Corp refresh version 1")
+        self.assertEqual(second, first)
+        self.assertEqual(refreshed, "Test Corp refresh version 2")
+        self.assertEqual(crawler.calls, 2)
 
     def test_analyze_filters_market_and_returns_verdicts(self):
         response = self.client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["2330.TW", "AAPL"], "strategyId": "balanced"})
@@ -316,6 +355,26 @@ class ApiTestCase(unittest.TestCase):
         self.assertGreaterEqual(len(symbols), 10)
         self.assertIn("600519.SS", {item.symbol for item in symbols})
         self.assertIn("\u8d35\u5dde\u8305\u53f0", {item.name for item in symbols})
+
+    def test_china_market_discovery_includes_gainers_and_volume_ratio(self):
+        class FakeEastmoneyUniverse(MarketUniverseProvider):
+            def _json(self, url, insecure=False):
+                if "fid=f3" in url:
+                    return {"data": {"diff": [{"f12": "688108", "f14": "Top Gainer"}, {"f12": "300486", "f14": "Runner"}]}}
+                if "fid=f10" in url:
+                    return {"data": {"diff": [{"f12": "301360", "f14": "Volume Ratio"}]}}
+                if "fid=f6" in url:
+                    return {"data": {"diff": [{"f12": "600519", "f14": "Turnover"}]}}
+                return {"data": {"diff": []}}
+
+        symbols = FakeEastmoneyUniverse()._discover_eastmoney_cn(4)
+        by_symbol = {item.symbol: item.source for item in symbols}
+
+        self.assertEqual(symbols[0].symbol, "301360.SZ")
+        self.assertEqual(by_symbol["301360.SZ"], "eastmoney-cn-volume-ratio")
+        self.assertIn("301360.SZ", by_symbol)
+        self.assertIn("600519.SS", by_symbol)
+        self.assertEqual(by_symbol["688108.SS"], "eastmoney-cn-gainers-risk-review")
 
     def test_fallback_search_uses_default_taiwan_symbols(self):
         symbols = MarketUniverseProvider()._discover_fallback_search("TW", 5)
@@ -783,6 +842,55 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scan"]["displayed"], 8)
         self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
 
+    def test_blank_market_scan_still_shows_analyzed_neutral_candidates(self):
+        class NeutralUniverseProvider:
+            def discover(self, markets, limit_per_market=18):
+                return [
+                    DiscoveredSymbol(f"4{index:03d}.TW", f"Neutral Corp {index}", "TW", "test-neutral")
+                    for index in range(20)
+                ], []
+
+        class NeutralMarketProvider:
+            def fetch(self, symbol):
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name=symbol,
+                    market="TW",
+                    sector="Technology",
+                    price=100,
+                    change=0.1,
+                    currency="TWD",
+                    closes=[100 + (index % 2) * 0.05 for index in range(130)],
+                    info={
+                        "trailingPE": 30,
+                        "priceToBook": 4.0,
+                        "beta": 1.0,
+                        "returnOnEquity": 0.06,
+                        "profitMargins": 0.04,
+                        "revenueGrowth": 0.01,
+                        "earningsGrowth": 0.01,
+                        "debtToEquity": 95,
+                        "regularMarketVolume": 1_000_000,
+                        "marketCap": 5_000_000_000,
+                        "fiftyTwoWeekHigh": 140,
+                        "fiftyTwoWeekLow": 80,
+                    },
+                )
+
+        class EmptyNewsCrawler:
+            def fetch(self, symbol, name):
+                return []
+
+        client = create_app(NeutralMarketProvider(), EmptyNewsCrawler(), NeutralUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+
+        self.assertEqual(len(payload["picks"]), 20)
+        self.assertEqual(payload["scan"]["displayed"], 20)
+        self.assertEqual(payload["scan"]["succeeded"], 20)
+        self.assertNotIn("buy", {pick["verdict"] for pick in payload["picks"]})
+
     def test_blank_market_scan_expands_until_quality_candidates_are_found(self):
         class ExpandingUniverseProvider:
             def __init__(self):
@@ -886,6 +994,132 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(len(buy_symbols), 4)
         self.assertTrue(all(symbol.startswith("7") for symbol in buy_symbols))
         self.assertEqual(payload["scan"]["requested"], 10)
+
+    def test_breakout_setup_can_promote_next_day_candidate(self):
+        class BreakoutProvider(FakeMarketProvider):
+            def fetch(self, symbol):
+                closes = [88 + index * 0.12 for index in range(120)] + [102, 103, 104, 106, 109, 112, 116, 119, 121, 127]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Breakout Corp",
+                    market="TW",
+                    sector="Technology",
+                    price=127,
+                    change=5.0,
+                    currency="TWD",
+                    closes=closes,
+                    info={
+                        "trailingPE": 34,
+                        "priceToBook": 4.8,
+                        "beta": 1.6,
+                        "returnOnEquity": 0.06,
+                        "profitMargins": 0.04,
+                        "revenueGrowth": 0.05,
+                        "earningsGrowth": 0.03,
+                        "debtToEquity": 120,
+                        "regularMarketVolume": 12_000_000,
+                        "marketCap": 6_000_000_000,
+                        "volumeSurge20": 3.2,
+                        "amountSurge20": 3.4,
+                        "turnoverRate": 0.07,
+                    },
+                )
+
+        class BreakoutNewsCrawler:
+            def fetch(self, symbol, name):
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} wins large order and reports strong demand",
+                        summary="Institutional buying, revenue growth, and analyst upgrade support the move",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.8,
+                        credibility=0.9,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(BreakoutProvider(), BreakoutNewsCrawler(), FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["8801.TW"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+
+        self.assertEqual(pick["verdict"], "buy")
+        self.assertGreaterEqual(pick["breakoutSetupScore"], 74)
+        self.assertGreater(pick["opportunityScore"], pick["downsideRiskScore"])
+        self.assertIn("breakoutSetup", {reason["key"] for reason in pick["reasonCodes"]})
+
+    def test_breakout_setup_stays_low_without_fresh_impulse(self):
+        snapshot = MarketSnapshot(
+            symbol="5000.TW",
+            name="Flat Corp",
+            market="TW",
+            sector="Technology",
+            price=100.8,
+            change=0.2,
+            currency="TWD",
+            closes=[100 + (index % 5) * 0.2 for index in range(130)],
+            info={"regularMarketVolume": 1_000_000, "marketCap": 5_000_000_000},
+        )
+
+        self.assertLess(_breakout_setup_score(snapshot, _news_analysis([])), 50)
+
+    def test_already_limit_up_stock_is_analyzed_as_pullback_risk_not_buy(self):
+        class LimitUpProvider(FakeMarketProvider):
+            def fetch(self, symbol):
+                closes = [70 + index * 0.12 for index in range(110)] + [84, 86, 89, 92, 96, 101, 107, 113, 120, 144]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Limit Up Corp",
+                    market="CN",
+                    sector="Technology",
+                    price=144,
+                    change=20.0,
+                    currency="CNY",
+                    closes=closes,
+                    info={
+                        "trailingPE": 22,
+                        "priceToBook": 2.4,
+                        "beta": 1.2,
+                        "returnOnEquity": 0.22,
+                        "profitMargins": 0.18,
+                        "revenueGrowth": 0.18,
+                        "earningsGrowth": 0.16,
+                        "debtToEquity": 30,
+                        "regularMarketVolume": 30_000_000,
+                        "marketCap": 20_000_000_000,
+                        "volumeSurge20": 4.5,
+                        "amountSurge20": 5.0,
+                        "turnoverRate": 0.22,
+                    },
+                )
+
+        class PositiveNewsCrawler:
+            def fetch(self, symbol, name):
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} earnings beat and wins large order",
+                        summary="Strong demand, institutional buying, revenue growth, and analyst upgrade",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.9,
+                        credibility=0.9,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(LimitUpProvider(), PositiveNewsCrawler(), FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["CN"], "symbols": ["688108.SS"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+
+        self.assertNotEqual(pick["verdict"], "buy")
+        self.assertGreaterEqual(pick["pullbackRiskScore"], 62)
+        self.assertGreater(pick["downsideRiskScore"], pick["opportunityScore"])
+        self.assertIn("overheatedPriceAction", {reason["key"] for reason in pick["reasonCodes"]})
+        self.assertIn("actionWaitPullback", {item["key"] for item in pick["actionPlan"]["riskControls"]})
 
     def test_limit_down_stock_is_not_marked_as_quality_buy(self):
         class LimitDownProvider(FakeMarketProvider):

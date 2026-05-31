@@ -55,6 +55,17 @@ class Article:
 MAX_ARTICLE_AGE_HOURS = 168
 
 
+def _surge_ratio(values: list[float], window: int = 20) -> float | None:
+    if len(values) < 3:
+        return None
+    latest = values[-1]
+    previous = values[-window - 1 : -1] if len(values) > window else values[:-1]
+    baseline = sum(value for value in previous if value > 0) / max(1, sum(1 for value in previous if value > 0))
+    if latest <= 0 or baseline <= 0:
+        return None
+    return latest / baseline
+
+
 POSITIVE_WORDS = {
     "approval",
     "beat",
@@ -555,6 +566,11 @@ class YFinanceMarketDataProvider:
                 info = dict(ticker.get_info())
             except Exception:
                 info = {}
+            if "Volume" in history:
+                volumes = [float(value) for value in history["Volume"].dropna().tail(130).tolist()]
+                volume_surge = _surge_ratio(volumes)
+                if volume_surge is not None:
+                    info["volumeSurge20"] = round(volume_surge, 2)
             info = _merge_market_fundamentals(symbol, info)
 
             price = closes[-1]
@@ -617,9 +633,24 @@ class EastmoneyCnMarketDataProvider:
             raise ValueError(f"No Eastmoney closing prices returned for {symbol}.")
 
         info = _eastmoney_cn_fundamentals(symbol)
+        volumes = [float(row["volume"] or 0) for row in rows]
+        amounts = [float(row["amount"] or 0) for row in rows]
+        volume_surge = _surge_ratio(volumes)
+        amount_surge = _surge_ratio(amounts)
+        latest = rows[-1]
+        if volume_surge is not None:
+            info["volumeSurge20"] = round(volume_surge, 2)
+        if amount_surge is not None:
+            info["amountSurge20"] = round(amount_surge, 2)
+        if latest.get("turnoverRate") is not None:
+            info["latestTurnoverRate"] = latest["turnoverRate"] / 100
+        if latest.get("amount") and not info.get("turnoverValue"):
+            info["turnoverValue"] = latest["amount"]
+        if latest.get("volume") and not info.get("regularMarketVolume"):
+            info["regularMarketVolume"] = latest["volume"] * 100
         price = closes[-1]
         previous = closes[-2] if len(closes) > 1 else price
-        change = rows[-1].get("changePercent")
+        change = latest.get("changePercent")
         if change is None:
             change = ((price - previous) / previous * 100) if previous else 0
         name = info.get("shortName") or local_company_name(upper, data.get("name") or upper)
@@ -658,8 +689,11 @@ class EastmoneyCnMarketDataProvider:
     def _parse_kline(self, row: str) -> dict[str, float | None]:
         parts = str(row).split(",")
         close = _eastmoney_number(parts[2] if len(parts) > 2 else None) or 0.0
+        volume = _eastmoney_number(parts[5] if len(parts) > 5 else None) or 0.0
+        amount = _eastmoney_number(parts[6] if len(parts) > 6 else None) or 0.0
         change_percent = _eastmoney_number(parts[8] if len(parts) > 8 else None)
-        return {"close": close, "changePercent": change_percent}
+        turnover_rate = _eastmoney_number(parts[10] if len(parts) > 10 else None)
+        return {"close": close, "volume": volume, "amount": amount, "changePercent": change_percent, "turnoverRate": turnover_rate}
 
 
 class YahooHttpMarketDataProvider:
@@ -675,13 +709,18 @@ class YahooHttpMarketDataProvider:
 
         payload = result[0]
         meta = payload.get("meta", {})
-        close_values = payload.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        quote = payload.get("indicators", {}).get("quote", [{}])[0]
+        close_values = quote.get("close", [])
         closes = [float(value) for value in close_values if value is not None]
         if not closes:
             raise ValueError(f"No closing prices returned for {symbol}.")
 
         info = self._quote_summary(symbol)
         fundamentals = _merge_market_fundamentals(symbol, self._fundamentals(info, meta))
+        volumes = [float(value) for value in quote.get("volume", []) if value is not None]
+        volume_surge = _surge_ratio(volumes)
+        if volume_surge is not None:
+            fundamentals["volumeSurge20"] = round(volume_surge, 2)
         price = float(meta.get("regularMarketPrice") or closes[-1])
         previous = closes[-2] if len(closes) > 1 else price
         change = ((price - previous) / previous * 100) if previous else 0

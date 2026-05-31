@@ -597,8 +597,14 @@ function scoreWeightLabel(item: { weight: number; baseWeight?: number; available
   return base !== effective ? `${base}% -> ${effective}%` : `${effective}%`;
 }
 
-function predictionScoreLabel(kind: 'opportunity' | 'downside', pick: Pick) {
-  const value = kind === 'opportunity' ? pick.opportunityScore : pick.downsideRiskScore;
+function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pullback', pick: Pick) {
+  const value = kind === 'opportunity'
+    ? pick.opportunityScore
+    : kind === 'downside'
+      ? pick.downsideRiskScore
+      : kind === 'setup'
+        ? pick.breakoutSetupScore
+        : pick.pullbackRiskScore;
   const score = value === undefined ? '-' : Number(value).toFixed(1);
   if (kind === 'opportunity') {
     if (locale.value === 'en') return `Advantage ${score}/100`;
@@ -607,6 +613,22 @@ function predictionScoreLabel(kind: 'opportunity' | 'downside', pick: Pick) {
     if (locale.value === 'ko') return `상대 우위 ${score}/100`;
     if (locale.value === 'nan-TW') return `相對優勢 ${score}/100`;
     return `相對優勢 ${score}/100`;
+  }
+  if (kind === 'setup') {
+    if (locale.value === 'en') return `Breakout setup ${score}/100`;
+    if (locale.value === 'zh-CN') return `突破 setup ${score}/100`;
+    if (locale.value === 'ja') return `ブレイク setup ${score}/100`;
+    if (locale.value === 'ko') return `돌파 setup ${score}/100`;
+    if (locale.value === 'nan-TW') return `突破 setup ${score}/100`;
+    return `突破 setup ${score}/100`;
+  }
+  if (kind === 'pullback') {
+    if (locale.value === 'en') return `Pullback risk ${score}/100`;
+    if (locale.value === 'zh-CN') return `回落风险 ${score}/100`;
+    if (locale.value === 'ja') return `反落リスク ${score}/100`;
+    if (locale.value === 'ko') return `되돌림 리스크 ${score}/100`;
+    if (locale.value === 'nan-TW') return `回落風險 ${score}/100`;
+    return `回落風險 ${score}/100`;
   }
   if (locale.value === 'en') return `Downside risk ${score}/100`;
   if (locale.value === 'zh-CN') return `下跌风险 ${score}/100`;
@@ -659,6 +681,30 @@ function reasonLabel(reason: ReasonCode) {
     if (locale.value === 'nan-TW') return `當日跌幅 ${params.change}%，價格未徛穩前先觀察。`;
     return `當日跌幅 ${params.change}%，價格未企穩前只能觀察。`;
   }
+  if (reason.key === 'overheatedPriceAction') {
+    if (locale.value === 'en') return `Price is already up ${params.change}%, with pullback risk at ${params.risk}/100; new buying is blocked.`;
+    if (locale.value === 'zh-CN') return `股价已上涨 ${params.change}%，回落风险 ${params.risk}/100，不把涨停后追高判为买入。`;
+    if (locale.value === 'ja') return `株価はすでに ${params.change}% 上昇、反落リスクは ${params.risk}/100 のため新規買いを抑制します。`;
+    if (locale.value === 'ko') return `이미 ${params.change}% 상승했고 되돌림 리스크가 ${params.risk}/100이므로 신규 추격 매수로 보지 않습니다.`;
+    if (locale.value === 'nan-TW') return `股價已經漲 ${params.change}%，回落風險 ${params.risk}/100，毋當做追高買入。`;
+    return `股價已上漲 ${params.change}%，回落風險 ${params.risk}/100，不把漲停後追高判為買入。`;
+  }
+  if (reason.key === 'pullbackRisk') {
+    if (locale.value === 'en') return `Pullback risk is elevated at ${params.risk}/100; wait for follow-through or a controlled reset.`;
+    if (locale.value === 'zh-CN') return `回落风险偏高（${params.risk}/100），等待承接确认或有控制的回踩。`;
+    if (locale.value === 'ja') return `反落リスクが ${params.risk}/100 と高めです。追随買いより確認を待ちます。`;
+    if (locale.value === 'ko') return `되돌림 리스크가 ${params.risk}/100으로 높아 후속 확인을 기다립니다.`;
+    if (locale.value === 'nan-TW') return `回落風險偏懸（${params.risk}/100），等承接確認抑是有控制的回踩。`;
+    return `回落風險偏高（${params.risk}/100），等待承接確認或有控制的回踩。`;
+  }
+  if (reason.key === 'breakoutSetup') {
+    if (locale.value === 'en') return `Early breakout setup scores ${params.score}/100 from price and volume confirmation.`;
+    if (locale.value === 'zh-CN') return `早期突破 setup ${params.score}/100，来自价格与成交量确认。`;
+    if (locale.value === 'ja') return `初期ブレイクアウト設定は ${params.score}/100、価格と出来高の確認に基づきます。`;
+    if (locale.value === 'ko') return `초기 돌파 setup은 ${params.score}/100으로 가격과 거래량 확인이 있습니다.`;
+    if (locale.value === 'nan-TW') return `早期突破 setup ${params.score}/100，有價格佮成交量確認。`;
+    return `早期突破 setup ${params.score}/100，來自價格與成交量確認。`;
+  }
   if (reason.key === 'clearsBuyThreshold') {
     if (locale.value === 'en') return 'Composite score clears the buy threshold under the selected strategy.';
     if (locale.value === 'zh-CN') return '综合评分已通过当前策略的买入门槛。';
@@ -668,12 +714,12 @@ function reasonLabel(reason: ReasonCode) {
     return '綜合評分已通過目前策略的買入門檻。';
   }
   if (reason.key === 'rankedTopOpportunity') {
-    if (locale.value === 'en') return `Ranked #${params.rank} among strict quality candidates in this scan.`;
-    if (locale.value === 'zh-CN') return `本次扫描在严格优质候选中排名第 ${params.rank}。`;
-    if (locale.value === 'ja') return `今回の厳格な高品質候補で第 ${params.rank} 位です。`;
-    if (locale.value === 'ko') return `이번 엄격한 우량 후보 중 ${params.rank}위입니다.`;
-    if (locale.value === 'nan-TW') return `這擺掃描佇嚴格優質候選內排名第 ${params.rank}。`;
-    return `本次掃描在嚴格優質候選中排名第 ${params.rank}。`;
+    if (locale.value === 'en') return `Ranked #${params.rank} among buy candidates in this scan.`;
+    if (locale.value === 'zh-CN') return `本次扫描在买入候选中排名第 ${params.rank}。`;
+    if (locale.value === 'ja') return `今回の買い候補で第 ${params.rank} 位です。`;
+    if (locale.value === 'ko') return `이번 매수 후보 중 ${params.rank}위입니다.`;
+    if (locale.value === 'nan-TW') return `這擺掃描佇買入候選內排名第 ${params.rank}。`;
+    return `本次掃描在買入候選中排名第 ${params.rank}。`;
   }
   if (locale.value === 'en') return 'Composite score is not strong enough for a high-conviction entry.';
   if (locale.value === 'zh-CN') return '综合评分暂不足以支持高信心进场。';
@@ -698,6 +744,7 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
   const negativeScore = Number(p.negativeScore ?? 0).toFixed(1);
   const netScore = signedScore(p.netScore);
   const change = Number(p.change ?? 0).toFixed(1);
+  const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
   switch (point.key) {
     case 'buySummary':
       return `會使買入：總分 ${p.score}/100，這个方案相對有力。`;
@@ -719,6 +766,8 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
       return `動能偏弱，只有 ${score}/100，價格未確認前毋通追高。`;
     case 'watchBreakout':
       return '觀察動能能否提升到 60/100 以上。';
+    case 'breakoutSetup':
+      return `早期突破 setup ${score}/100，已有價格佮成交量確認。`;
     case 'valuationSupport':
       return `估值分 ${score}/100，價格相對未明顯過貴。`;
     case 'expensiveValuation':
@@ -735,6 +784,10 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
       return `當日跌幅 ${change}%，大跌狀態袂當判做會使買入。`;
     case 'priceActionWeak':
       return `當日跌幅 ${change}%，價格未徛穩前先觀察。`;
+    case 'overheatedPriceAction':
+      return `股價已經漲 ${change}%，有追高回落風險。`;
+    case 'pullbackRisk':
+      return `回落風險 ${pullbackRisk}/100，愛等承接確認抑是有控制的回踩。`;
     case 'qualitySupport':
       return `基本面品質 ${score}/100，對中期持有有支撐。`;
     case 'weakQuality':
@@ -823,6 +876,8 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
       return `當日跌幅 ${change}%，避免接跌停或急跌中的股票。`;
     case 'actionWaitPriceStabilization':
       return `當日跌幅 ${change}%，等待價格企穩才重新評估。`;
+    case 'actionWaitPullback':
+      return `回落風險 ${pullbackRisk}/100，等回踩守穩抑是隔日承接確認。`;
     case 'actionRequireNewsEvidence':
       return '需要新的公司級新聞證據，才適合做高信心判斷。';
     default:
@@ -839,6 +894,7 @@ function pointLabel(point: DecisionPoint) {
   const negativeScore = Number(p.negativeScore ?? 0).toFixed(1);
   const netScore = signedScore(p.netScore);
   const change = Number(p.change ?? 0).toFixed(1);
+  const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
   if (locale.value === 'nan-TW') {
     return nanDecisionPointLabel(point, score, count, hours);
   }
@@ -894,6 +950,11 @@ function pointLabel(point: DecisionPoint) {
       'zh-CN': `观察动能能否提升到 60/100 以上。`,
       'zh-TW': `觀察動能能否提升到 60/100 以上。`
     },
+    breakoutSetup: {
+      en: `Early breakout setup scores ${score}/100 with price and volume confirmation.`,
+      'zh-CN': `早期突破 setup ${score}/100，已有价格与成交量确认。`,
+      'zh-TW': `早期突破 setup ${score}/100，已有價格與成交量確認。`
+    },
     valuationSupport: {
       en: `Valuation score is healthy at ${score}/100.`,
       'zh-CN': `估值分 ${score}/100，价格相对没有明显过贵。`,
@@ -933,6 +994,16 @@ function pointLabel(point: DecisionPoint) {
       en: `Price fell ${change}% today; wait for stabilization before considering entry.`,
       'zh-CN': `当日跌幅 ${change}%，价格企稳前只适合观察。`,
       'zh-TW': `當日跌幅 ${change}%，價格企穩前只適合觀察。`
+    },
+    overheatedPriceAction: {
+      en: `Price is already up ${change}%; this is treated as chase risk, not a fresh buy setup.`,
+      'zh-CN': `股价已上涨 ${change}%，这属于追高回落风险，不算新的买入 setup。`,
+      'zh-TW': `股價已上漲 ${change}%，這屬於追高回落風險，不算新的買入 setup。`
+    },
+    pullbackRisk: {
+      en: `Pullback risk is ${pullbackRisk}/100; wait for follow-through or a controlled reset.`,
+      'zh-CN': `回落风险 ${pullbackRisk}/100，等待承接确认或有控制的回踩。`,
+      'zh-TW': `回落風險 ${pullbackRisk}/100，等待承接確認或有控制的回踩。`
     },
     qualitySupport: {
       en: `Quality score is strong at ${score}/100.`,
@@ -1153,6 +1224,11 @@ function pointLabel(point: DecisionPoint) {
       en: `Wait for price stabilization after today's ${change}% drop.`,
       'zh-CN': `当日跌幅 ${change}%，等待价格企稳后再重新评估。`,
       'zh-TW': `當日跌幅 ${change}%，等待價格企穩後再重新評估。`
+    },
+    actionWaitPullback: {
+      en: `Do not chase while pullback risk is ${pullbackRisk}/100; wait for a reset or next-session support.`,
+      'zh-CN': `回落风险 ${pullbackRisk}/100，不追高；等待回踩或隔日承接确认。`,
+      'zh-TW': `回落風險 ${pullbackRisk}/100，不追高；等待回踩或隔日承接確認。`
     },
     actionRequireNewsEvidence: {
       en: 'Require fresh company-specific news before making a strong call.',
@@ -1643,7 +1719,8 @@ async function runAnalysis() {
       markets: selectedMarkets.value.length ? selectedMarkets.value : defaultMarkets,
       symbols: symbols.value,
       strategyId: useCustom.value ? undefined : selectedStrategyId.value,
-      customWeights: useCustom.value ? { ...customWeights } : undefined
+      customWeights: useCustom.value ? { ...customWeights } : undefined,
+      refresh: true
     }, handleAnalysisEvent, { signal: controller.signal });
   } catch (cause) {
     error.value = isAnalysisAbort(cause) ? t.value.scanCancelled : (cause instanceof Error ? cause.message : 'Unknown error');
@@ -1957,7 +2034,9 @@ onUnmounted(() => {
               <span>{{ verdictLabel(pick.verdict) }}</span>
               <span>{{ t.confidence }} {{ pick.confidence }}%</span>
               <span>{{ predictionScoreLabel('opportunity', pick) }}</span>
+              <span>{{ predictionScoreLabel('setup', pick) }}</span>
               <span>{{ predictionScoreLabel('downside', pick) }}</span>
+              <span>{{ predictionScoreLabel('pullback', pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
             </div>
 

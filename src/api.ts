@@ -42,6 +42,9 @@ export interface ReasonCode {
     | 'belowThreshold'
     | 'severePriceDrop'
     | 'weakPriceAction'
+    | 'overheatedPriceAction'
+    | 'pullbackRisk'
+    | 'breakoutSetup'
     | 'clearsBuyThreshold'
     | 'notHighConviction'
     | 'rankedTopOpportunity';
@@ -69,6 +72,7 @@ export interface DecisionPoint {
     | 'momentumSupport'
     | 'weakMomentum'
     | 'watchBreakout'
+    | 'breakoutSetup'
     | 'valuationSupport'
     | 'expensiveValuation'
     | 'watchValuation'
@@ -77,6 +81,8 @@ export interface DecisionPoint {
     | 'watchRisk'
     | 'priceActionSevereDrop'
     | 'priceActionWeak'
+    | 'overheatedPriceAction'
+    | 'pullbackRisk'
     | 'qualitySupport'
     | 'weakQuality'
     | 'watchNewsFlow'
@@ -121,6 +127,7 @@ export interface DecisionPoint {
     | 'actionRespectRisk'
     | 'actionAvoidLimitDown'
     | 'actionWaitPriceStabilization'
+    | 'actionWaitPullback'
     | 'actionRequireNewsEvidence';
   params: Record<string, string | number>;
 }
@@ -186,9 +193,13 @@ export interface Pick {
   score: number;
   opportunityScore?: number;
   downsideRiskScore?: number;
+  breakoutSetupScore?: number;
+  pullbackRiskScore?: number;
   prediction?: {
     opportunityScore: number;
     downsideRiskScore: number;
+    breakoutSetupScore?: number;
+    pullbackRiskScore?: number;
     edge: number;
   };
   verdict: Verdict;
@@ -372,6 +383,8 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
       change: 1.8,
       currency: 'TWD',
       score: 86,
+      breakoutSetupScore: 78,
+      pullbackRiskScore: 28,
       verdict: 'buy',
       confidence: 82,
       reasons: ['Demo mode: quality, momentum, and fresh news signals are supportive.'],
@@ -457,6 +470,8 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
       change: -0.4,
       currency: 'USD',
       score: 64,
+      breakoutSetupScore: 42,
+      pullbackRiskScore: 36,
       verdict: 'watch',
       confidence: 61,
       reasons: ['Demo mode: quality remains strong, but momentum confirmation is still pending.'],
@@ -538,6 +553,7 @@ export async function analyzeStocks(payload: {
   symbols?: string[];
   strategyId?: string;
   customWeights?: StrategyWeights;
+  refresh?: boolean;
 }): Promise<AnalysisResponse> {
   if (staticDemoBuild || usingStaticFallback) {
     return fallbackAnalysis(payload);
@@ -563,6 +579,7 @@ export async function analyzeStocksStream(
     symbols?: string[];
     strategyId?: string;
     customWeights?: StrategyWeights;
+    refresh?: boolean;
   },
   onEvent: (event: AnalysisStreamEvent) => void,
   options: { signal?: AbortSignal } = {}

@@ -807,7 +807,7 @@ button:disabled {
 
 .filter-segment {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   overflow: hidden;
   border: 1px solid #cfd8ce;
   border-radius: 8px;
@@ -824,7 +824,8 @@ button:disabled {
   color: #35423a;
   font-size: 0.84rem;
   font-weight: 850;
-  white-space: nowrap;
+  line-height: 1.15;
+  white-space: normal;
 }
 
 .filter-segment button:last-child {

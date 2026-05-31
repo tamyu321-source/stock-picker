@@ -77,9 +77,9 @@ class CachedMarketDataProvider:
         self.provider = provider
         self.cache = TtlCache(ttl_seconds=ttl_seconds, max_entries=max_entries)
 
-    def fetch(self, symbol: str) -> MarketSnapshot:
+    def fetch(self, symbol: str, refresh: bool = False) -> MarketSnapshot:
         key = str(symbol).upper()
-        cached = self.cache.get(key)
+        cached = None if refresh else self.cache.get(key)
         if cached is not None:
             return _copy_snapshot(cached)
 
@@ -101,9 +101,9 @@ class CachedNewsCrawler:
         self.crawler = crawler
         self.cache = TtlCache(ttl_seconds=ttl_seconds, max_entries=max_entries)
 
-    def fetch(self, symbol: str, name: str, limit: int = 8) -> list[Article]:
+    def fetch(self, symbol: str, name: str, limit: int = 8, refresh: bool = False) -> list[Article]:
         key = (str(symbol).upper(), " ".join(str(name).lower().split()), int(limit))
-        cached = self.cache.get(key)
+        cached = None if refresh else self.cache.get(key)
         if cached is not None:
             return list(cached)
 
