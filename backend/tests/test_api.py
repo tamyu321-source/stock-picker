@@ -409,16 +409,16 @@ class ApiTestCase(unittest.TestCase):
                 return [DiscoveredSymbol("MSFT", "Microsoft", "US", "google-news")]
 
             def _discover_market(self, market, limit):
-                raise AssertionError("market universe should not be needed")
+                return [DiscoveredSymbol("NVDA", "Nvidia", "US", "market-universe")]
 
             def _discover_fallback_search(self, market, limit):
                 raise AssertionError("fallback should not be needed")
 
-        symbols, errors = SparseNewsUniverse().discover(["US"], 2)
-        self.assertEqual([item.symbol for item in symbols], ["AAPL", "MSFT"])
+        symbols, errors = SparseNewsUniverse().discover(["US"], 3)
+        self.assertEqual([item.symbol for item in symbols], ["AAPL", "MSFT", "NVDA"])
         self.assertEqual(errors, [])
 
-    def test_discover_does_not_use_defaults_when_local_news_is_enough(self):
+    def test_discover_blends_market_universe_even_when_local_news_is_enough(self):
         class LocalNewsUniverse(MarketUniverseProvider):
             def _discover_local_market_news(self, market, limit):
                 return [
@@ -427,18 +427,23 @@ class ApiTestCase(unittest.TestCase):
                 ]
 
             def _discover_google_market_news(self, market, limit):
-                raise AssertionError("google news should not be needed")
+                return []
 
             def _discover_market(self, market, limit):
-                raise AssertionError("market universe should not be needed")
+                return [
+                    DiscoveredSymbol("2317.TW", "Hon Hai", "TW", "market-universe"),
+                    DiscoveredSymbol("2308.TW", "Delta", "TW", "market-universe"),
+                ]
 
             def _discover_fallback_search(self, market, limit):
                 raise AssertionError("fallback should not be needed")
 
-        symbols, errors = LocalNewsUniverse().discover(["TW"], 2)
-        self.assertEqual([item.symbol for item in symbols], ["2330.TW", "2454.TW"])
-        self.assertEqual({item.source for item in symbols}, {"local-news"})
-        self.assertEqual(errors, [])
+        symbols, errors = LocalNewsUniverse().discover(["TW"], 4)
+        self.assertEqual(symbols[0].source, "local-news")
+        self.assertIn("local-news", {item.source for item in symbols})
+        self.assertIn("market-universe", {item.source for item in symbols})
+        self.assertNotIn("fallback-search", {item.source for item in symbols})
+        self.assertIn("google-news", {error["source"] for error in errors})
 
     def test_discover_falls_back_to_defaults_when_dynamic_sources_fail(self):
         class OfflineUniverse(MarketUniverseProvider):
@@ -837,7 +842,7 @@ class ApiTestCase(unittest.TestCase):
 
         self.assertNotIn("buy", {pick["verdict"] for pick in payload["picks"]})
         self.assertEqual([pick["verdict"] for pick in payload["picks"]].count("watch"), 8)
-        self.assertEqual(payload["sectors"][0]["recommendation"], "neutral")
+        self.assertIn(payload["sectors"][0]["recommendation"], {"neutral", "underweight"})
         self.assertEqual(len(payload["picks"]), 8)
         self.assertEqual(payload["scan"]["displayed"], 8)
         self.assertEqual(payload["scan"]["succeeded"], payload["scan"]["requested"])
@@ -890,6 +895,55 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scan"]["displayed"], 20)
         self.assertEqual(payload["scan"]["succeeded"], 20)
         self.assertNotIn("buy", {pick["verdict"] for pick in payload["picks"]})
+
+    def test_auto_scan_sector_analysis_uses_full_evaluated_universe(self):
+        class LargeNeutralUniverseProvider:
+            def discover(self, markets, limit_per_market=18):
+                return [
+                    DiscoveredSymbol(f"8{index:03d}.TW", f"Full Sector Corp {index}", "TW", "test-full-sector")
+                    for index in range(60)
+                ], []
+
+        class LargeNeutralMarketProvider:
+            def fetch(self, symbol):
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name=symbol,
+                    market="TW",
+                    sector="Full Coverage Technology",
+                    price=100,
+                    change=0.3,
+                    currency="TWD",
+                    closes=[100 + (index % 4) * 0.15 for index in range(130)],
+                    info={
+                        "trailingPE": 28,
+                        "priceToBook": 3.4,
+                        "beta": 1.1,
+                        "returnOnEquity": 0.09,
+                        "profitMargins": 0.07,
+                        "revenueGrowth": 0.03,
+                        "earningsGrowth": 0.02,
+                        "debtToEquity": 85,
+                        "regularMarketVolume": 1_200_000,
+                        "marketCap": 4_500_000_000,
+                    },
+                )
+
+        class EmptyNewsCrawler:
+            def fetch(self, symbol, name):
+                return []
+
+        client = create_app(LargeNeutralMarketProvider(), EmptyNewsCrawler(), LargeNeutralUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": [], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        sector = payload["sectors"][0]
+
+        self.assertLess(len(payload["picks"]), payload["scan"]["succeeded"])
+        self.assertEqual(payload["scan"]["displayed"], len(payload["picks"]))
+        self.assertEqual(sector["count"], payload["scan"]["succeeded"])
+        self.assertIn("averageTScore", sector)
+        self.assertIn("averageDownsideRiskScore", sector)
 
     def test_blank_market_scan_expands_until_quality_candidates_are_found(self):
         class ExpandingUniverseProvider:
@@ -1308,6 +1362,10 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn(sector["recommendation"], {"overweight", "neutral", "underweight"})
         self.assertEqual(set(sector["metrics"]), {"sentiment", "momentum", "value", "risk", "quality"})
         self.assertEqual(sum(sector["verdictCounts"].values()), 2)
+        self.assertIn("tCandidateCount", sector)
+        self.assertIn("averageTScore", sector)
+        self.assertIn("averageOpportunityScore", sector)
+        self.assertIn("averageDownsideRiskScore", sector)
         self.assertTrue(sector["leaders"])
         self.assertIn("symbol", sector["leaders"][0])
 

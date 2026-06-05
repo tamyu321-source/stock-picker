@@ -1510,13 +1510,39 @@ function sectorMarketMixLabel(sector: SectorAnalysis) {
   return sector.marketMix.map((item) => `${item.market} ${item.count}`).join(' · ');
 }
 
+function sectorTLabel(sector: SectorAnalysis) {
+  const count = sector.tCandidateCount ?? 0;
+  const score = Number(sector.averageTScore ?? 0).toFixed(1);
+  if (locale.value === 'en') return `T candidates ${count} · avg ${score}`;
+  if (locale.value === 'zh-CN') return `做T候选 ${count} · 均分 ${score}`;
+  if (locale.value === 'ja') return `T候補 ${count} · 平均 ${score}`;
+  if (locale.value === 'ko') return `T 후보 ${count} · 평균 ${score}`;
+  if (locale.value === 'nan-TW') return `做T候選 ${count} · 均分 ${score}`;
+  return `做T候選 ${count} · 均分 ${score}`;
+}
+
+function sectorRiskLabel(sector: SectorAnalysis) {
+  const score = Number(sector.averageDownsideRiskScore ?? 0).toFixed(1);
+  if (locale.value === 'en') return `Avg downside ${score}`;
+  if (locale.value === 'zh-CN') return `平均下跌风险 ${score}`;
+  if (locale.value === 'ja') return `平均下落リスク ${score}`;
+  if (locale.value === 'ko') return `평균 하락 리스크 ${score}`;
+  if (locale.value === 'nan-TW') return `平均下跌風險 ${score}`;
+  return `平均下跌風險 ${score}`;
+}
+
 function sectorInsight(sector: SectorAnalysis) {
   const ranked = weightKeys
     .map((factor) => ({ factor, score: sectorMetricValue(sector, factor) }))
     .sort((left, right) => right.score - left.score);
   const strongest = ranked[0];
   const weakest = ranked[ranked.length - 1];
+  const tCount = sector.tCandidateCount ?? 0;
+  const tScore = Number(sector.averageTScore ?? 0);
   if (locale.value === 'en') {
+    if (sector.recommendation === 'overweight' && tCount > 0) {
+      return `${factorLabel(strongest.factor)} leads at ${strongest.score.toFixed(1)}/100, with ${tCount} T candidate(s) and average T score ${tScore.toFixed(1)}.`;
+    }
     if (sector.recommendation === 'overweight') {
       return `${factorLabel(strongest.factor)} leads at ${strongest.score.toFixed(1)}/100, while ${factorLabel(weakest.factor)} is the main check.`;
     }
@@ -1526,6 +1552,9 @@ function sectorInsight(sector: SectorAnalysis) {
     return `${factorLabel(strongest.factor)} is supportive, but ${factorLabel(weakest.factor)} still needs confirmation.`;
   }
   if (locale.value === 'zh-CN') {
+    if (sector.recommendation === 'overweight' && tCount > 0) {
+      return `${factorLabel(strongest.factor)} 最强，达到 ${strongest.score.toFixed(1)}/100；板块内有 ${tCount} 个做T候选，平均 T 分 ${tScore.toFixed(1)}。`;
+    }
     if (sector.recommendation === 'overweight') {
       return `${factorLabel(strongest.factor)} 最强，达到 ${strongest.score.toFixed(1)}/100；${factorLabel(weakest.factor)} 是主要检查点。`;
     }
@@ -1535,6 +1564,9 @@ function sectorInsight(sector: SectorAnalysis) {
     return `${factorLabel(strongest.factor)} 有支撑，但 ${factorLabel(weakest.factor)} 仍需确认。`;
   }
   if (locale.value === 'ja') {
+    if (sector.recommendation === 'overweight' && tCount > 0) {
+      return `${factorLabel(strongest.factor)} が ${strongest.score.toFixed(1)}/100 でリードし、T候補は ${tCount} 件、平均Tスコアは ${tScore.toFixed(1)} です。`;
+    }
     if (sector.recommendation === 'overweight') {
       return `${factorLabel(strongest.factor)} が ${strongest.score.toFixed(1)}/100 でリードし、${factorLabel(weakest.factor)} が主な確認点です。`;
     }
@@ -1544,6 +1576,9 @@ function sectorInsight(sector: SectorAnalysis) {
     return `${factorLabel(strongest.factor)} は支えになりますが、${factorLabel(weakest.factor)} はまだ確認が必要です。`;
   }
   if (locale.value === 'ko') {
+    if (sector.recommendation === 'overweight' && tCount > 0) {
+      return `${factorLabel(strongest.factor)}가 ${strongest.score.toFixed(1)}/100으로 가장 강하고, T 후보는 ${tCount}개, 평균 T 점수는 ${tScore.toFixed(1)}입니다.`;
+    }
     if (sector.recommendation === 'overweight') {
       return `${factorLabel(strongest.factor)}가 ${strongest.score.toFixed(1)}/100으로 가장 강하고, ${factorLabel(weakest.factor)}가 주요 점검 항목입니다.`;
     }
@@ -1553,6 +1588,9 @@ function sectorInsight(sector: SectorAnalysis) {
     return `${factorLabel(strongest.factor)}는 지지 요인이지만 ${factorLabel(weakest.factor)}는 추가 확인이 필요합니다.`;
   }
   if (locale.value === 'nan-TW') {
+    if (sector.recommendation === 'overweight' && tCount > 0) {
+      return `${factorLabel(strongest.factor)} 較強，有 ${strongest.score.toFixed(1)}/100；板塊內有 ${tCount} 个做T候選，平均 T 分 ${tScore.toFixed(1)}。`;
+    }
     if (sector.recommendation === 'overweight') {
       return `${factorLabel(strongest.factor)} 較強，有 ${strongest.score.toFixed(1)}/100；${factorLabel(weakest.factor)} 是主要檢查點。`;
     }
@@ -1560,6 +1598,9 @@ function sectorInsight(sector: SectorAnalysis) {
       return `${factorLabel(weakest.factor)} 拖累較明顯，只有 ${weakest.score.toFixed(1)}/100，板塊倉位愛收斂。`;
     }
     return `${factorLabel(strongest.factor)} 有支撐，毋過 ${factorLabel(weakest.factor)} 猶愛確認。`;
+  }
+  if (sector.recommendation === 'overweight' && tCount > 0) {
+    return `${factorLabel(strongest.factor)} 最強，達到 ${strongest.score.toFixed(1)}/100；板塊內有 ${tCount} 個做T候選，平均 T 分 ${tScore.toFixed(1)}。`;
   }
   if (sector.recommendation === 'overweight') {
     return `${factorLabel(strongest.factor)} 最強，達到 ${strongest.score.toFixed(1)}/100；${factorLabel(weakest.factor)} 是主要檢查點。`;
@@ -2362,6 +2403,8 @@ onUnmounted(() => {
               <span>{{ t.buy }} {{ sectorVerdictCount(sector, 'buy') }}</span>
               <span>{{ t.watch }} {{ sectorVerdictCount(sector, 'watch') }}</span>
               <span>{{ t.sell }} {{ sectorVerdictCount(sector, 'sell') }}</span>
+              <span>{{ sectorTLabel(sector) }}</span>
+              <span>{{ sectorRiskLabel(sector) }}</span>
               <span>{{ t.confidence }} {{ sector.confidence }}%</span>
               <span>{{ t.sectorMarketMix }} {{ sectorMarketMixLabel(sector) }}</span>
             </div>

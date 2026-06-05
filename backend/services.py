@@ -12,12 +12,13 @@ from backend.universe import DiscoveredSymbol, MarketUniverseProvider
 
 
 FACTOR_ORDER = ["sentiment", "momentum", "value", "risk", "quality"]
-AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET = 72
-AUTO_SCAN_EXPANSION_LIMITS_PER_MARKET = (72, 120, 180)
+AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET = 96
+AUTO_SCAN_EXPANSION_LIMITS_PER_MARKET = (96, 160, 240)
 AUTO_SCAN_TARGET_QUALITY_BUYS = 4
-AUTO_SCAN_RESULT_LIMIT = 36
-AUTO_SCAN_BUY_LIMIT = 12
-AUTO_SCAN_TRADE_LIMIT = 10
+AUTO_SCAN_TARGET_ACTIONABLE_CANDIDATES = 10
+AUTO_SCAN_RESULT_LIMIT = 48
+AUTO_SCAN_BUY_LIMIT = 14
+AUTO_SCAN_TRADE_LIMIT = 14
 AUTO_SCAN_SELL_LIMIT = 8
 AUTO_SCAN_WATCH_LIMIT = 16
 SEVERE_PRICE_DROP_PCT = -8.5
@@ -982,14 +983,29 @@ def _sector_id(name: str) -> str:
     return "-".join(part for part in cleaned.split("-") if part) or "unclassified"
 
 
-def _sector_recommendation(score: float, metrics: dict[str, float], verdict_counts: dict[str, int], count: int) -> str:
+def _sector_recommendation(
+    score: float,
+    metrics: dict[str, float],
+    verdict_counts: dict[str, int],
+    count: int,
+    t_candidate_count: int = 0,
+    average_t_score: float = 0.0,
+    average_downside_score: float = 0.0,
+) -> str:
     sell_ratio = verdict_counts.get("sell", 0) / count if count else 0
     buy_ratio = verdict_counts.get("buy", 0) / count if count else 0
-    if buy_ratio > 0 and score >= 66 and metrics["risk"] >= 48 and metrics["sentiment"] >= 52 and sell_ratio < 0.34:
-        return "overweight"
-    if score < 54 or metrics["risk"] < 38 or sell_ratio >= 0.45:
+    t_ratio = t_candidate_count / count if count else 0
+    if sell_ratio >= 0.42 or average_downside_score >= 68 or score < 52 or metrics["risk"] < 35:
         return "underweight"
-    if buy_ratio >= 0.45 and metrics["quality"] >= 58 and metrics["momentum"] >= 55:
+    if (
+        score >= 62
+        and metrics["risk"] >= 45
+        and metrics["sentiment"] >= 48
+        and average_downside_score < 60
+        and (buy_ratio > 0 or t_ratio >= 0.18 or average_t_score >= 62)
+    ):
+        return "overweight"
+    if buy_ratio >= 0.35 and metrics["quality"] >= 58 and metrics["momentum"] >= 55:
         return "overweight"
     return "neutral"
 
@@ -998,12 +1014,15 @@ def _sector_priority(sector: dict) -> float:
     metrics = sector["metrics"]
     sell_count = sector["verdictCounts"].get("sell", 0)
     sell_ratio = sell_count / sector["count"] if sector["count"] else 0
+    t_ratio = sector.get("tCandidateCount", 0) / sector["count"] if sector["count"] else 0
     return round(
-        sector["score"] * 0.48
+        sector["score"] * 0.44
         + metrics["quality"] * 0.16
         + metrics["momentum"] * 0.14
         + metrics["risk"] * 0.12
         + metrics["sentiment"] * 0.10
+        + float(sector.get("averageTScore") or 0) * 0.08
+        + t_ratio * 8
         - sell_ratio * 18,
         3,
     )
@@ -1015,9 +1034,10 @@ def _apply_relative_sector_recommendations(sectors: list[dict]) -> None:
     candidates = [
         sector
         for sector in sectors
-        if sector["verdictCounts"].get("buy", 0) > 0
+        if (sector["verdictCounts"].get("buy", 0) > 0 or sector.get("tCandidateCount", 0) > 0)
         and sector["score"] >= 62
         and sector["metrics"]["risk"] >= 45
+        and float(sector.get("averageDownsideRiskScore") or 0) < 64
         and sector["verdictCounts"].get("sell", 0) < sector["count"]
     ]
     if candidates:
@@ -1031,7 +1051,51 @@ def _constituent_summary(pick: dict) -> dict:
         "market": pick["market"],
         "score": pick["score"],
         "verdict": pick["verdict"],
+        "tScore": pick.get("tScore"),
+        "tSuitability": (pick.get("tPlan") or {}).get("suitability"),
     }
+
+
+def _sector_score(sector_picks: list[dict], metrics: dict[str, float]) -> float:
+    base_score = _average([float(pick["score"]) for pick in sector_picks])
+    opportunity_score = _average([float(pick.get("opportunityScore") or 0) for pick in sector_picks])
+    t_score = _average([float(pick.get("tScore") or 0) for pick in sector_picks])
+    downside_score = _average([float(pick.get("downsideRiskScore") or 0) for pick in sector_picks])
+    pullback_score = _average([float(pick.get("pullbackRiskScore") or 0) for pick in sector_picks])
+    buy_ratio = sum(1 for pick in sector_picks if pick["verdict"] == "buy") / len(sector_picks)
+    t_ratio = sum(1 for pick in sector_picks if _is_t_trade_candidate(pick)) / len(sector_picks)
+    return round(
+        _clamp_score(
+            base_score * 0.48
+            + opportunity_score * 0.18
+            + t_score * 0.14
+            + metrics["risk"] * 0.06
+            + metrics["sentiment"] * 0.06
+            + buy_ratio * 7
+            + t_ratio * 6
+            - downside_score * 0.10
+            - pullback_score * 0.07
+        ),
+        1,
+    )
+
+
+def _sector_leader_priority(pick: dict) -> float:
+    return round(
+        max(_investment_priority(pick), float(pick.get("tScore") or 0))
+        + float(pick.get("opportunityScore") or 0) * 0.08
+        - float(pick.get("downsideRiskScore") or 0) * 0.04,
+        3,
+    )
+
+
+def _sector_laggard_priority(pick: dict) -> float:
+    return round(
+        _sell_priority(pick)
+        + float(pick.get("pullbackRiskScore") or 0) * 0.18
+        + (12 if _is_overheated_price_jump(pick.get("change")) else 0),
+        3,
+    )
 
 
 def _sector_analysis(picks: list[dict]) -> list[dict]:
@@ -1045,36 +1109,55 @@ def _sector_analysis(picks: list[dict]) -> list[dict]:
             factor: _average([float(pick["metrics"].get(factor, 0)) for pick in sector_picks])
             for factor in FACTOR_ORDER
         }
-        score = _average([float(pick["score"]) for pick in sector_picks])
+        score = _sector_score(sector_picks, metrics)
         verdict_counts = {
             "buy": sum(1 for pick in sector_picks if pick["verdict"] == "buy"),
             "watch": sum(1 for pick in sector_picks if pick["verdict"] == "watch"),
             "sell": sum(1 for pick in sector_picks if pick["verdict"] == "sell"),
         }
+        t_candidate_count = sum(1 for pick in sector_picks if _is_t_trade_candidate(pick))
+        average_t_score = _average([float(pick.get("tScore") or 0) for pick in sector_picks])
+        average_downside_score = _average([float(pick.get("downsideRiskScore") or 0) for pick in sector_picks])
+        average_opportunity_score = _average([float(pick.get("opportunityScore") or 0) for pick in sector_picks])
         market_counts: dict[str, int] = {}
         for pick in sector_picks:
             market_counts[pick["market"]] = market_counts.get(pick["market"], 0) + 1
-        leaders = sorted(sector_picks, key=_investment_priority, reverse=True)[:3]
+        leaders = sorted(sector_picks, key=_sector_leader_priority, reverse=True)[:3]
         leader_symbols = {pick["symbol"] for pick in leaders}
         laggards = [
             pick
-            for pick in sorted(sector_picks, key=_sell_priority, reverse=True)
+            for pick in sorted(sector_picks, key=_sector_laggard_priority, reverse=True)
             if pick["symbol"] not in leader_symbols
         ][:3]
         count = len(sector_picks)
+        confidence = round(
+            min(
+                96,
+                35
+                + min(count, 30) * 1.4
+                + abs(score - 50) * 0.38
+                + metrics["quality"] * 0.08
+                + max(0, average_t_score - 50) * 0.12
+                - max(0, average_downside_score - 55) * 0.10,
+            )
+        )
         sectors.append(
             {
                 "id": _sector_id(name),
                 "name": name,
                 "score": score,
-                "recommendation": _sector_recommendation(score, metrics, verdict_counts, count),
-                "confidence": round(min(96, 42 + abs(score - 50) * 0.46 + min(count, 8) * 4 + metrics["quality"] * 0.12)),
+                "recommendation": _sector_recommendation(score, metrics, verdict_counts, count, t_candidate_count, average_t_score, average_downside_score),
+                "confidence": confidence,
                 "count": count,
                 "marketMix": [
                     {"market": market, "count": market_counts[market]}
                     for market in sorted(market_counts)
                 ],
                 "verdictCounts": verdict_counts,
+                "tCandidateCount": t_candidate_count,
+                "averageTScore": average_t_score,
+                "averageOpportunityScore": average_opportunity_score,
+                "averageDownsideRiskScore": average_downside_score,
                 "metrics": metrics,
                 "leaders": [_constituent_summary(pick) for pick in leaders],
                 "laggards": [_constituent_summary(pick) for pick in laggards],
@@ -1756,10 +1839,17 @@ def _quality_buy_count(picks: list[dict]) -> int:
     return sum(1 for pick in picks if pick.get("verdict") == "buy" and _is_buy_candidate(pick))
 
 
+def _actionable_candidate_count(picks: list[dict]) -> int:
+    return sum(1 for pick in picks if _is_buy_candidate(pick) or _is_t_trade_candidate(pick))
+
+
 def _next_auto_scan_limit(context: dict, picks: list[dict]) -> int | None:
     if not context["auto_scan"]:
         return None
-    if _quality_buy_count(picks) >= _auto_scan_quality_target(context):
+    if (
+        _quality_buy_count(picks) >= _auto_scan_quality_target(context)
+        and _actionable_candidate_count(picks) >= AUTO_SCAN_TARGET_ACTIONABLE_CANDIDATES
+    ):
         return None
     current_limit = int(context.get("discovery_limit") or AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET)
     for limit in AUTO_SCAN_EXPANSION_LIMITS_PER_MARKET:
@@ -1867,6 +1957,8 @@ def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
         "requested": len(context["symbols"]),
         "succeeded": context.get("evaluated", len(picks)),
         "displayed": len(picks),
+        "actionable": context.get("actionable", _actionable_candidate_count(picks)),
+        "qualityBuys": context.get("quality_buys", _quality_buy_count(picks)),
         "failed": len(errors),
         "discoveryErrors": context["discovery_errors"],
     }
@@ -1907,6 +1999,12 @@ def _finish_picks(picks: list[dict], auto_scan: bool = False) -> list[dict]:
     return display_picks
 
 
+def _refresh_scan_quality_context(context: dict, picks: list[dict]) -> None:
+    context["evaluated"] = len(picks)
+    context["quality_buys"] = _quality_buy_count(picks)
+    context["actionable"] = _actionable_candidate_count(picks)
+
+
 def _process_symbol_batch(symbols: list[DiscoveredSymbol], market_provider, news_crawler, weights: dict[str, float], refresh: bool = False) -> tuple[list[dict], list[dict]]:
     picks = []
     errors = []
@@ -1942,16 +2040,16 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
             errors.extend(batch_errors)
             evaluated_symbols.update(item.symbol for item in pending_symbols)
 
-        context["evaluated"] = len(picks)
         display_picks = _finish_picks(picks, context["auto_scan"])
-        next_limit = _next_auto_scan_limit(context, display_picks)
+        _refresh_scan_quality_context(context, picks)
+        next_limit = _next_auto_scan_limit(context, picks)
         if next_limit is None:
             break
         if _expand_auto_scan_symbols(context, next_limit) <= 0:
             break
         symbols = context["symbols"]
 
-    sectors = _sector_analysis(display_picks)
+    sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "markets": MARKETS,
@@ -1997,30 +2095,31 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                     try:
                         pick = future.result()
                         picks.append(pick)
-                        context["evaluated"] = len(picks)
                         display_picks = _finish_picks(picks, context["auto_scan"])
-                        sectors = _sector_analysis(display_picks)
+                        _refresh_scan_quality_context(context, picks)
+                        sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
                         rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
                         yield event("pick", pick=pick, picks=display_picks, sectors=sectors, rank=rank, scan=_scan_state(context, display_picks, errors))
                     except Exception as exc:
                         error_message = _friendly_data_error(symbol, exc)
                         errors.append({"symbol": symbol, "error": error_message})
                         display_picks = _finish_picks(picks, context["auto_scan"])
-                        yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(display_picks), scan=_scan_state(context, display_picks, errors))
+                        _refresh_scan_quality_context(context, picks)
+                        yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(picks if context["auto_scan"] else display_picks), scan=_scan_state(context, display_picks, errors))
             evaluated_symbols.update(item.symbol for item in pending_symbols)
 
-        context["evaluated"] = len(picks)
         display_picks = _finish_picks(picks, context["auto_scan"])
-        next_limit = _next_auto_scan_limit(context, display_picks)
+        _refresh_scan_quality_context(context, picks)
+        next_limit = _next_auto_scan_limit(context, picks)
         if next_limit is None:
             break
         if _expand_auto_scan_symbols(context, next_limit) <= 0:
             break
         symbols = context["symbols"]
 
-    context["evaluated"] = len(picks)
     display_picks = display_picks or _finish_picks(picks, context["auto_scan"])
-    sectors = _sector_analysis(display_picks)
+    _refresh_scan_quality_context(context, picks)
+    sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
     yield event(
         "complete",
         generatedAt=generated_at,

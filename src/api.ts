@@ -263,6 +263,8 @@ export interface SectorConstituent {
   market: Market;
   score: number;
   verdict: Verdict;
+  tScore?: number;
+  tSuitability?: TTradeSuitability;
 }
 
 export interface SectorAnalysis {
@@ -274,6 +276,10 @@ export interface SectorAnalysis {
   count: number;
   marketMix: Array<{ market: Market; count: number }>;
   verdictCounts: Record<Verdict, number>;
+  tCandidateCount?: number;
+  averageTScore?: number;
+  averageOpportunityScore?: number;
+  averageDownsideRiskScore?: number;
   metrics: StrategyWeights;
   leaders: SectorConstituent[];
   laggards: SectorConstituent[];
@@ -292,6 +298,8 @@ export interface AnalysisResponse {
     requested: number;
     succeeded: number;
     displayed?: number;
+    actionable?: number;
+    qualityBuys?: number;
     failed: number;
     discoveryErrors: Array<{ market: string; source?: string; query?: string; error: string }>;
   };
@@ -618,9 +626,13 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
           watch: picks.filter((pick) => pick.verdict === 'watch').length,
           sell: picks.filter((pick) => pick.verdict === 'sell').length
         },
+        tCandidateCount: picks.filter((pick) => pick.tPlan?.suitability === 'candidate').length,
+        averageTScore: Math.round((picks.reduce((total, pick) => total + Number(pick.tScore ?? 0), 0) / Math.max(1, picks.length)) * 10) / 10,
+        averageOpportunityScore: Math.round((picks.reduce((total, pick) => total + Number(pick.opportunityScore ?? 0), 0) / Math.max(1, picks.length)) * 10) / 10,
+        averageDownsideRiskScore: Math.round((picks.reduce((total, pick) => total + Number(pick.downsideRiskScore ?? 0), 0) / Math.max(1, picks.length)) * 10) / 10,
         metrics: { momentum: 67, value: 63, sentiment: 75, risk: 72, quality: 88 },
-        leaders: picks.slice(0, 1).map((pick) => ({ symbol: pick.symbol, name: pick.name, market: pick.market, score: pick.score, verdict: pick.verdict })),
-        laggards: picks.slice(1, 2).map((pick) => ({ symbol: pick.symbol, name: pick.name, market: pick.market, score: pick.score, verdict: pick.verdict }))
+        leaders: picks.slice(0, 1).map((pick) => ({ symbol: pick.symbol, name: pick.name, market: pick.market, score: pick.score, verdict: pick.verdict, tScore: pick.tScore, tSuitability: pick.tPlan?.suitability })),
+        laggards: picks.slice(1, 2).map((pick) => ({ symbol: pick.symbol, name: pick.name, market: pick.market, score: pick.score, verdict: pick.verdict, tScore: pick.tScore, tSuitability: pick.tPlan?.suitability }))
       }
     ],
     errors: [],

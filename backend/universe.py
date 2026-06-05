@@ -372,17 +372,14 @@ class MarketUniverseProvider:
         symbols: list[DiscoveredSymbol] = []
         errors: list[dict] = []
         for market in markets:
-            market_symbols: list[DiscoveredSymbol] = []
+            source_results: list[tuple[str, list[DiscoveredSymbol]]] = []
             for source, discover, empty_message in [
                 ("local-news", self._discover_local_market_news, "No recent company mentions were extracted from local market news."),
                 ("google-news", self._discover_google_market_news, "No recent company mentions were extracted from Google News."),
                 ("market-universe", self._discover_market, "No live market-universe symbols were returned."),
-                ("fallback-search", self._discover_fallback_search, "No fallback symbols were available."),
             ]:
-                if len(market_symbols) >= limit_per_market:
-                    break
                 try:
-                    candidates = discover(market, limit_per_market)
+                    candidates = discover(market, max(limit_per_market, min(limit_per_market * 2, 240)))
                 except Exception as exc:
                     errors.append({"market": market, "source": source, "error": str(exc)})
                     continue
@@ -391,7 +388,20 @@ class MarketUniverseProvider:
                     errors.append({"market": market, "source": source, "error": empty_message})
                     continue
 
-                market_symbols = _merge_unique_symbols(market_symbols, candidates)[:limit_per_market]
+                source_results.append((source, candidates))
+
+            if _unique_symbol_count(source_results) < limit_per_market:
+                try:
+                    fallback_candidates = self._discover_fallback_search(market, limit_per_market)
+                except Exception as exc:
+                    errors.append({"market": market, "source": "fallback-search", "error": str(exc)})
+                    fallback_candidates = []
+                if fallback_candidates:
+                    source_results.append(("fallback-search", fallback_candidates))
+                else:
+                    errors.append({"market": market, "source": "fallback-search", "error": "No fallback symbols were available."})
+
+            market_symbols = _blend_discovery_sources(source_results, limit_per_market)
             symbols.extend(market_symbols[:limit_per_market])
 
         seen = set()
@@ -1071,3 +1081,43 @@ def _merge_unique_symbols(existing: list[DiscoveredSymbol], candidates: list[Dis
             output.append(item)
             seen.add(item.symbol)
     return output
+
+
+def _unique_symbol_count(source_results: list[tuple[str, list[DiscoveredSymbol]]]) -> int:
+    return len({item.symbol for _, candidates in source_results for item in candidates})
+
+
+def _blend_discovery_sources(source_results: list[tuple[str, list[DiscoveredSymbol]]], limit: int) -> list[DiscoveredSymbol]:
+    if limit <= 0:
+        return []
+    source_shares = {
+        "local-news": 0.30,
+        "google-news": 0.22,
+        "market-universe": 0.38,
+        "fallback-search": 0.10,
+    }
+    output: list[DiscoveredSymbol] = []
+    seen = set()
+    leftovers: list[DiscoveredSymbol] = []
+
+    for source, candidates in source_results:
+        quota = max(1, round(limit * source_shares.get(source, 0.15)))
+        taken = 0
+        for item in candidates:
+            if item.symbol in seen:
+                continue
+            if taken < quota and len(output) < limit:
+                output.append(item)
+                seen.add(item.symbol)
+                taken += 1
+            else:
+                leftovers.append(item)
+
+    for item in leftovers:
+        if len(output) >= limit:
+            break
+        if item.symbol in seen:
+            continue
+        output.append(item)
+        seen.add(item.symbol)
+    return output[:limit]
