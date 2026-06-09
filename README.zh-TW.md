@@ -2,7 +2,9 @@
   <a href="./README.md"><img src="https://flagcdn.com/w40/gb.png" alt="United Kingdom flag" width="22"> English</a> |
   <a href="./README.zh-TW.md"><img src="https://flagcdn.com/w40/tw.png" alt="Taiwan flag" width="22"> 繁體中文</a> |
   <a href="./README.nan-TW.md"><img src="./assets/taiwan-green-island.svg" alt="Green Taiwan island flag" width="22"> 臺語</a> |
-  <a href="./README.zh-CN.md"><img src="https://flagcdn.com/w40/cn.png" alt="China flag" width="22"> 简体中文</a>
+  <a href="./README.zh-CN.md"><img src="https://flagcdn.com/w40/cn.png" alt="China flag" width="22"> 简体中文</a> |
+  <a href="./README.ja.md"><img src="https://flagcdn.com/w40/jp.png" alt="Japan flag" width="22"> 日本語</a> |
+  <a href="./README.ko.md"><img src="https://flagcdn.com/w40/kr.png" alt="South Korea flag" width="22"> 한국어</a>
 </p>
 
 # Open Stock Picker

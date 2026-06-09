@@ -1049,8 +1049,8 @@ function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pull
   if (kind === 'setup') {
     if (locale.value === 'en') return `Breakout setup ${score}/100`;
     if (locale.value === 'zh-CN') return `突破 setup ${score}/100`;
-    if (locale.value === 'ja') return `ブレイク setup ${score}/100`;
-    if (locale.value === 'ko') return `돌파 setup ${score}/100`;
+    if (locale.value === 'ja') return `ブレイクアウト設定 ${score}/100`;
+    if (locale.value === 'ko') return `돌파 설정 ${score}/100`;
     if (locale.value === 'nan-TW') return `突破 setup ${score}/100`;
     return `突破 setup ${score}/100`;
   }
@@ -1103,11 +1103,11 @@ function priceZoneLabel(pick: Pick, zone?: { low: number; high: number }) {
 
 function tPlanFieldLabel(key: 'entry' | 'takeProfit' | 'stop' | 'basis' | 'riskControls') {
   const labels: Record<'entry' | 'takeProfit' | 'stop' | 'basis' | 'riskControls', LocalizedText> = {
-    entry: { en: 'Low-buy zone', 'zh-CN': '低吸区', 'zh-TW': '低吸區' },
-    takeProfit: { en: 'High-sell zone', 'zh-CN': '高抛区', 'zh-TW': '高拋區' },
-    stop: { en: 'Stop line', 'zh-CN': '止损线', 'zh-TW': '停損線' },
-    basis: { en: 'Why it can T', 'zh-CN': '做T依据', 'zh-TW': '做T依據' },
-    riskControls: { en: 'T risk control', 'zh-CN': '做T风控', 'zh-TW': '做T風控' }
+    entry: { en: 'Low-buy zone', 'zh-CN': '低吸区', 'zh-TW': '低吸區', ja: '押し目買いゾーン', ko: '저가 매수 구간' },
+    takeProfit: { en: 'High-sell zone', 'zh-CN': '高抛区', 'zh-TW': '高拋區', ja: '高値売りゾーン', ko: '고가 매도 구간' },
+    stop: { en: 'Stop line', 'zh-CN': '止损线', 'zh-TW': '停損線', ja: '損切りライン', ko: '손절 기준선' },
+    basis: { en: 'Why it can T', 'zh-CN': '做T依据', 'zh-TW': '做T依據', ja: 'T取引の根拠', ko: 'T 매매 근거' },
+    riskControls: { en: 'T risk control', 'zh-CN': '做T风控', 'zh-TW': '做T風控', ja: 'T取引のリスク管理', ko: 'T 매매 리스크 관리' }
   };
   return labels[key][locale.value as StandardLocale] ?? labels[key].en;
 }
@@ -1388,6 +1388,261 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
   }
 }
 
+function jaKoDecisionPointLabel(point: DecisionPoint, score: string, count: number, hours: number) {
+  if (locale.value !== 'ja' && locale.value !== 'ko') return null;
+  const p = point.params;
+  const isJa = locale.value === 'ja';
+  const positiveScore = Number(p.positiveScore ?? 0).toFixed(1);
+  const negativeScore = Number(p.negativeScore ?? 0).toFixed(1);
+  const netScore = signedScore(p.netScore);
+  const change = Number(p.change ?? 0).toFixed(1);
+  const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
+  const range = Number(p.range ?? 0).toFixed(1);
+
+  switch (point.key) {
+    case 'buySummary':
+      return isJa
+        ? `買い候補：総合スコア ${p.score}/100。選択中のニュース重視戦略で相対優位があります。`
+        : `매수 후보: 총점 ${p.score}/100, 선택한 뉴스 중심 전략에서 상대 우위가 있습니다.`;
+    case 'watchSummary':
+      return isJa
+        ? `注視：総合スコア ${p.score}/100。エントリーまたは撤退の確認はまだ不十分です。`
+        : `관찰: 총점 ${p.score}/100, 진입 또는 이탈 확인이 아직 충분하지 않습니다.`;
+    case 'sellSummary':
+      return isJa
+        ? `売却リスク：総合スコア ${p.score}/100。この戦略ではリスク・リターンが弱めです。`
+        : `매도 리스크: 총점 ${p.score}/100, 이 전략에서는 위험 대비 보상이 약합니다.`;
+    case 'newsSupport':
+      return isJa
+        ? `ニュースは支援的です。ポジティブ ${positiveScore}/100、ネガティブ ${negativeScore}/100、ネット ${netScore}。`
+        : `뉴스가 긍정적입니다. 긍정 강도 ${positiveScore}/100, 부정 ${negativeScore}/100, 순점수 ${netScore}.`;
+    case 'newsPressure':
+      return isJa
+        ? `ニュースが判断を圧迫しています。ネガティブ ${negativeScore}/100、ポジティブ ${positiveScore}/100、ネット ${netScore}、関連シグナル ${count} 件。`
+        : `뉴스가 판단을 압박합니다. 부정 강도 ${negativeScore}/100, 긍정 ${positiveScore}/100, 순점수 ${netScore}, 관련 신호 ${count}개.`;
+    case 'insufficientNews':
+      return isJa
+        ? '直近ニュースの根拠が不足しているため、確信度は抑えるべきです。'
+        : '최근 뉴스 근거가 부족하므로 확신도는 제한해야 합니다.';
+    case 'freshNews':
+      return isJa
+        ? `最新の関連ニュースは約 ${hours} 時間前で、鮮度があります。`
+        : `최신 관련 뉴스는 약 ${hours}시간 전으로 신선합니다.`;
+    case 'momentumSupport':
+      return isJa
+        ? `価格モメンタムは ${score}/100 で支援的です。`
+        : `가격 모멘텀은 ${score}/100으로 우호적입니다.`;
+    case 'weakMomentum':
+      return isJa
+        ? `モメンタムは ${score}/100 と弱めです。価格確認前の追随買いは避けます。`
+        : `모멘텀은 ${score}/100으로 약합니다. 가격 확인 전 추격 매수는 피합니다.`;
+    case 'watchBreakout':
+      return isJa
+        ? 'モメンタムが 60/100 を上回れるか確認します。'
+        : '모멘텀이 60/100 이상으로 개선되는지 확인합니다.';
+    case 'breakoutSetup':
+      return isJa
+        ? `初期ブレイクアウト設定は ${score}/100。価格と出来高の確認があります。`
+        : `초기 돌파 설정은 ${score}/100이며 가격과 거래량 확인이 있습니다.`;
+    case 'valuationSupport':
+      return isJa
+        ? `バリュエーションスコアは ${score}/100 で、割高感は強くありません。`
+        : `밸류에이션 점수는 ${score}/100으로, 가격 부담이 크지 않습니다.`;
+    case 'expensiveValuation':
+      return isJa
+        ? `バリュエーションは ${score}/100 と伸び切っています。好材料織り込み後の反落に注意します。`
+        : `밸류에이션은 ${score}/100으로 부담스럽습니다. 호재 반영 후 되돌림을 경계합니다.`;
+    case 'watchValuation':
+      return isJa
+        ? '次回決算またはガイダンス後に、バリュエーションが妥当化するか確認します。'
+        : '다음 실적 또는 가이던스 이후 밸류에이션이 합리화되는지 확인합니다.';
+    case 'riskControlled':
+      return isJa
+        ? `リスクスコアは ${score}/100 で管理可能な範囲です。`
+        : `리스크 점수는 ${score}/100으로 관리 가능한 범위입니다.`;
+    case 'riskHigh':
+      return isJa
+        ? `リスクスコアは ${score}/100 と低く、下値保護が弱いです。`
+        : `리스크 점수는 ${score}/100으로 낮아 하방 보호가 약합니다.`;
+    case 'watchRisk':
+      return isJa
+        ? 'ボラティリティとドローダウンが安定するか確認します。'
+        : '변동성과 낙폭이 안정되는지 확인합니다.';
+    case 'priceActionSevereDrop':
+      return isJa
+        ? `本日 ${change}% 下落。急落状態のため、高品質な買い判断はブロックされます。`
+        : `당일 ${change}% 하락. 급락 상태라 우량 매수 판단을 차단합니다.`;
+    case 'priceActionWeak':
+      return isJa
+        ? `本日 ${change}% 下落。価格が安定するまでは注視に留めます。`
+        : `당일 ${change}% 하락. 가격 안정 전에는 관찰이 우선입니다.`;
+    case 'overheatedPriceAction':
+      return isJa
+        ? `株価はすでに ${change}% 上昇。新規買い設定ではなく追随リスクとして扱います。`
+        : `주가는 이미 ${change}% 상승했습니다. 신규 매수 설정이 아니라 추격 리스크로 봅니다.`;
+    case 'pullbackRisk':
+      return isJa
+        ? `反落リスクは ${pullbackRisk}/100。追随よりも継続確認または整理された押し目を待ちます。`
+        : `되돌림 리스크는 ${pullbackRisk}/100입니다. 후속 확인 또는 통제된 눌림을 기다립니다.`;
+    case 'qualitySupport':
+      return isJa
+        ? `品質スコアは ${score}/100 と強く、中期保有を支えます。`
+        : `품질 점수는 ${score}/100으로 강해 중기 보유를 뒷받침합니다.`;
+    case 'weakQuality':
+      return isJa
+        ? `品質スコアは ${score}/100 と弱めです。`
+        : `품질 점수는 ${score}/100으로 약합니다.`;
+    case 'watchNewsFlow':
+      return isJa
+        ? `ニュースはまだ混在しています。ポジティブ ${positiveScore}/100、ネガティブ ${negativeScore}/100、ネット ${netScore}。`
+        : `뉴스 흐름은 아직 혼재되어 있습니다. 긍정 ${positiveScore}/100, 부정 ${negativeScore}/100, 순점수 ${netScore}.`;
+    case 'newsBullishSummary':
+      return isJa
+        ? `ニュースはネットで強気です。ポジティブ ${positiveScore}/100、ネガティブ ${negativeScore}/100、ネット ${netScore}、直近記事 ${p.total} 件。`
+        : `뉴스는 순긍정입니다. 긍정 ${positiveScore}/100, 부정 ${negativeScore}/100, 순점수 ${netScore}, 최근 기사 ${p.total}건.`;
+    case 'newsBearishSummary':
+      return isJa
+        ? `ニュースはネットで弱気です。ネガティブ ${negativeScore}/100、ポジティブ ${positiveScore}/100、ネット ${netScore}。`
+        : `뉴스는 순부정입니다. 부정 ${negativeScore}/100, 긍정 ${positiveScore}/100, 순점수 ${netScore}.`;
+    case 'newsMixedSummary':
+      return isJa
+        ? `ニュースは強弱混在です。ポジティブ ${positiveScore}/100、ネガティブ ${negativeScore}/100、ネット ${netScore}。`
+        : `뉴스는 혼재되어 있습니다. 긍정 ${positiveScore}/100, 부정 ${negativeScore}/100, 순점수 ${netScore}.`;
+    case 'newsNoEvidence':
+      return isJa ? '利用できる直近ニュース根拠は見つかりませんでした。' : '사용 가능한 최근 뉴스 근거를 찾지 못했습니다.';
+    case 'financialStrongSummary':
+      return isJa
+        ? `決算 / ファンダメンタル確認は強めです。利用可能指標 ${p.count} 件を確認しました。`
+        : `실적 / 펀더멘털 점검은 강합니다. 사용 가능한 지표 ${p.count}개를 확인했습니다.`;
+    case 'financialWeakSummary':
+      return isJa
+        ? `決算 / ファンダメンタル確認は弱めです。利用可能指標 ${p.count} 件を確認しました。`
+        : `실적 / 펀더멘털 점검은 약합니다. 사용 가능한 지표 ${p.count}개를 확인했습니다.`;
+    case 'financialMixedSummary':
+      return isJa
+        ? `決算 / ファンダメンタル確認は強弱混在です。利用可能指標 ${p.count} 件を確認しました。`
+        : `실적 / 펀더멘털 점검은 혼재되어 있습니다. 사용 가능한 지표 ${p.count}개를 확인했습니다.`;
+    case 'financialDataMissing':
+      return isJa ? '財務データが限られています。より完全な開示またはデータを待ちます。' : '재무 데이터가 제한적입니다. 더 완전한 공시나 데이터를 기다립니다.';
+    case 'financialValuationReasonable':
+      return isJa ? `バリュエーションは妥当で、PE は約 ${p.value} です。` : `밸류에이션은 합리적이며 PE는 약 ${p.value}입니다.`;
+    case 'financialValuationRich':
+      return isJa
+        ? `バリュエーションは割高で、PE は約 ${p.value}。織り込み済みの楽観に高く払いすぎないよう注意します。`
+        : `밸류에이션은 비싸고 PE는 약 ${p.value}입니다. 이미 반영된 낙관에 과도한 가격을 지불하지 않도록 합니다.`;
+    case 'financialWatchValuation':
+      return isJa
+        ? `バリュエーションは中立で、PE は約 ${p.value}。業績上方修正または価格調整を確認します。`
+        : `밸류에이션은 중립이며 PE는 약 ${p.value}입니다. 실적 상향 또는 가격 조정을 확인합니다.`;
+    case 'financialGrowthSupport':
+      return isJa ? `成長指標は支援的で、スコアは ${p.score}/100 です。` : `성장 지표는 우호적이며 점수는 ${p.score}/100입니다.`;
+    case 'financialGrowthWeak':
+      return isJa ? `成長指標は弱く、スコアは ${p.score}/100 です。` : `성장 지표는 약하며 점수는 ${p.score}/100입니다.`;
+    case 'financialWatchNextReport':
+      return isJa ? '次回決算で売上高と EPS の確認を重視します。' : '다음 실적에서 매출과 EPS 확인을 중점적으로 봅니다.';
+    case 'financialProfitabilitySupport':
+      return isJa ? `収益性は支援的で、スコアは ${p.score}/100 です。` : `수익성은 우호적이며 점수는 ${p.score}/100입니다.`;
+    case 'financialProfitabilityWeak':
+      return isJa ? `収益性は弱く、スコアは ${p.score}/100 です。` : `수익성은 약하며 점수는 ${p.score}/100입니다.`;
+    case 'financialDebtControlled':
+      return isJa ? `負債リスクは管理可能で、スコアは ${p.score}/100 です。` : `부채 리스크는 관리 가능하며 점수는 ${p.score}/100입니다.`;
+    case 'financialDebtRisk':
+      return isJa ? `負債圧力が高く、スコアは ${p.score}/100 です。` : `부채 부담이 높고 점수는 ${p.score}/100입니다.`;
+    case 'financialLiquiditySupport':
+      return isJa
+        ? `流動性と市場規模の代理指標は支援的で、スコアは ${p.score}/100 です。`
+        : `유동성과 시가총액 대체 지표는 우호적이며 점수는 ${p.score}/100입니다.`;
+    case 'financialLiquidityRisk':
+      return isJa
+        ? `流動性と市場規模の代理指標は弱く、スコアは ${p.score}/100 です。`
+        : `유동성과 시가총액 대체 지표는 약하며 점수는 ${p.score}/100입니다.`;
+    case 'financialAnalystUpside':
+      return isJa
+        ? `アナリスト目標は約 ${p.upside}% の上値余地を示し、${p.count} 件の意見に基づきます。`
+        : `애널리스트 목표가는 약 ${p.upside}% 상승 여력을 시사하며 ${p.count}개 의견 기반입니다.`;
+    case 'financialAnalystDownside':
+      return isJa ? `アナリスト目標は約 ${p.upside}% の下値余地を示します。` : `애널리스트 목표가는 약 ${p.upside}% 하락 여력을 시사합니다.`;
+    case 'financialDividendSupport':
+      return isJa ? `配当利回り約 ${p.yield}% が株主還元の支えになります。` : `배당수익률 약 ${p.yield}%가 주주환원을 뒷받침합니다.`;
+    case 'financialWatchHighRange':
+      return isJa
+        ? `株価は 52 週レンジの上位 ${p.position}% 付近です。反落リスクを確認します。`
+        : `가격은 52주 범위의 상단 ${p.position}% 부근입니다. 되돌림 리스크를 확인합니다.`;
+    case 'financialWatchLowRange':
+      return isJa
+        ? `株価は 52 週レンジの下位 ${p.position}% 付近です。割安の理由がファンダメンタル悪化か確認します。`
+        : `가격은 52주 범위의 하단 ${p.position}% 부근입니다. 할인 원인이 펀더멘털 악화인지 확인합니다.`;
+    case 'actionAccumulate':
+      return isJa ? `提案アクション：スコアが ${p.score}/100 を保つ間は慎重に分割して集めます。` : `제안 행동: 점수가 ${p.score}/100을 유지하면 신중하게 분할 접근합니다.`;
+    case 'actionReduceOrExit':
+      return isJa ? `提案アクション：スコアが ${p.score}/100 から回復しなければ、縮小または撤退を検討します。` : `제안 행동: 점수가 ${p.score}/100에서 회복되지 않으면 축소 또는 이탈을 검토합니다.`;
+    case 'actionWait':
+      return isJa ? `提案アクション：確認を待ちます。現在のスコアは ${p.score}/100 です。` : `제안 행동: 확인을 기다립니다. 현재 점수는 ${p.score}/100입니다.`;
+    case 'actionBuyInBatches':
+      return isJa ? '一括で全ポジションを入れず、分割で入ります。' : '한 번에 전량 진입하지 말고 분할로 접근합니다.';
+    case 'actionWaitNewsConfirmation':
+      return isJa ? '増やす前に、追加の好材料ニュースまたは決算確認を待ちます。' : '비중 확대 전 추가 긍정 뉴스나 실적 확인을 기다립니다.';
+    case 'actionUseSmallPosition':
+      return isJa ? `リスクスコアが ${p.risk}/100 にとどまるため、ポジションは小さく保ちます。` : `리스크 점수가 ${p.risk}/100에 그치므로 포지션은 작게 유지합니다.`;
+    case 'actionReduceExposure':
+      return isJa ? `リサーチスコアが ${p.score}/100 にとどまるため、リスク露出を減らします。` : `리서치 점수가 ${p.score}/100에 그치므로 위험 노출을 줄입니다.`;
+    case 'actionDoNotAverageDown':
+      return isJa ? 'ネガティブニュースが優勢な間はナンピンしません。' : '부정 뉴스가 우세한 동안에는 물타기를 하지 않습니다.';
+    case 'actionSetExitReview':
+      return isJa ? '次の重要開示後に、短期の撤退レビューを設定します。' : '다음 주요 공시 이후 단기 이탈 검토를 설정합니다.';
+    case 'actionNoChase':
+      return isJa ? `追随買いは避けます。現在の確信度は ${p.score}/100 にとどまります。` : `추격 매수는 피합니다. 현재 확신도는 ${p.score}/100에 그칩니다.`;
+    case 'actionWatchNewsCatalyst':
+      return isJa
+        ? '新しい触媒を確認します：決算上振れ、ガイダンス上方修正、格上げ、自社株買い、資金流入。'
+        : '새 촉매를 확인합니다: 실적 서프라이즈, 가이던스 상향, 등급 상향, 자사주 매입, 자금 유입.';
+    case 'actionWatchFinancialRepair':
+      return isJa ? `${p.count} 個の弱い財務項目が改善し始めるか確認します。` : `약한 재무 항목 ${p.count}개가 회복되기 시작하는지 확인합니다.`;
+    case 'actionWatchMomentumTurn':
+      return isJa ? '比率を増やす前に、価格モメンタムの反転を確認します。' : '비중 확대 전 가격 모멘텀이 돌아서는지 확인합니다.';
+    case 'actionRespectRisk':
+      return isJa ? `リスクスコアは ${p.risk}/100。下値リスクを優先して管理します。` : `리스크 점수는 ${p.risk}/100입니다. 하방 리스크 관리를 우선합니다.`;
+    case 'actionAvoidLimitDown':
+      return isJa ? `本日 ${change}% 下落中の新規買いは避けます。` : `당일 ${change}% 하락 중인 신규 매수는 피합니다.`;
+    case 'actionWaitPriceStabilization':
+      return isJa ? `本日 ${change}% 下落後、価格安定を待って再評価します。` : `당일 ${change}% 하락 후 가격 안정화를 기다렸다가 재평가합니다.`;
+    case 'actionWaitPullback':
+      return isJa ? `反落リスクは ${pullbackRisk}/100。追随せず、整理または翌日の支えを待ちます。` : `되돌림 리스크는 ${pullbackRisk}/100입니다. 추격하지 말고 조정 또는 다음 거래일 지지를 기다립니다.`;
+    case 'actionRequireNewsEvidence':
+      return isJa ? '強い判断には、新しい会社固有ニュースの根拠が必要です。' : '강한 판단에는 새로운 회사별 뉴스 근거가 필요합니다.';
+    case 'tCandidateSummary':
+      return isJa ? `T候補：T適性 ${p.score}/100。流動性と売買可能な値幅があります。` : `T 후보: T 적합도 ${p.score}/100, 유동성과 거래 가능한 변동폭이 있습니다.`;
+    case 'tWatchSummary':
+      return isJa ? `T注視：T適性 ${p.score}/100。ただし確認条件はまだ不十分です。` : `T 관찰: T 적합도 ${p.score}/100, 다만 확인 조건이 아직 부족합니다.`;
+    case 'tAvoidSummary':
+      return isJa ? `T回避：T適性 ${p.score}/100。リスク・リターンがまだ明確ではありません。` : `T 회피: T 적합도 ${p.score}/100, 위험 대비 보상이 충분히 명확하지 않습니다.`;
+    case 'tLiquidityReady':
+      return isJa ? `流動性スコアは ${p.score}/100。エントリーと手仕舞いは比較的行いやすいです。` : `유동성 점수는 ${p.score}/100으로 진입과 청산이 비교적 수월합니다.`;
+    case 'tLiquidityThin':
+      return isJa ? `流動性スコアは ${p.score}/100 にとどまり、スリッページが T 取引に不利です。` : `유동성 점수는 ${p.score}/100에 그쳐 슬리피지가 T 매매에 불리할 수 있습니다.`;
+    case 'tVolatilityReady':
+      return isJa ? `推定売買可能変動は約 ${range}% で、日中の値幅取りに十分です。` : `예상 거래 가능 변동폭은 약 ${range}%로 장중 스프레드 작업에 충분합니다.`;
+    case 'tVolatilityLow':
+      return isJa ? `推定売買可能変動は ${range}% にとどまり、値幅が薄いです。` : `예상 거래 가능 변동폭은 ${range}%에 그쳐 스프레드가 얇습니다.`;
+    case 'tSetupReady':
+      return isJa ? `短期設定は ${p.score}/100。価格と出来高の支えがあります。` : `단기 설정은 ${p.score}/100이며 가격과 거래량 지지가 있습니다.`;
+    case 'tTrendWeak':
+      return isJa ? `モメンタムは ${p.score}/100 にとどまります。価格が強くなるのを待ちます。` : `모멘텀은 ${p.score}/100에 그칩니다. 가격이 강해지는지 기다립니다.`;
+    case 'tPullbackRiskHigh':
+      return isJa ? `反落リスクは ${p.risk}/100。T 取引で追随しません。` : `되돌림 리스크는 ${p.risk}/100입니다. T 매매로 추격하지 않습니다.`;
+    case 'tDownsideRiskHigh':
+      return isJa ? `下落リスクは ${p.risk}/100。値幅取りより防御を優先します。` : `하방 리스크는 ${p.risk}/100입니다. 스프레드 매매보다 방어가 우선입니다.`;
+    case 'tNoChase':
+      return isJa ? `株価はすでに ${p.change}% 上昇。追随ではなく、管理された押し目だけを検討します。` : `주가는 이미 ${p.change}% 상승했습니다. 추격이 아니라 통제된 눌림만 검토합니다.`;
+    case 'tUseBasePositionOnly':
+      return isJa ? 'これはベースポジションでの T 取引として扱い、新規の全力追随は避けます。' : '기존 기본 포지션 기반 T 매매로 사용하고, 신규 전량 추격 진입은 피합니다.';
+    case 'tCutIfBreaksSupport':
+      return isJa ? 'エントリーゾーンを支えなく下抜けた場合は、先に損切りまたは縮小します。' : '진입 구간을 지지 없이 이탈하면 먼저 손절하거나 축소합니다.';
+    default:
+      return null;
+  }
+}
+
 function pointLabel(point: DecisionPoint) {
   const p = point.params;
   const score = p.score !== undefined ? Number(p.score).toFixed(1) : '';
@@ -1402,6 +1657,8 @@ function pointLabel(point: DecisionPoint) {
   if (locale.value === 'nan-TW') {
     return nanDecisionPointLabel(point, score, count, hours);
   }
+  const jaKoLabel = jaKoDecisionPointLabel(point, score, count, hours);
+  if (jaKoLabel) return jaKoLabel;
 
   const text: Record<DecisionPoint['key'], LocalizedText> = {
     buySummary: {
@@ -1838,23 +2095,23 @@ function eventLabel(event: NewsEvent) {
   }
 
   const labels: Record<string, LocalizedText> = {
-    earningsPositive: { en: 'Positive earnings/report event', 'zh-CN': '正面财报/业绩事件', 'zh-TW': '正面財報/業績事件' },
-    earningsNegative: { en: 'Negative earnings/report event', 'zh-CN': '负面财报/业绩事件', 'zh-TW': '負面財報/業績事件' },
-    guidancePositive: { en: 'Guidance raised or outlook improved', 'zh-CN': '指引上修或展望改善', 'zh-TW': '指引上修或展望改善' },
-    guidanceNegative: { en: 'Guidance cut or outlook weakened', 'zh-CN': '指引下修或展望转弱', 'zh-TW': '指引下修或展望轉弱' },
-    analystPositive: { en: 'Analyst upgrade / target raised', 'zh-CN': '分析师上调评级/目标价', 'zh-TW': '分析師上調評級/目標價' },
-    analystNegative: { en: 'Analyst downgrade / target cut', 'zh-CN': '分析师下调评级/目标价', 'zh-TW': '分析師下調評級/目標價' },
-    capitalReturn: { en: 'Buyback/dividend shareholder return', 'zh-CN': '回购/分红股东回报', 'zh-TW': '回購/配息股東回報' },
-    shareholderSale: { en: 'Shareholder or insider selling pressure', 'zh-CN': '股东/内部人减持压力', 'zh-TW': '股東/內部人減持壓力' },
-    legalRegulatoryRisk: { en: 'Legal or regulatory risk', 'zh-CN': '法律或监管风险', 'zh-TW': '法律或監管風險' },
-    demandPositive: { en: 'Demand/order catalyst', 'zh-CN': '需求/订单催化', 'zh-TW': '需求/訂單催化' },
-    demandNegative: { en: 'Demand/order weakness', 'zh-CN': '需求/订单转弱', 'zh-TW': '需求/訂單轉弱' },
-    fundFlowPositive: { en: 'Capital inflow / institutional buying', 'zh-CN': '资金流入/机构买入', 'zh-TW': '資金流入/機構買入' },
-    fundFlowNegative: { en: 'Capital outflow / institutional selling', 'zh-CN': '资金流出/机构卖出', 'zh-TW': '資金流出/機構賣出' },
-    marketMomentumPositive: { en: 'Positive market momentum event', 'zh-CN': '市场动能正面事件', 'zh-TW': '市場動能正面事件' },
-    marketMomentumNegative: { en: 'Negative market momentum event', 'zh-CN': '市场动能负面事件', 'zh-TW': '市場動能負面事件' },
-    generalPositiveNews: { en: 'Broadly positive news tone', 'zh-CN': '整体新闻语气偏正面', 'zh-TW': '整體新聞語氣偏正面' },
-    generalNegativeNews: { en: 'Broadly negative news tone', 'zh-CN': '整体新闻语气偏负面', 'zh-TW': '整體新聞語氣偏負面' }
+    earningsPositive: { en: 'Positive earnings/report event', 'zh-CN': '正面财报/业绩事件', 'zh-TW': '正面財報/業績事件', ja: '決算 / 業績のポジティブ材料', ko: '긍정적 실적 / 보고서 이벤트' },
+    earningsNegative: { en: 'Negative earnings/report event', 'zh-CN': '负面财报/业绩事件', 'zh-TW': '負面財報/業績事件', ja: '決算 / 業績のネガティブ材料', ko: '부정적 실적 / 보고서 이벤트' },
+    guidancePositive: { en: 'Guidance raised or outlook improved', 'zh-CN': '指引上修或展望改善', 'zh-TW': '指引上修或展望改善', ja: 'ガイダンス上方修正 / 見通し改善', ko: '가이던스 상향 또는 전망 개선' },
+    guidanceNegative: { en: 'Guidance cut or outlook weakened', 'zh-CN': '指引下修或展望转弱', 'zh-TW': '指引下修或展望轉弱', ja: 'ガイダンス下方修正 / 見通し悪化', ko: '가이던스 하향 또는 전망 약화' },
+    analystPositive: { en: 'Analyst upgrade / target raised', 'zh-CN': '分析师上调评级/目标价', 'zh-TW': '分析師上調評級/目標價', ja: 'アナリスト格上げ / 目標株価引き上げ', ko: '애널리스트 등급 / 목표가 상향' },
+    analystNegative: { en: 'Analyst downgrade / target cut', 'zh-CN': '分析师下调评级/目标价', 'zh-TW': '分析師下調評級/目標價', ja: 'アナリスト格下げ / 目標株価引き下げ', ko: '애널리스트 등급 / 목표가 하향' },
+    capitalReturn: { en: 'Buyback/dividend shareholder return', 'zh-CN': '回购/分红股东回报', 'zh-TW': '回購/配息股東回報', ja: '自社株買い / 配当による株主還元', ko: '자사주 매입 / 배당 주주환원' },
+    shareholderSale: { en: 'Shareholder or insider selling pressure', 'zh-CN': '股东/内部人减持压力', 'zh-TW': '股東/內部人減持壓力', ja: '株主 / インサイダー売り圧力', ko: '주주 / 내부자 매도 압력' },
+    legalRegulatoryRisk: { en: 'Legal or regulatory risk', 'zh-CN': '法律或监管风险', 'zh-TW': '法律或監管風險', ja: '法務 / 規制リスク', ko: '법률 또는 규제 리스크' },
+    demandPositive: { en: 'Demand/order catalyst', 'zh-CN': '需求/订单催化', 'zh-TW': '需求/訂單催化', ja: '需要 / 受注の好材料', ko: '수요 / 주문 촉매' },
+    demandNegative: { en: 'Demand/order weakness', 'zh-CN': '需求/订单转弱', 'zh-TW': '需求/訂單轉弱', ja: '需要 / 受注の弱含み', ko: '수요 / 주문 약화' },
+    fundFlowPositive: { en: 'Capital inflow / institutional buying', 'zh-CN': '资金流入/机构买入', 'zh-TW': '資金流入/機構買入', ja: '資金流入 / 機関投資家買い', ko: '자금 유입 / 기관 매수' },
+    fundFlowNegative: { en: 'Capital outflow / institutional selling', 'zh-CN': '资金流出/机构卖出', 'zh-TW': '資金流出/機構賣出', ja: '資金流出 / 機関投資家売り', ko: '자금 유출 / 기관 매도' },
+    marketMomentumPositive: { en: 'Positive market momentum event', 'zh-CN': '市场动能正面事件', 'zh-TW': '市場動能正面事件', ja: '市場モメンタムのポジティブ材料', ko: '시장 모멘텀 긍정 이벤트' },
+    marketMomentumNegative: { en: 'Negative market momentum event', 'zh-CN': '市场动能负面事件', 'zh-TW': '市場動能負面事件', ja: '市場モメンタムのネガティブ材料', ko: '시장 모멘텀 부정 이벤트' },
+    generalPositiveNews: { en: 'Broadly positive news tone', 'zh-CN': '整体新闻语气偏正面', 'zh-TW': '整體新聞語氣偏正面', ja: '全体的にポジティブなニューストーン', ko: '전반적으로 긍정적인 뉴스 분위기' },
+    generalNegativeNews: { en: 'Broadly negative news tone', 'zh-CN': '整体新闻语气偏负面', 'zh-TW': '整體新聞語氣偏負面', ja: '全体的にネガティブなニューストーン', ko: '전반적으로 부정적인 뉴스 분위기' }
   };
   return labels[event.key]?.[locale.value as StandardLocale] ?? labels[event.key]?.en ?? event.key;
 }
@@ -1878,17 +2135,17 @@ function financialMetricLabel(metric: FinancialMetric) {
   }
 
   const labels: Record<string, LocalizedText> = {
-    pe: { en: 'PE', 'zh-CN': '市盈率', 'zh-TW': '本益比' },
-    priceToBook: { en: 'PB', 'zh-CN': '市净率', 'zh-TW': '股價淨值比' },
-    revenueGrowth: { en: 'Revenue growth', 'zh-CN': '营收增长', 'zh-TW': '營收成長' },
-    earningsGrowth: { en: 'Earnings growth', 'zh-CN': '利润增长', 'zh-TW': '獲利成長' },
-    returnOnEquity: { en: 'ROE', 'zh-CN': '净资产收益率', 'zh-TW': '股東權益報酬率' },
-    profitMargins: { en: 'Profit margin', 'zh-CN': '利润率', 'zh-TW': '利潤率' },
-    debtToEquity: { en: 'Debt/equity', 'zh-CN': '负债权益比', 'zh-TW': '負債權益比' },
-    analystTargetUpside: { en: 'Analyst target upside', 'zh-CN': '分析师目标价空间', 'zh-TW': '分析師目標價空間' },
-    dividendYield: { en: 'Dividend yield', 'zh-CN': '股息率', 'zh-TW': '股息率' },
-    liquidityQuality: { en: 'Liquidity/size proxy', 'zh-CN': '流动性/规模代理', 'zh-TW': '流動性/規模代理' },
-    fiftyTwoWeekPosition: { en: '52-week position', 'zh-CN': '52 周区间位置', 'zh-TW': '52 週區間位置' }
+    pe: { en: 'PE', 'zh-CN': '市盈率', 'zh-TW': '本益比', ja: 'PER', ko: 'PER' },
+    priceToBook: { en: 'PB', 'zh-CN': '市净率', 'zh-TW': '股價淨值比', ja: 'PBR', ko: 'PBR' },
+    revenueGrowth: { en: 'Revenue growth', 'zh-CN': '营收增长', 'zh-TW': '營收成長', ja: '売上成長率', ko: '매출 성장률' },
+    earningsGrowth: { en: 'Earnings growth', 'zh-CN': '利润增长', 'zh-TW': '獲利成長', ja: '利益成長率', ko: '이익 성장률' },
+    returnOnEquity: { en: 'ROE', 'zh-CN': '净资产收益率', 'zh-TW': '股東權益報酬率', ja: 'ROE', ko: 'ROE' },
+    profitMargins: { en: 'Profit margin', 'zh-CN': '利润率', 'zh-TW': '利潤率', ja: '利益率', ko: '이익률' },
+    debtToEquity: { en: 'Debt/equity', 'zh-CN': '负债权益比', 'zh-TW': '負債權益比', ja: '負債資本倍率', ko: '부채 / 자기자본' },
+    analystTargetUpside: { en: 'Analyst target upside', 'zh-CN': '分析师目标价空间', 'zh-TW': '分析師目標價空間', ja: 'アナリスト目標上値余地', ko: '애널리스트 목표가 상승 여력' },
+    dividendYield: { en: 'Dividend yield', 'zh-CN': '股息率', 'zh-TW': '股息率', ja: '配当利回り', ko: '배당수익률' },
+    liquidityQuality: { en: 'Liquidity/size proxy', 'zh-CN': '流动性/规模代理', 'zh-TW': '流動性/規模代理', ja: '流動性 / 規模代理', ko: '유동성 / 규모 대체 지표' },
+    fiftyTwoWeekPosition: { en: '52-week position', 'zh-CN': '52 周区间位置', 'zh-TW': '52 週區間位置', ja: '52週レンジ位置', ko: '52주 구간 위치' }
   };
   return labels[metric.key]?.[locale.value as StandardLocale] ?? labels[metric.key]?.en ?? metric.key;
 }

@@ -600,6 +600,226 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
       }
     },
     {
+      symbol: '7203.T',
+      name: 'Toyota Motor',
+      market: 'JP',
+      sector: 'Automobiles',
+      price: 3186,
+      change: 1.2,
+      currency: 'JPY',
+      score: 78,
+      opportunityScore: 74,
+      downsideRiskScore: 31,
+      breakoutSetupScore: 66,
+      pullbackRiskScore: 34,
+      tScore: 68,
+      tPlan: {
+        suitability: 'candidate',
+        summary: { key: 'tCandidateSummary', params: { score: 68 } },
+        score: 68,
+        components: { liquidityScore: 80, volatilityScore: 63, volatilityPct: 3.1, turnoverScore: 70, turnoverPct: 4.2 },
+        entryZone: { low: 3148, high: 3180 },
+        takeProfitZone: { low: 3232, high: 3290 },
+        stopLoss: 3102,
+        reasons: [
+          { key: 'tLiquidityReady', params: { score: 80 } },
+          { key: 'tVolatilityReady', params: { score: 63, range: 3.1 } },
+          { key: 'tSetupReady', params: { score: 66 } }
+        ],
+        riskControls: [{ key: 'tUseBasePositionOnly', params: {} }]
+      },
+      verdict: 'buy',
+      confidence: 76,
+      reasons: ['Demo mode: Japan-market sample with quality, momentum, and local-news support.'],
+      reasonCodes: [
+        { key: 'strongestFactors', params: { first: 'quality', second: 'momentum' } },
+        { key: 'clearsBuyThreshold', params: {} }
+      ],
+      prediction: {
+        opportunityScore: 74,
+        downsideRiskScore: 31,
+        breakoutSetupScore: 66,
+        pullbackRiskScore: 34,
+        tScore: 68,
+        edge: 43
+      },
+      signals: [
+        {
+          source: 'Static demo',
+          title: 'トヨタ、電動化投資と円安効果が業績を支える',
+          summary: 'GitHub Pages preview sample for Japan-market coverage; connect the Python API for live local-news crawling.',
+          link: 'https://github.com/tamyu321-source/stock-picker',
+          sentiment: 0.58,
+          credibility: 0.82,
+          relevance: 0.86,
+          ageHours: 3
+        }
+      ],
+      metrics: { momentum: 76, value: 64, sentiment: 78, risk: 72, quality: 83 },
+      scoreBreakdown: [
+        { factor: 'momentum', score: 76, weight: 20, contribution: 15.2 },
+        { factor: 'value', score: 64, weight: 15, contribution: 9.6 },
+        { factor: 'sentiment', score: 78, weight: 40, contribution: 31.2 },
+        { factor: 'risk', score: 72, weight: 10, contribution: 7.2 },
+        { factor: 'quality', score: 83, weight: 15, contribution: 12.45 }
+      ],
+      decision: {
+        summary: { key: 'buySummary', params: { score: 78 } },
+        positives: [
+          { key: 'momentumSupport', params: { score: 76 } },
+          { key: 'newsBullishSummary', params: { positiveScore: 74, negativeScore: 18, netScore: 56, total: 1 } }
+        ],
+        negatives: [],
+        watchItems: [{ key: 'watchValuation', params: {} }]
+      },
+      newsAnalysis: {
+        summary: { key: 'newsBullishSummary', params: { positiveScore: 74, negativeScore: 18, netScore: 56, total: 1 } },
+        positiveCount: 1,
+        negativeCount: 0,
+        positiveScore: 74,
+        negativeScore: 18,
+        netScore: 56,
+        events: [
+          {
+            key: 'demandPositive',
+            impact: 'positive',
+            title: 'Static demo signal: Japan-market local-news sample remains supportive',
+            source: 'Static demo',
+            ageHours: 3,
+            weight: 0.78,
+            strength: 0.58,
+            score: 24,
+            evidence: 'GitHub Pages preview sample'
+          }
+        ]
+      },
+      financialAnalysis: {
+        summary: { key: 'financialStrongSummary', params: { count: 3 } },
+        metrics: [
+          { key: 'forwardPE', value: '10.8', score: 74 },
+          { key: 'profitMargins', value: '10.4%', score: 72 },
+          { key: 'revenueGrowth', value: '12.0%', score: 70 }
+        ],
+        positives: [{ key: 'financialValuationReasonable', params: { value: 10.8 } }],
+        negatives: [],
+        watchItems: [{ key: 'financialWatchHighRange', params: { position: 66 } }]
+      },
+      actionPlan: {
+        summary: { key: 'actionAccumulate', params: { score: 78 } },
+        steps: [{ key: 'actionBuyInBatches', params: {} }],
+        watchItems: [{ key: 'actionWatchNewsCatalyst', params: {} }],
+        riskControls: [{ key: 'actionRespectRisk', params: { risk: 72 } }]
+      }
+    },
+    {
+      symbol: '005930.KS',
+      name: 'Samsung Electronics',
+      market: 'KR',
+      sector: 'Semiconductors',
+      price: 80200,
+      change: 0.9,
+      currency: 'KRW',
+      score: 73,
+      opportunityScore: 68,
+      downsideRiskScore: 38,
+      breakoutSetupScore: 61,
+      pullbackRiskScore: 40,
+      tScore: 62,
+      tPlan: {
+        suitability: 'watch',
+        summary: { key: 'tWatchSummary', params: { score: 62 } },
+        score: 62,
+        components: { liquidityScore: 86, volatilityScore: 57, volatilityPct: 2.8, turnoverScore: 66, turnoverPct: 3.6 },
+        entryZone: { low: 79000, high: 79900 },
+        takeProfitZone: { low: 81600, high: 83200 },
+        stopLoss: 77800,
+        reasons: [{ key: 'tLiquidityReady', params: { score: 86 } }],
+        riskControls: [
+          { key: 'tVolatilityLow', params: { range: 2.8 } },
+          { key: 'tUseBasePositionOnly', params: {} }
+        ]
+      },
+      verdict: 'watch',
+      confidence: 70,
+      reasons: ['Demo mode: Korea-market sample with improving semiconductor cycle but pending confirmation.'],
+      reasonCodes: [{ key: 'belowThreshold', params: { factor: 'momentum' } }],
+      prediction: {
+        opportunityScore: 68,
+        downsideRiskScore: 38,
+        breakoutSetupScore: 61,
+        pullbackRiskScore: 40,
+        tScore: 62,
+        edge: 30
+      },
+      signals: [
+        {
+          source: 'Static demo',
+          title: '삼성전자, 메모리 업황 회복 기대가 투자심리 개선',
+          summary: 'GitHub Pages preview sample for Korea-market coverage; connect the Python API for live local-news crawling.',
+          link: 'https://github.com/tamyu321-source/stock-picker',
+          sentiment: 0.46,
+          credibility: 0.8,
+          relevance: 0.84,
+          ageHours: 4
+        }
+      ],
+      metrics: { momentum: 63, value: 66, sentiment: 72, risk: 68, quality: 80 },
+      scoreBreakdown: [
+        { factor: 'momentum', score: 63, weight: 20, contribution: 12.6 },
+        { factor: 'value', score: 66, weight: 15, contribution: 9.9 },
+        { factor: 'sentiment', score: 72, weight: 40, contribution: 28.8 },
+        { factor: 'risk', score: 68, weight: 10, contribution: 6.8 },
+        { factor: 'quality', score: 80, weight: 15, contribution: 12 }
+      ],
+      decision: {
+        summary: { key: 'watchSummary', params: { score: 73 } },
+        positives: [
+          { key: 'qualitySupport', params: { score: 80 } },
+          { key: 'newsBullishSummary', params: { positiveScore: 68, negativeScore: 24, netScore: 44, total: 1 } }
+        ],
+        negatives: [{ key: 'weakMomentum', params: { score: 63 } }],
+        watchItems: [{ key: 'watchBreakout', params: { score: 61 } }]
+      },
+      newsAnalysis: {
+        summary: { key: 'newsBullishSummary', params: { positiveScore: 68, negativeScore: 24, netScore: 44, total: 1 } },
+        positiveCount: 1,
+        negativeCount: 0,
+        positiveScore: 68,
+        negativeScore: 24,
+        netScore: 44,
+        events: [
+          {
+            key: 'demandPositive',
+            impact: 'positive',
+            title: 'Static demo signal: Korea-market semiconductor cycle sample improves',
+            source: 'Static demo',
+            ageHours: 4,
+            weight: 0.74,
+            strength: 0.46,
+            score: 19,
+            evidence: 'GitHub Pages preview sample'
+          }
+        ]
+      },
+      financialAnalysis: {
+        summary: { key: 'financialMixedSummary', params: { positive: 2, negative: 1 } },
+        metrics: [
+          { key: 'forwardPE', value: '14.6', score: 68 },
+          { key: 'profitMargins', value: '18.0%', score: 76 },
+          { key: 'revenueGrowth', value: '8.0%', score: 62 }
+        ],
+        positives: [{ key: 'financialProfitabilitySupport', params: { score: 76 } }],
+        negatives: [],
+        watchItems: [{ key: 'financialWatchNextReport', params: {} }]
+      },
+      actionPlan: {
+        summary: { key: 'actionWait', params: { score: 73 } },
+        steps: [{ key: 'actionWaitNewsConfirmation', params: {} }],
+        watchItems: [{ key: 'actionWatchMomentumTurn', params: {} }],
+        riskControls: [{ key: 'actionRespectRisk', params: { risk: 68 } }]
+      }
+    },
+    {
       symbol: 'AAPL',
       name: 'Apple',
       market: 'US',
