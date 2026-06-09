@@ -1,3 +1,4 @@
+import io
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -5,6 +6,7 @@ from unittest.mock import patch
 
 from backend.app import create_app
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
+from backend.portfolio import normalize_a_share_symbol, parse_portfolio_export
 from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _parse_eastmoney_datetime, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
 from backend.services import _breakout_setup_score, _financial_analysis, _friendly_data_error, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _manual_symbol_candidates, _symbols_from_code_mentions
@@ -77,6 +79,33 @@ class FakeUniverseProvider:
         return symbols[:limit_per_market], []
 
 
+def dongwu_holdings_bytes():
+    text = "\r\n".join(
+        [
+            "\t".join(
+                [
+                    "\u8bc1\u5238\u4ee3\u7801",
+                    "\u8bc1\u5238\u540d\u79f0",
+                    "\u53ef\u7528\u4f59\u989d",
+                    "\u51bb\u7ed3\u6570\u91cf",
+                    "\u6210\u672c\u4ef7",
+                    "\u5e02\u4ef7",
+                    "\u5e02\u503c",
+                    "\u76c8\u4e8f",
+                    "\u76c8\u4e8f\u6bd4\u4f8b(%)",
+                    "\u4ea4\u6613\u5e02\u573a",
+                    "\u5b9e\u9645\u6570\u91cf",
+                    "\u6210\u672c\u91d1\u989d",
+                    "\u5f00\u4ed3\u65e5\u671f",
+                ]
+            ),
+            "=\"300570\"\t\u592a\u8fb0\u5149\t100\t0\t179.150\t155.200\t15520.000\t-2407.750\t-13.440\t\u6df1\u5733\uff21\u80a1\t100\t17914.990000\t20260513",
+            "=\"600176\"\t\u4e2d\u56fd\u5de8\u77f3\t0\t0\t46.923\t34.900\t6980.000\t-2413.170\t-25.714\t\u4e0a\u6d77\uff21\u80a1\t0\t9384.610000\t20260513",
+        ]
+    )
+    return (text + "\r\n").encode("gb18030")
+
+
 class ApiTestCase(unittest.TestCase):
     def setUp(self):
         self.news_crawler = FakeNewsCrawler()
@@ -105,6 +134,68 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("marketData", payload["cache"])
         self.assertIn("news", payload["cache"])
         self.assertGreater(payload["cache"]["marketData"]["ttlSeconds"], 0)
+
+    def test_dongwu_gb18030_holdings_export_imports_current_positions(self):
+        payload = parse_portfolio_export(dongwu_holdings_bytes(), "011700317559.xls")
+
+        self.assertEqual(payload["sourceType"], "tsv-gb18030")
+        self.assertEqual(payload["recognizedCount"], 1)
+        self.assertEqual(payload["ignoredRows"], 1)
+        self.assertEqual(payload["symbols"], ["300570.SZ"])
+        position = payload["positions"][0]
+        self.assertEqual(position["name"], "\u592a\u8fb0\u5149")
+        self.assertEqual(position["quantity"], 100)
+        self.assertEqual(position["exchange"], "\u6df1\u5733A\u80a1")
+        self.assertAlmostEqual(position["unrealizedPnlPct"], -13.44)
+        self.assertEqual(normalize_a_share_symbol("600176", "\u4e0a\u6d77\uff21\u80a1"), "600176.SS")
+
+    def test_portfolio_import_endpoint_accepts_dongwu_xls_text_export(self):
+        response = self.client.post(
+            "/api/portfolio/import",
+            data={"file": (io.BytesIO(dongwu_holdings_bytes()), "011700317559.xls")},
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["recognizedCount"], 1)
+        self.assertEqual(payload["symbols"], ["300570.SZ"])
+
+    def test_analyze_attaches_holding_context_to_imported_portfolio_symbols(self):
+        class ChinaMarketProvider:
+            def fetch(self, symbol):
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="\u592a\u8fb0\u5149",
+                    market="CN",
+                    sector="Technology",
+                    price=155.2,
+                    change=-2.1,
+                    currency="CNY",
+                    closes=[130 + index * 0.2 for index in range(130)],
+                    info={"trailingPE": 22, "beta": 1.1, "returnOnEquity": 0.16, "profitMargins": 0.18, "debtToEquity": 35},
+                )
+
+        class PortfolioUniverseProvider:
+            def resolve_manual_inputs(self, inputs, markets, limit=25):
+                return [DiscoveredSymbol(str(symbol).upper(), "\u592a\u8fb0\u5149", infer_market(str(symbol).upper()), "test-portfolio") for symbol in inputs], []
+
+        portfolio = parse_portfolio_export(dongwu_holdings_bytes(), "011700317559.xls")
+        client = create_app(ChinaMarketProvider(), self.news_crawler, PortfolioUniverseProvider()).test_client()
+        response = client.post(
+            "/api/analyze",
+            json={"markets": ["CN"], "symbols": portfolio["symbols"], "strategyId": "balanced", "portfolio": portfolio},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["scan"]["source"], "portfolio-import")
+        self.assertEqual(payload["portfolio"]["matchedCount"], 1)
+        pick = payload["picks"][0]
+        self.assertEqual(pick["holding"]["symbol"], "300570.SZ")
+        self.assertEqual(pick["holding"]["quantity"], 100)
+        self.assertIn(pick["holdingAnalysis"]["action"], {"add", "hold", "reduce", "exit"})
+        self.assertTrue(pick["holdingAnalysis"]["notes"])
 
     def test_ttl_cache_expires_entries(self):
         now = [100.0]

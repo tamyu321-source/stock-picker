@@ -1,6 +1,7 @@
 from flask import Flask, Response, jsonify, request, stream_with_context
 
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler
+from backend.portfolio import parse_portfolio_export
 from backend.providers import RssNewsCrawler, YFinanceMarketDataProvider
 from backend.services import analyze, get_config, stream_analyze
 
@@ -47,6 +48,16 @@ def create_app(market_provider=None, news_crawler=None, universe_provider=None) 
             mimetype="application/x-ndjson",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.post("/api/portfolio/import")
+    def portfolio_import_endpoint():
+        uploaded = request.files.get("file")
+        if uploaded is None:
+            return jsonify({"error": "No holdings file was uploaded."}), 400
+        try:
+            return jsonify(parse_portfolio_export(uploaded.read(), uploaded.filename or "holdings export"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     return app
 

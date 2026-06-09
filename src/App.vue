@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, currentDataMode, fetchConfig, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type Market, type NewsEvent, type Pick, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type Strategy, type StrategyWeights } from './api';
+import { analyzeStocksStream, currentDataMode, fetchConfig, importPortfolioFile, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type HoldingAction, type HoldingNote, type Market, type NewsEvent, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type Strategy, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -28,6 +28,7 @@ type SavedScan = {
   sectors: SectorAnalysis[];
   errors: DataIssue[];
   scanInfo: { auto: boolean; requested: number; succeeded: number; failed: number } | null;
+  portfolio: PortfolioAnalysis | PortfolioImportResponse | null;
 };
 
 const locale = ref<Locale>('en');
@@ -55,6 +56,11 @@ const scanRunId = ref(0);
 const signalRefreshStartedAt = ref('');
 const dataMode = ref(currentDataMode());
 const savedScans = ref<SavedScan[]>([]);
+const portfolioFileInput = ref<HTMLInputElement | null>(null);
+const importedPortfolio = ref<PortfolioImportResponse | null>(null);
+const analysisPortfolio = ref<PortfolioAnalysis | null>(null);
+const importingPortfolio = ref(false);
+const portfolioImportError = ref('');
 const yogurtSecretPrimed = ref(false);
 const yogurtSecretOpen = ref(false);
 let loadingTimer: number | undefined;
@@ -170,6 +176,8 @@ const isDemoDataMode = computed(() => dataMode.value === 'demo');
 const dataModeLabel = computed(() => (isDemoDataMode.value ? t.value.demoPreview : t.value.liveBackend));
 const dataModeDescription = computed(() => (isDemoDataMode.value ? t.value.demoPreviewDetail : t.value.liveBackendDetail));
 const canSaveScan = computed(() => picks.value.length > 0 && !loading.value);
+const activePortfolio = computed(() => analysisPortfolio.value ?? importedPortfolio.value);
+const portfolioSymbols = computed(() => importedPortfolio.value?.symbols ?? []);
 const yogurtSecretLocalized = computed(() => locale.value === 'zh-TW' || locale.value === 'nan-TW');
 const yogurtSecretTriggerLabel = computed(() => (locale.value === 'nan-TW' ? '活菌雷達' : '菌群雷達'));
 const yogurtSecretClueLabel = computed(() => {
@@ -191,6 +199,7 @@ const symbols = computed(() => symbolText.value.split(/[\s,;]+/).map((symbol) =>
 const isAutoScan = computed(() => symbols.value.length === 0);
 const scanLabel = computed(() => {
   if (!scanInfo.value) {
+    if (activePortfolio.value?.recognizedCount) return portfolioScanLabel(activePortfolio.value.recognizedCount);
     if (isAutoScan.value) return t.value.autoScan;
     if (locale.value === 'en') return `${symbols.value.length} narrowed`;
     if (locale.value === 'zh-CN') return `限定 ${symbols.value.length} 只`;
@@ -433,6 +442,382 @@ function scanStrategyLabel() {
   return selectedStrategy.value ? strategyName(selectedStrategy.value) : selectedStrategyId.value;
 }
 
+type HoldingFieldKey = 'quantity' | 'cost' | 'pnl' | 'weight';
+type PortfolioMarkdownKey = 'importedHoldings' | 'source' | 'currentHoldings' | 'totalMarketValue' | 'unrealizedPnl' | 'portfolioWarnings' | 'holding' | 'shares' | 'cost' | 'action';
+type HoldingNoteParams = Record<string, string | number>;
+type PortfolioLocaleText = {
+  scanLabel: (count: number) => string;
+  importTitle: string;
+  importHint: string;
+  importing: string;
+  chooseFile: string;
+  clear: string;
+  importFailed: string;
+  liveBackendRequired: string;
+  ready: (count: number, ignoredRows: number) => string;
+  actions: Record<HoldingAction, string>;
+  fields: Record<HoldingFieldKey, string>;
+  markdown: Record<PortfolioMarkdownKey, string>;
+  notes: Record<string, (params: HoldingNoteParams) => string>;
+};
+
+const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
+  en: {
+    scanLabel: (count) => `${count} holdings`,
+    importTitle: 'Import broker holdings',
+    importHint: 'Supports Dongwu Securities A-share .xls text exports; current non-zero holdings are analyzed automatically.',
+    importing: 'Importing...',
+    chooseFile: 'Choose holdings file',
+    clear: 'Clear',
+    importFailed: 'Failed to import holdings file.',
+    liveBackendRequired: 'Holdings import requires the live Python backend.',
+    ready: (count, ignoredRows) => `${count} current holdings recognized${ignoredRows ? ` · ${ignoredRows} ignored` : ''}`,
+    actions: { add: 'Add only in batches', hold: 'Hold / wait', reduce: 'Reduce risk', exit: 'Exit risk' },
+    fields: { quantity: 'Quantity', cost: 'Cost', pnl: 'P/L', weight: 'Weight' },
+    markdown: {
+      importedHoldings: 'Imported holdings',
+      source: 'Source',
+      currentHoldings: 'Current holdings recognized',
+      totalMarketValue: 'Total market value',
+      unrealizedPnl: 'Unrealized P/L',
+      portfolioWarnings: 'Portfolio warnings',
+      holding: 'Holding',
+      shares: 'shares',
+      cost: 'cost',
+      action: 'action'
+    },
+    notes: {
+      holdingStrategyExit: (p) => `Strategy marks exit risk: score ${p.score}, downside risk ${p.risk}/100.`,
+      holdingReduceRisk: (p) => `Downside risk is ${p.risk}/100; reduce exposure or tighten stops.`,
+      holdingAddOnlyInBatches: (p) => `Strategy support is positive at ${p.score}/100; only add in batches.`,
+      holdingHoldWait: () => 'No high-conviction add signal yet; hold and wait for confirmation.',
+      holdingLargeLoss: (p) => `Position loss is ${p.pnlPct}%; avoid averaging down without signal repair.`,
+      holdingNoAverageDown: () => 'Do not average down while risk/news/price signals remain weak.',
+      holdingBelowCost: (p) => `Position is below cost by ${p.pnlPct}%; wait for stabilization before adding.`,
+      holdingConcentration: (p) => `Position weight is ${p.weight}%; concentration risk needs active control.`,
+      holdingProfitProtect: (p) => `Profit is ${p.pnlPct}%, but pullback risk is ${p.risk}/100; protect gains.`,
+      portfolioTotalDrawdown: (p) => `Portfolio drawdown is ${p.pnlPct}%; prioritize risk review.`,
+      portfolioConcentration: (p) => `${p.symbol} is ${p.weight}% of holdings; concentration is high.`,
+      portfolioLargeLoss: (p) => `${p.symbol} is down ${p.pnlPct}%; avoid passive averaging down.`,
+      portfolioNoCurrentHolding: () => 'No current non-zero holdings were found in the file.'
+    }
+  },
+  'zh-CN': {
+    scanLabel: (count) => `持仓 ${count} 只`,
+    importTitle: '导入券商持仓',
+    importHint: '兼容东吴证券 A 股 .xls 文本导出；只识别当前实际数量大于 0 的持仓，并自动做策略分析。',
+    importing: '正在导入...',
+    chooseFile: '选择持仓文件',
+    clear: '清除',
+    importFailed: '持仓文件导入失败。',
+    liveBackendRequired: '持仓导入需要连接实时 Python 后端。',
+    ready: (count, ignoredRows) => `已识别 ${count} 只当前持仓${ignoredRows ? ` · 忽略 ${ignoredRows} 行` : ''}`,
+    actions: { add: '只分批加仓', hold: '持有观察', reduce: '降低风险', exit: '退出风险' },
+    fields: { quantity: '持仓数量', cost: '成本价', pnl: '浮动盈亏', weight: '仓位占比' },
+    markdown: {
+      importedHoldings: '导入持仓',
+      source: '来源',
+      currentHoldings: '已识别当前持仓',
+      totalMarketValue: '总市值',
+      unrealizedPnl: '浮动盈亏',
+      portfolioWarnings: '组合风险提示',
+      holding: '持仓',
+      shares: '股',
+      cost: '成本',
+      action: '操作'
+    },
+    notes: {
+      holdingStrategyExit: (p) => `策略判断有退出风险：评分 ${p.score}，下行风险 ${p.risk}/100。`,
+      holdingReduceRisk: (p) => `下行风险 ${p.risk}/100；应降低仓位或收紧止损。`,
+      holdingAddOnlyInBatches: (p) => `策略支持度 ${p.score}/100；只适合分批，不适合追高。`,
+      holdingHoldWait: () => '暂时没有高信心加仓信号；以持有观察、等待确认为主。',
+      holdingLargeLoss: (p) => `持仓亏损 ${p.pnlPct}%；信号未修复前避免摊平。`,
+      holdingNoAverageDown: () => '风险、新闻或价格信号仍弱时，不建议摊平。',
+      holdingBelowCost: (p) => `持仓低于成本 ${p.pnlPct}%；加仓前先等价格稳定。`,
+      holdingConcentration: (p) => `单只仓位占比 ${p.weight}%；集中度风险需要主动控制。`,
+      holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，但回撤风险 ${p.risk}/100；应保护利润。`,
+      portfolioTotalDrawdown: (p) => `持仓整体亏损 ${p.pnlPct}%；优先检查风险。`,
+      portfolioConcentration: (p) => `${p.symbol} 占持仓 ${p.weight}%；集中度偏高。`,
+      portfolioLargeLoss: (p) => `${p.symbol} 亏损 ${p.pnlPct}%；避免被动摊平。`,
+      portfolioNoCurrentHolding: () => '文件中没有识别到实际数量大于 0 的当前持仓。'
+    }
+  },
+  'zh-TW': {
+    scanLabel: (count) => `持倉 ${count} 檔`,
+    importTitle: '匯入券商持倉',
+    importHint: '兼容東吳證券 A 股 .xls 文字匯出；只識別目前實際數量大於 0 的持倉，並自動做策略分析。',
+    importing: '正在匯入...',
+    chooseFile: '選擇持倉檔',
+    clear: '清除',
+    importFailed: '持倉檔匯入失敗。',
+    liveBackendRequired: '持倉匯入需要連線即時 Python 後端。',
+    ready: (count, ignoredRows) => `已識別 ${count} 檔目前持倉${ignoredRows ? ` · 忽略 ${ignoredRows} 行` : ''}`,
+    actions: { add: '只分批加倉', hold: '持有觀察', reduce: '降低風險', exit: '退出風險' },
+    fields: { quantity: '持倉數量', cost: '成本價', pnl: '浮動盈虧', weight: '倉位占比' },
+    markdown: {
+      importedHoldings: '匯入持倉',
+      source: '來源',
+      currentHoldings: '已識別目前持倉',
+      totalMarketValue: '總市值',
+      unrealizedPnl: '浮動盈虧',
+      portfolioWarnings: '組合風險提示',
+      holding: '持倉',
+      shares: '股',
+      cost: '成本',
+      action: '操作'
+    },
+    notes: {
+      holdingStrategyExit: (p) => `策略判斷有退出風險：評分 ${p.score}，下行風險 ${p.risk}/100。`,
+      holdingReduceRisk: (p) => `下行風險 ${p.risk}/100；應降低倉位或收緊停損。`,
+      holdingAddOnlyInBatches: (p) => `策略支持度 ${p.score}/100；只適合分批，不適合追高。`,
+      holdingHoldWait: () => '暫無高信心加倉訊號；以持有觀察、等待確認為主。',
+      holdingLargeLoss: (p) => `持倉虧損 ${p.pnlPct}%；訊號未修復前避免攤平。`,
+      holdingNoAverageDown: () => '風險、新聞或價格訊號仍弱時，不建議攤平。',
+      holdingBelowCost: (p) => `持倉低於成本 ${p.pnlPct}%；加倉前先等價格穩定。`,
+      holdingConcentration: (p) => `單檔倉位占比 ${p.weight}%；集中度風險需要主動控制。`,
+      holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，但回撤風險 ${p.risk}/100；應保護利潤。`,
+      portfolioTotalDrawdown: (p) => `持倉整體虧損 ${p.pnlPct}%；優先檢查風險。`,
+      portfolioConcentration: (p) => `${p.symbol} 占持倉 ${p.weight}%；集中度偏高。`,
+      portfolioLargeLoss: (p) => `${p.symbol} 虧損 ${p.pnlPct}%；避免被動攤平。`,
+      portfolioNoCurrentHolding: () => '檔案中沒有識別到實際數量大於 0 的目前持倉。'
+    }
+  },
+  'nan-TW': {
+    scanLabel: (count) => `持倉 ${count} 檔`,
+    importTitle: '匯入券商持倉',
+    importHint: '支援東吳證券 A 股 .xls 匯出；只分析實際數量大過 0 的持倉。',
+    importing: '咧匯入...',
+    chooseFile: '選持倉檔',
+    clear: '清掉',
+    importFailed: '持倉檔匯入無成功。',
+    liveBackendRequired: '持倉匯入愛連線即時 Python 後端。',
+    ready: (count, ignoredRows) => `已認出 ${count} 檔目前持倉${ignoredRows ? ` · 忽略 ${ignoredRows} 行` : ''}`,
+    actions: { add: '分批閣加', hold: '持有觀察', reduce: '降低風險', exit: '退出風險' },
+    fields: { quantity: '持倉數量', cost: '成本價', pnl: '浮動盈虧', weight: '倉位占比' },
+    markdown: {
+      importedHoldings: '匯入持倉',
+      source: '來源',
+      currentHoldings: '已認出目前持倉',
+      totalMarketValue: '總市值',
+      unrealizedPnl: '浮動盈虧',
+      portfolioWarnings: '組合風險提示',
+      holding: '持倉',
+      shares: '股',
+      cost: '成本',
+      action: '操作'
+    },
+    notes: {
+      holdingStrategyExit: (p) => `策略看著退出風險：分數 ${p.score}，下行風險 ${p.risk}/100。`,
+      holdingReduceRisk: (p) => `下行風險 ${p.risk}/100；著降低倉位抑是收緊停損。`,
+      holdingAddOnlyInBatches: (p) => `策略支持度 ${p.score}/100；只適合分批，毋通追高。`,
+      holdingHoldWait: () => '猶未有高信心加倉訊號；先持有觀察、等確認。',
+      holdingLargeLoss: (p) => `持倉虧損 ${p.pnlPct}%；訊號未修復前毋通攤平。`,
+      holdingNoAverageDown: () => '風險、新聞抑是價格訊號猶弱，毋建議攤平。',
+      holdingBelowCost: (p) => `持倉低過成本 ${p.pnlPct}%；加倉前先等價格穩定。`,
+      holdingConcentration: (p) => `單檔倉位占比 ${p.weight}%；集中度風險愛控制。`,
+      holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，毋過回撤風險 ${p.risk}/100；愛保護利潤。`,
+      portfolioTotalDrawdown: (p) => `持倉整體虧損 ${p.pnlPct}%；先檢查風險。`,
+      portfolioConcentration: (p) => `${p.symbol} 占持倉 ${p.weight}%；集中度偏懸。`,
+      portfolioLargeLoss: (p) => `${p.symbol} 虧損 ${p.pnlPct}%；避免被動攤平。`,
+      portfolioNoCurrentHolding: () => '檔案內底無認出實際數量大過 0 的目前持倉。'
+    }
+  },
+  ja: {
+    scanLabel: (count) => `保有 ${count} 件`,
+    importTitle: '証券会社の保有を取り込む',
+    importHint: '東呉証券の A 株 .xls テキスト出力に対応し、現在数量がある保有だけを自動分析します。',
+    importing: '取り込み中...',
+    chooseFile: '保有ファイルを選択',
+    clear: '解除',
+    importFailed: '保有ファイルの取り込みに失敗しました。',
+    liveBackendRequired: '保有ファイルの取り込みにはライブ Python バックエンドが必要です。',
+    ready: (count, ignoredRows) => `${count} 件の現在保有を認識${ignoredRows ? ` · ${ignoredRows} 行除外` : ''}`,
+    actions: { add: '分割で追加', hold: '保有して待つ', reduce: 'リスク縮小', exit: '撤退リスク' },
+    fields: { quantity: '保有数量', cost: '取得単価', pnl: '評価損益', weight: '保有比率' },
+    markdown: {
+      importedHoldings: '取り込み保有',
+      source: 'ソース',
+      currentHoldings: '認識した現在保有',
+      totalMarketValue: '評価額合計',
+      unrealizedPnl: '評価損益',
+      portfolioWarnings: 'ポートフォリオ警告',
+      holding: '保有',
+      shares: '株',
+      cost: '取得単価',
+      action: 'アクション'
+    },
+    notes: {
+      holdingStrategyExit: (p) => `戦略上は撤退リスクです: スコア ${p.score}、下落リスク ${p.risk}/100。`,
+      holdingReduceRisk: (p) => `下落リスクは ${p.risk}/100 です。保有を減らすか、損切り基準を厳しくしてください。`,
+      holdingAddOnlyInBatches: (p) => `戦略支持度は ${p.score}/100。追加する場合も分割のみです。`,
+      holdingHoldWait: () => 'まだ高確度の追加シグナルはありません。保有しながら確認を待ちます。',
+      holdingLargeLoss: (p) => `評価損は ${p.pnlPct}% です。シグナル改善前のナンピンは避けてください。`,
+      holdingNoAverageDown: () => 'リスク、ニュース、価格シグナルが弱い間はナンピンしないでください。',
+      holdingBelowCost: (p) => `取得価格を ${p.pnlPct}% 下回っています。追加前に価格安定を待ってください。`,
+      holdingConcentration: (p) => `保有比率は ${p.weight}% です。集中リスクを管理してください。`,
+      holdingProfitProtect: (p) => `${p.pnlPct}% の含み益がありますが、押し戻しリスクは ${p.risk}/100 です。利益保護を優先してください。`,
+      portfolioTotalDrawdown: (p) => `ポートフォリオの評価損は ${p.pnlPct}% です。リスク点検を優先してください。`,
+      portfolioConcentration: (p) => `${p.symbol} は保有全体の ${p.weight}% です。集中度が高いです。`,
+      portfolioLargeLoss: (p) => `${p.symbol} は ${p.pnlPct}% 下落しています。受け身のナンピンは避けてください。`,
+      portfolioNoCurrentHolding: () => '現在数量が 0 を超える保有はファイル内に見つかりませんでした。'
+    }
+  },
+  ko: {
+    scanLabel: (count) => `보유 ${count}개`,
+    importTitle: '증권사 보유 종목 가져오기',
+    importHint: '동오증권 A주 .xls 텍스트 내보내기를 지원하며 현재 수량이 있는 보유 종목만 자동 분석합니다.',
+    importing: '가져오는 중...',
+    chooseFile: '보유 파일 선택',
+    clear: '지우기',
+    importFailed: '보유 파일을 가져오지 못했습니다.',
+    liveBackendRequired: '보유 파일 가져오기는 실시간 Python 백엔드가 필요합니다.',
+    ready: (count, ignoredRows) => `현재 보유 ${count}개 인식${ignoredRows ? ` · ${ignoredRows}행 제외` : ''}`,
+    actions: { add: '분할 추가만', hold: '보유 / 대기', reduce: '리스크 축소', exit: '이탈 리스크' },
+    fields: { quantity: '보유 수량', cost: '평균 단가', pnl: '평가 손익', weight: '비중' },
+    markdown: {
+      importedHoldings: '가져온 보유 종목',
+      source: '출처',
+      currentHoldings: '인식한 현재 보유',
+      totalMarketValue: '총 평가금액',
+      unrealizedPnl: '평가 손익',
+      portfolioWarnings: '포트폴리오 경고',
+      holding: '보유',
+      shares: '주',
+      cost: '단가',
+      action: '조치'
+    },
+    notes: {
+      holdingStrategyExit: (p) => `전략상 이탈 리스크입니다: 점수 ${p.score}, 하방 리스크 ${p.risk}/100.`,
+      holdingReduceRisk: (p) => `하방 리스크가 ${p.risk}/100입니다. 노출을 줄이거나 손절 기준을 조정하세요.`,
+      holdingAddOnlyInBatches: (p) => `전략 지지도가 ${p.score}/100입니다. 추가 매수는 분할로만 접근하세요.`,
+      holdingHoldWait: () => '아직 확신 높은 추가 매수 신호가 없습니다. 보유하며 확인을 기다립니다.',
+      holdingLargeLoss: (p) => `평가 손실이 ${p.pnlPct}%입니다. 신호가 회복되기 전 물타기는 피하세요.`,
+      holdingNoAverageDown: () => '리스크, 뉴스, 가격 신호가 약한 동안에는 물타기를 하지 마세요.',
+      holdingBelowCost: (p) => `평균 단가 대비 ${p.pnlPct}% 낮습니다. 추가 전 가격 안정화를 기다리세요.`,
+      holdingConcentration: (p) => `보유 비중이 ${p.weight}%입니다. 집중 리스크 관리가 필요합니다.`,
+      holdingProfitProtect: (p) => `${p.pnlPct}% 수익 상태지만 되돌림 리스크가 ${p.risk}/100입니다. 수익 보호를 우선하세요.`,
+      portfolioTotalDrawdown: (p) => `포트폴리오 손실이 ${p.pnlPct}%입니다. 리스크 점검을 우선하세요.`,
+      portfolioConcentration: (p) => `${p.symbol}이 보유 비중의 ${p.weight}%입니다. 집중도가 높습니다.`,
+      portfolioLargeLoss: (p) => `${p.symbol}이 ${p.pnlPct}% 하락했습니다. 수동적인 물타기는 피하세요.`,
+      portfolioNoCurrentHolding: () => '현재 수량이 0보다 큰 보유 종목을 파일에서 찾지 못했습니다.'
+    }
+  }
+};
+
+function portfolioText() {
+  return portfolioTexts[locale.value] ?? portfolioTexts.en;
+}
+
+function portfolioScanLabel(count: number) {
+  return portfolioText().scanLabel(count);
+}
+
+function portfolioImportTitle() {
+  return portfolioText().importTitle;
+}
+
+function portfolioImportHint() {
+  return portfolioText().importHint;
+}
+
+function portfolioImportButtonLabel() {
+  return importingPortfolio.value ? portfolioText().importing : portfolioText().chooseFile;
+}
+
+function clearPortfolioLabel() {
+  return portfolioText().clear;
+}
+
+function portfolioReadyLabel(portfolio: PortfolioImportResponse | PortfolioAnalysis) {
+  return portfolioText().ready(portfolio.recognizedCount, portfolio.ignoredRows || 0);
+}
+
+function portfolioCurrency() {
+  return 'CNY';
+}
+
+function moneyLabel(value: number | null | undefined, currency = portfolioCurrency()) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return `${currency} ${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function percentLabel(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return `${Number(value) > 0 ? '+' : ''}${Number(value).toFixed(1)}%`;
+}
+
+function signedMoneyLabel(value: number | null | undefined, currency = portfolioCurrency()) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return `${Number(value) > 0 ? '+' : ''}${moneyLabel(value, currency)}`;
+}
+
+function holdingActionLabel(action: HoldingAction) {
+  return portfolioText().actions[action];
+}
+
+function holdingFieldLabel(field: HoldingFieldKey) {
+  return portfolioText().fields[field];
+}
+
+function holdingNoteLabel(note: HoldingNote) {
+  const formatter = portfolioText().notes[note.key];
+  return formatter ? formatter(note.params ?? {}) : note.key;
+}
+
+function portfolioImportErrorLabel(cause: unknown) {
+  const copy = portfolioText();
+  const message = cause instanceof Error ? cause.message : '';
+  if (!message || message === 'Failed to import holdings file') return copy.importFailed;
+  if (message.includes('live Python backend') || message.includes('Static preview')) return copy.liveBackendRequired;
+  return locale.value === 'en' ? message : copy.importFailed;
+}
+
+function triggerPortfolioImport() {
+  if (loading.value || importingPortfolio.value) return;
+  portfolioFileInput.value?.click();
+}
+
+async function onPortfolioFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  importingPortfolio.value = true;
+  portfolioImportError.value = '';
+  analysisPortfolio.value = null;
+  try {
+    const imported = await importPortfolioFile(file);
+    importedPortfolio.value = imported;
+    if (!imported.positions.length) {
+      portfolioImportError.value = holdingNoteLabel({ key: 'portfolioNoCurrentHolding', severity: 'warning', params: {} });
+      return;
+    }
+    symbolText.value = imported.symbols.join(', ');
+    const importedMarkets = [...new Set(imported.positions.map((position) => position.market).filter(isMarket))];
+    if (importedMarkets.length) selectedMarkets.value = importedMarkets;
+    resultMarketFilter.value = 'all';
+    resultVerdictFilter.value = 'all';
+    activeView.value = 'stocks';
+    await nextTick();
+    await runAnalysis();
+  } catch (cause) {
+    portfolioImportError.value = portfolioImportErrorLabel(cause);
+  } finally {
+    importingPortfolio.value = false;
+    input.value = '';
+    refreshDataMode();
+  }
+}
+
+function clearImportedPortfolio() {
+  const importedSymbols = portfolioSymbols.value.join(', ');
+  importedPortfolio.value = null;
+  analysisPortfolio.value = null;
+  portfolioImportError.value = '';
+  if (symbolText.value === importedSymbols) {
+    symbolText.value = '';
+  }
+}
+
 function savedScanTitle(scan: SavedScan) {
   const first = scan.picks[0];
   const lead = first ? `${first.symbol} ${first.name}` : scan.strategyName;
@@ -457,7 +842,8 @@ function makeSavedScan(): SavedScan {
     picks: cloneJson(picks.value),
     sectors: cloneJson(sectors.value),
     errors: cloneJson(dataIssues.value),
-    scanInfo: scanInfo.value ? { ...scanInfo.value } : null
+    scanInfo: scanInfo.value ? { ...scanInfo.value } : null,
+    portfolio: activePortfolio.value ? cloneJson(activePortfolio.value) : null
   };
 }
 
@@ -473,6 +859,8 @@ function loadSavedScan(scan: SavedScan) {
   sectors.value = cloneJson(scan.sectors);
   dataIssues.value = cloneJson(scan.errors);
   scanInfo.value = scan.scanInfo ? { ...scan.scanInfo } : null;
+  importedPortfolio.value = scan.portfolio ? cloneJson(scan.portfolio) as PortfolioImportResponse : null;
+  analysisPortfolio.value = scan.portfolio && 'matchedCount' in scan.portfolio ? cloneJson(scan.portfolio) as PortfolioAnalysis : null;
   generatedAt.value = scan.generatedAt;
   dataMode.value = scan.dataMode;
   selectedMarkets.value = scan.markets.filter(isMarket);
@@ -530,6 +918,22 @@ function currentScanMarkdown() {
     ''
   ];
 
+  const portfolio = activePortfolio.value;
+  if (portfolio) {
+    const copy = portfolioText().markdown;
+    lines.push(`## ${copy.importedHoldings}`);
+    lines.push('');
+    lines.push(`- ${copy.source}: ${markdownLine(portfolio.sourceName)}`);
+    lines.push(`- ${copy.currentHoldings}: ${portfolio.recognizedCount}`);
+    lines.push(`- ${copy.totalMarketValue}: ${moneyLabel(portfolio.totalMarketValue)}`);
+    lines.push(`- ${copy.unrealizedPnl}: ${signedMoneyLabel(portfolio.totalUnrealizedPnl)} (${percentLabel(portfolio.totalUnrealizedPnlPct)})`);
+    if (portfolio.warnings?.length) {
+      lines.push(`- ${copy.portfolioWarnings}:`);
+      portfolio.warnings.slice(0, 4).forEach((note) => lines.push(`  - ${markdownLine(holdingNoteLabel(note))}`));
+    }
+    lines.push('');
+  }
+
   picks.value.forEach((pick, index) => {
     lines.push(`## ${index + 1}. ${pick.symbol} · ${pick.name}`);
     lines.push('');
@@ -543,6 +947,11 @@ function currentScanMarkdown() {
     if (pick.tPlan) {
       lines.push(`- T plan: ${markdownLine(pointLabel(pick.tPlan.summary))}`);
       lines.push(`- T range: entry ${pick.currency} ${pick.tPlan.entryZone.low}-${pick.tPlan.entryZone.high}, take profit ${pick.currency} ${pick.tPlan.takeProfitZone.low}-${pick.tPlan.takeProfitZone.high}, stop ${pick.currency} ${pick.tPlan.stopLoss}`);
+    }
+    if (pick.holding && pick.holdingAnalysis) {
+      const copy = portfolioText().markdown;
+      lines.push(`- ${copy.holding}: ${pick.holding.quantity} ${copy.shares}, ${copy.cost} ${moneyLabel(pick.holding.costPrice, pick.currency)}, ${holdingFieldLabel('pnl')} ${percentLabel(pick.holding.unrealizedPnlPct)}, ${copy.action} ${holdingActionLabel(pick.holdingAnalysis.action)}`);
+      pick.holdingAnalysis.notes.slice(0, 3).forEach((note) => lines.push(`  - ${markdownLine(holdingNoteLabel(note))}`));
     }
     const reasons = reasonLabels(pick).slice(0, 3);
     if (reasons.length) {
@@ -1872,6 +2281,7 @@ function upsertStreamingPick(pick: Pick) {
 function handleAnalysisEvent(event: AnalysisStreamEvent) {
   if (event.type === 'started') {
     scanInfo.value = event.scan;
+    if (event.portfolio) analysisPortfolio.value = event.portfolio;
     generatedAt.value = '';
     sectors.value = [];
     loadingStepIndex.value = 0;
@@ -1887,6 +2297,7 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
       sectors.value = event.sectors;
     }
     scanInfo.value = event.scan;
+    if (event.portfolio) analysisPortfolio.value = event.portfolio;
     loadingStepIndex.value = Math.max(loadingStepIndex.value, 2);
     return;
   }
@@ -1896,6 +2307,7 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
       sectors.value = event.sectors;
     }
     scanInfo.value = event.scan;
+    if (event.portfolio) analysisPortfolio.value = event.portfolio;
     loadingStepIndex.value = Math.max(loadingStepIndex.value, 2);
     return;
   }
@@ -1903,6 +2315,7 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
   sectors.value = event.sectors;
   dataIssues.value = event.errors;
   scanInfo.value = event.scan;
+  analysisPortfolio.value = event.portfolio ?? null;
   generatedAt.value = new Date(event.generatedAt).toLocaleString();
   loadingStepIndex.value = analysisSteps.value.length - 1;
 }
@@ -1919,6 +2332,7 @@ async function runAnalysis() {
   picks.value = [];
   sectors.value = [];
   dataIssues.value = [];
+  analysisPortfolio.value = null;
   generatedAt.value = '';
   try {
     await analyzeStocksStream({
@@ -1926,7 +2340,8 @@ async function runAnalysis() {
       symbols: symbols.value,
       strategyId: useCustom.value ? undefined : selectedStrategyId.value,
       customWeights: useCustom.value ? { ...customWeights } : undefined,
-      refresh: true
+      refresh: true,
+      portfolio: importedPortfolio.value ?? undefined
     }, handleAnalysisEvent, { signal: controller.signal });
   } catch (cause) {
     error.value = isAnalysisAbort(cause) ? t.value.scanCancelled : (cause instanceof Error ? cause.message : 'Unknown error');
@@ -2110,6 +2525,38 @@ onUnmounted(() => {
               <strong>{{ t.symbolsBlank }}</strong>
               <span>{{ t.scanPurpose }}</span>
             </div>
+            <div class="portfolio-import">
+              <div>
+                <strong>{{ portfolioImportTitle() }}</strong>
+                <span>{{ portfolioImportHint() }}</span>
+              </div>
+              <input
+                ref="portfolioFileInput"
+                class="visually-hidden"
+                type="file"
+                accept=".xls,.xlsx,.csv,.tsv,.txt,text/plain,text/csv,application/vnd.ms-excel"
+                @change="onPortfolioFileSelected"
+              />
+              <div class="portfolio-import-actions">
+                <button class="ghost" type="button" :disabled="loading || importingPortfolio" @click="triggerPortfolioImport">
+                  {{ portfolioImportButtonLabel() }}
+                </button>
+                <button v-if="activePortfolio" class="ghost" type="button" :disabled="loading || importingPortfolio" @click="clearImportedPortfolio">
+                  {{ clearPortfolioLabel() }}
+                </button>
+              </div>
+              <div v-if="activePortfolio" class="portfolio-summary">
+                <span>{{ portfolioReadyLabel(activePortfolio) }}</span>
+                <strong>{{ moneyLabel(activePortfolio.totalMarketValue) }}</strong>
+                <small>{{ signedMoneyLabel(activePortfolio.totalUnrealizedPnl) }} · {{ percentLabel(activePortfolio.totalUnrealizedPnlPct) }}</small>
+                <ul v-if="activePortfolio.warnings?.length">
+                  <li v-for="note in activePortfolio.warnings.slice(0, 3)" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
+                    {{ holdingNoteLabel(note) }}
+                  </li>
+                </ul>
+              </div>
+              <p v-if="portfolioImportError" class="portfolio-error">{{ portfolioImportError }}</p>
+            </div>
             <details class="optional-symbols" @toggle="keepOptionalSymbolsVisible">
               <summary>{{ t.optionalSymbols }}</summary>
               <textarea v-model="symbolText" rows="4" spellcheck="false" :placeholder="t.symbolsPlaceholder"></textarea>
@@ -2245,6 +2692,33 @@ onUnmounted(() => {
               <span>{{ predictionScoreLabel('pullback', pick) }}</span>
               <span v-if="pick.tPlan" class="t-score-chip" :class="pick.tPlan.suitability">{{ predictionScoreLabel('t', pick) }} · {{ tSuitabilityLabel(pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
+            </div>
+
+            <div v-if="pick.holding && pick.holdingAnalysis" class="research-panel holding-panel" :class="pick.holdingAnalysis.action">
+              <strong>{{ holdingActionLabel(pick.holdingAnalysis.action) }} · {{ pick.holding.name }}</strong>
+              <div class="holding-grid">
+                <div>
+                  <span>{{ holdingFieldLabel('quantity') }}</span>
+                  <b>{{ pick.holding.quantity }}</b>
+                </div>
+                <div>
+                  <span>{{ holdingFieldLabel('cost') }}</span>
+                  <b>{{ moneyLabel(pick.holding.costPrice, pick.currency) }}</b>
+                </div>
+                <div>
+                  <span>{{ holdingFieldLabel('pnl') }}</span>
+                  <b>{{ signedMoneyLabel(pick.holding.unrealizedPnl, pick.currency) }} · {{ percentLabel(pick.holding.unrealizedPnlPct) }}</b>
+                </div>
+                <div>
+                  <span>{{ holdingFieldLabel('weight') }}</span>
+                  <b>{{ pick.holdingAnalysis.positionWeightPct }}%</b>
+                </div>
+              </div>
+              <ul class="holding-notes">
+                <li v-for="note in pick.holdingAnalysis.notes" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
+                  {{ holdingNoteLabel(note) }}
+                </li>
+              </ul>
             </div>
 
             <div v-if="pick.tPlan" class="research-panel t-plan-panel" :class="pick.tPlan.suitability">

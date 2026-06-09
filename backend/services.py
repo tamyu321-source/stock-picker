@@ -1426,11 +1426,13 @@ def _symbols_from_payload(
     if manual_inputs:
         provider = universe_provider or MarketUniverseProvider()
         markets = payload.get("markets") or [market["id"] for market in MARKETS]
+        source = "portfolio-import" if payload.get("portfolio") or payload.get("portfolioPositions") else "manual"
+        manual_limit = max(25, len(manual_inputs)) if source == "portfolio-import" else 25
         if hasattr(provider, "resolve_manual_inputs"):
-            resolved, discovery_errors = provider.resolve_manual_inputs(manual_inputs, markets, limit=25)
-            return resolved, discovery_errors, "manual"
+            resolved, discovery_errors = provider.resolve_manual_inputs(manual_inputs, markets, limit=manual_limit)
+            return resolved, discovery_errors, source
         symbols = [symbol.upper() for symbol in manual_inputs]
-        return [DiscoveredSymbol(symbol=symbol, name=symbol, market=infer_market(symbol), source="manual") for symbol in symbols[:25]], [], "manual"
+        return [DiscoveredSymbol(symbol=symbol, name=symbol, market=infer_market(symbol), source=source) for symbol in symbols[:manual_limit]], [], source
     markets = payload.get("markets") or [market["id"] for market in MARKETS]
     provider = universe_provider or MarketUniverseProvider()
     discovered, discovery_errors = provider.discover(markets, limit_per_market=limit_per_market)
@@ -1794,6 +1796,167 @@ def _action_plan(
     }
 
 
+def _portfolio_context_from_payload(payload: dict) -> dict | None:
+    portfolio = payload.get("portfolio") if isinstance(payload.get("portfolio"), dict) else {}
+    raw_positions = portfolio.get("positions") if isinstance(portfolio, dict) else None
+    if raw_positions is None:
+        raw_positions = payload.get("portfolioPositions")
+    if not isinstance(raw_positions, list):
+        return None
+
+    positions = []
+    for raw_position in raw_positions:
+        if not isinstance(raw_position, dict):
+            continue
+        symbol = str(raw_position.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        position = {
+            "symbol": symbol,
+            "code": str(raw_position.get("code") or symbol.split(".")[0]),
+            "name": str(raw_position.get("name") or symbol),
+            "market": str(raw_position.get("market") or infer_market(symbol)),
+            "exchange": str(raw_position.get("exchange") or ""),
+            "quantity": _metric_number(raw_position.get("quantity")) or 0,
+            "availableQuantity": _metric_number(raw_position.get("availableQuantity")),
+            "frozenQuantity": _metric_number(raw_position.get("frozenQuantity")),
+            "costPrice": _metric_number(raw_position.get("costPrice")),
+            "lastPrice": _metric_number(raw_position.get("lastPrice")),
+            "marketValue": _metric_number(raw_position.get("marketValue")),
+            "costAmount": _metric_number(raw_position.get("costAmount")),
+            "unrealizedPnl": _metric_number(raw_position.get("unrealizedPnl")),
+            "unrealizedPnlPct": _metric_number(raw_position.get("unrealizedPnlPct")),
+            "openDate": raw_position.get("openDate"),
+        }
+        if position["marketValue"] is None and position["quantity"] and position["lastPrice"] is not None:
+            position["marketValue"] = round(position["quantity"] * position["lastPrice"], 4)
+        if position["costAmount"] is None and position["quantity"] and position["costPrice"] is not None:
+            position["costAmount"] = round(position["quantity"] * position["costPrice"], 4)
+        if position["unrealizedPnl"] is None and position["marketValue"] is not None and position["costAmount"] is not None:
+            position["unrealizedPnl"] = round(position["marketValue"] - position["costAmount"], 4)
+        if position["unrealizedPnlPct"] is None and position["unrealizedPnl"] is not None and position["costAmount"]:
+            position["unrealizedPnlPct"] = round(position["unrealizedPnl"] / position["costAmount"] * 100, 4)
+        positions.append(position)
+
+    if not positions:
+        return None
+
+    positions.sort(key=lambda item: item.get("marketValue") or 0, reverse=True)
+    total_market_value = _metric_number(portfolio.get("totalMarketValue")) if isinstance(portfolio, dict) else None
+    total_cost_amount = _metric_number(portfolio.get("totalCostAmount")) if isinstance(portfolio, dict) else None
+    total_unrealized_pnl = _metric_number(portfolio.get("totalUnrealizedPnl")) if isinstance(portfolio, dict) else None
+    if total_market_value is None:
+        total_market_value = sum(_metric_number(position.get("marketValue")) or 0 for position in positions)
+    if total_cost_amount is None:
+        total_cost_amount = sum(_metric_number(position.get("costAmount")) or 0 for position in positions)
+    if total_unrealized_pnl is None:
+        total_unrealized_pnl = sum(_metric_number(position.get("unrealizedPnl")) or 0 for position in positions)
+    total_unrealized_pnl_pct = _metric_number(portfolio.get("totalUnrealizedPnlPct")) if isinstance(portfolio, dict) else None
+    if total_unrealized_pnl_pct is None and total_cost_amount:
+        total_unrealized_pnl_pct = total_unrealized_pnl / total_cost_amount * 100
+
+    return {
+        "sourceName": str(portfolio.get("sourceName") or "holdings export") if isinstance(portfolio, dict) else "holdings export",
+        "sourceType": str(portfolio.get("sourceType") or "portfolio-import") if isinstance(portfolio, dict) else "portfolio-import",
+        "importedAt": portfolio.get("importedAt") if isinstance(portfolio, dict) else None,
+        "positions": positions,
+        "position_map": {position["symbol"]: position for position in positions},
+        "totalMarketValue": round(total_market_value or 0, 4),
+        "totalCostAmount": round(total_cost_amount or 0, 4),
+        "totalUnrealizedPnl": round(total_unrealized_pnl or 0, 4),
+        "totalUnrealizedPnlPct": round(total_unrealized_pnl_pct, 4) if total_unrealized_pnl_pct is not None else None,
+        "importWarnings": portfolio.get("warnings", []) if isinstance(portfolio.get("warnings"), list) else [],
+        "ignoredRows": portfolio.get("ignoredRows", 0) if isinstance(portfolio, dict) else 0,
+    }
+
+
+def _holding_note(key: str, severity: str = "info", **params) -> dict:
+    return {"key": key, "severity": severity, "params": params}
+
+
+def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> dict:
+    market_value = _metric_number(position.get("marketValue")) or 0
+    position_weight = market_value / total_market_value * 100 if total_market_value else 0
+    pnl_pct = _metric_number(position.get("unrealizedPnlPct"))
+    downside_risk = _metric_number(pick.get("downsideRiskScore")) or 0
+    pullback_risk = _metric_number(pick.get("pullbackRiskScore")) or 0
+    notes = []
+
+    if pick.get("verdict") == "sell" or downside_risk >= DOWNSIDE_URGENT_EXIT_FLOOR:
+        action = "exit"
+        notes.append(_holding_note("holdingStrategyExit", "danger", score=pick["score"], risk=round(downside_risk, 1)))
+    elif downside_risk >= DOWNSIDE_EXIT_FLOOR or position_weight >= 35:
+        action = "reduce"
+        notes.append(_holding_note("holdingReduceRisk", "warning", risk=round(downside_risk, 1)))
+    elif pick.get("verdict") == "buy" and pick.get("score", 0) >= STRICT_BUY_SCORE_FLOOR and (pnl_pct is None or pnl_pct > -8):
+        action = "add"
+        notes.append(_holding_note("holdingAddOnlyInBatches", "info", score=pick["score"]))
+    else:
+        action = "hold"
+        notes.append(_holding_note("holdingHoldWait", "info", score=pick["score"]))
+
+    if pnl_pct is not None and pnl_pct <= -20:
+        notes.append(_holding_note("holdingLargeLoss", "danger", pnlPct=round(pnl_pct, 1)))
+        notes.append(_holding_note("holdingNoAverageDown", "warning"))
+    elif pnl_pct is not None and pnl_pct <= -10:
+        notes.append(_holding_note("holdingBelowCost", "warning", pnlPct=round(pnl_pct, 1)))
+
+    if position_weight >= 35:
+        notes.append(_holding_note("holdingConcentration", "danger", weight=round(position_weight, 1)))
+    elif position_weight >= 20:
+        notes.append(_holding_note("holdingConcentration", "warning", weight=round(position_weight, 1)))
+
+    if pnl_pct is not None and pnl_pct >= 12 and (pullback_risk >= PULLBACK_RISK_BLOCK_BUY_FLOOR or _is_overheated_price_jump(pick.get("change"))):
+        notes.append(_holding_note("holdingProfitProtect", "warning", pnlPct=round(pnl_pct, 1), risk=round(pullback_risk, 1)))
+
+    return {
+        "action": action,
+        "positionWeightPct": round(position_weight, 1),
+        "notes": notes[:6],
+    }
+
+
+def _portfolio_summary(context: dict, picks: list[dict]) -> dict | None:
+    portfolio = context.get("portfolio")
+    if not portfolio:
+        return None
+    analyzed_symbols = {pick["symbol"] for pick in picks}
+    position_symbols = {position["symbol"] for position in portfolio["positions"]}
+    warnings = list(portfolio.get("importWarnings") or [])
+    if portfolio.get("totalUnrealizedPnlPct") is not None and portfolio["totalUnrealizedPnlPct"] <= -10:
+        warnings.append(_holding_note("portfolioTotalDrawdown", "danger", pnlPct=round(portfolio["totalUnrealizedPnlPct"], 1)))
+    return {
+        "sourceName": portfolio["sourceName"],
+        "sourceType": portfolio["sourceType"],
+        "importedAt": portfolio.get("importedAt"),
+        "positions": portfolio["positions"],
+        "recognizedCount": len(portfolio["positions"]),
+        "matchedCount": len(position_symbols & analyzed_symbols),
+        "unmatchedSymbols": sorted(position_symbols - analyzed_symbols),
+        "ignoredRows": portfolio.get("ignoredRows", 0),
+        "totalMarketValue": portfolio["totalMarketValue"],
+        "totalCostAmount": portfolio["totalCostAmount"],
+        "totalUnrealizedPnl": portfolio["totalUnrealizedPnl"],
+        "totalUnrealizedPnlPct": portfolio["totalUnrealizedPnlPct"],
+        "warnings": warnings[:8],
+    }
+
+
+def _apply_portfolio_context(context: dict, picks: list[dict]) -> dict | None:
+    portfolio = context.get("portfolio")
+    if not portfolio:
+        return None
+    total_market_value = portfolio.get("totalMarketValue") or 0
+    position_map = portfolio["position_map"]
+    for pick in picks:
+        position = position_map.get(pick["symbol"])
+        if not position:
+            continue
+        pick["holding"] = position
+        pick["holdingAnalysis"] = _holding_analysis(pick, position, total_market_value)
+    return _portfolio_summary(context, picks)
+
+
 def _analysis_context(payload: dict, market_provider=None, news_crawler=None, universe_provider=None) -> dict:
     markets = set(payload.get("markets") or [market["id"] for market in MARKETS])
     strategy = _strategy_from_payload(payload)
@@ -1805,10 +1968,16 @@ def _analysis_context(payload: dict, market_provider=None, news_crawler=None, un
     picks = []
     errors = []
     requested_symbols = [str(symbol).strip() for symbol in payload.get("symbols", []) if str(symbol).strip()]
+    portfolio_context = _portfolio_context_from_payload(payload)
+    portfolio_symbols = [position["symbol"] for position in portfolio_context["positions"]] if portfolio_context else []
+    symbol_payload = payload
+    if not requested_symbols and portfolio_symbols:
+        requested_symbols = portfolio_symbols
+        symbol_payload = {**payload, "symbols": requested_symbols}
     auto_scan = not requested_symbols
     requested_markets = payload.get("markets") or [market["id"] for market in MARKETS]
     discovered_symbols, discovery_errors, universe_source = _symbols_from_payload(
-        payload,
+        symbol_payload,
         universe_provider,
         AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET,
     )
@@ -1828,6 +1997,7 @@ def _analysis_context(payload: dict, market_provider=None, news_crawler=None, un
         "discovery_errors": discovery_errors,
         "universe_source": universe_source,
         "discovery_limit": AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET,
+        "portfolio": portfolio_context,
     }
 
 
@@ -2049,8 +2219,9 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
             break
         symbols = context["symbols"]
 
+    portfolio_summary = _apply_portfolio_context(context, display_picks)
     sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
-    return {
+    response = {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "markets": MARKETS,
         "strategy": strategy,
@@ -2059,6 +2230,9 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
         "errors": errors,
         "scan": _scan_state(context, display_picks, errors),
     }
+    if portfolio_summary:
+        response["portfolio"] = portfolio_summary
+    return response
 
 
 def stream_analyze(payload: dict, market_provider=None, news_crawler=None, universe_provider=None):
@@ -2081,6 +2255,7 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
         markets=MARKETS,
         strategy=strategy,
         scan=_scan_state(context, picks, errors),
+        portfolio=_portfolio_summary(context, picks),
     )
 
     evaluated_symbols = set()
@@ -2096,16 +2271,18 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                         pick = future.result()
                         picks.append(pick)
                         display_picks = _finish_picks(picks, context["auto_scan"])
+                        portfolio_summary = _apply_portfolio_context(context, display_picks)
                         _refresh_scan_quality_context(context, picks)
                         sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
                         rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
-                        yield event("pick", pick=pick, picks=display_picks, sectors=sectors, rank=rank, scan=_scan_state(context, display_picks, errors))
+                        yield event("pick", pick=pick, picks=display_picks, sectors=sectors, rank=rank, scan=_scan_state(context, display_picks, errors), portfolio=portfolio_summary)
                     except Exception as exc:
                         error_message = _friendly_data_error(symbol, exc)
                         errors.append({"symbol": symbol, "error": error_message})
                         display_picks = _finish_picks(picks, context["auto_scan"])
+                        portfolio_summary = _apply_portfolio_context(context, display_picks)
                         _refresh_scan_quality_context(context, picks)
-                        yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(picks if context["auto_scan"] else display_picks), scan=_scan_state(context, display_picks, errors))
+                        yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(picks if context["auto_scan"] else display_picks), scan=_scan_state(context, display_picks, errors), portfolio=portfolio_summary)
             evaluated_symbols.update(item.symbol for item in pending_symbols)
 
         display_picks = _finish_picks(picks, context["auto_scan"])
@@ -2118,18 +2295,21 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
         symbols = context["symbols"]
 
     display_picks = display_picks or _finish_picks(picks, context["auto_scan"])
+    portfolio_summary = _apply_portfolio_context(context, display_picks)
     _refresh_scan_quality_context(context, picks)
     sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
-    yield event(
-        "complete",
-        generatedAt=generated_at,
-        markets=MARKETS,
-        strategy=strategy,
-        picks=display_picks,
-        sectors=sectors,
-        errors=errors,
-        scan=_scan_state(context, display_picks, errors),
-    )
+    complete_payload = {
+        "generatedAt": generated_at,
+        "markets": MARKETS,
+        "strategy": strategy,
+        "picks": display_picks,
+        "sectors": sectors,
+        "errors": errors,
+        "scan": _scan_state(context, display_picks, errors),
+    }
+    if portfolio_summary:
+        complete_payload["portfolio"] = portfolio_summary
+    yield event("complete", **complete_payload)
 
 
 def _dedupe_articles(articles: list[Article]) -> list[Article]:

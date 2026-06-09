@@ -196,6 +196,59 @@ export interface ActionPlan {
   riskControls: DecisionPoint[];
 }
 
+export type HoldingAction = 'add' | 'hold' | 'reduce' | 'exit';
+export type HoldingNoteSeverity = 'info' | 'warning' | 'danger';
+
+export interface HoldingPosition {
+  symbol: string;
+  code: string;
+  name: string;
+  market: Market;
+  exchange?: string;
+  quantity: number;
+  availableQuantity?: number | null;
+  frozenQuantity?: number | null;
+  costPrice?: number | null;
+  lastPrice?: number | null;
+  marketValue?: number | null;
+  costAmount?: number | null;
+  unrealizedPnl?: number | null;
+  unrealizedPnlPct?: number | null;
+  openDate?: string | null;
+}
+
+export interface HoldingNote {
+  key: string;
+  severity: HoldingNoteSeverity;
+  params: Record<string, string | number>;
+}
+
+export interface HoldingAnalysis {
+  action: HoldingAction;
+  positionWeightPct: number;
+  notes: HoldingNote[];
+}
+
+export interface PortfolioImportResponse {
+  sourceName: string;
+  sourceType: string;
+  importedAt: string;
+  positions: HoldingPosition[];
+  symbols: string[];
+  recognizedCount: number;
+  ignoredRows: number;
+  totalMarketValue: number;
+  totalCostAmount: number;
+  totalUnrealizedPnl: number;
+  totalUnrealizedPnlPct?: number | null;
+  warnings: HoldingNote[];
+}
+
+export interface PortfolioAnalysis extends PortfolioImportResponse {
+  matchedCount: number;
+  unmatchedSymbols: string[];
+}
+
 export type TTradeSuitability = 'candidate' | 'watch' | 'avoid';
 
 export interface PriceZone {
@@ -255,6 +308,8 @@ export interface Pick {
   newsAnalysis?: NewsAnalysis;
   financialAnalysis?: FinancialAnalysis;
   actionPlan?: ActionPlan;
+  holding?: HoldingPosition;
+  holdingAnalysis?: HoldingAnalysis;
 }
 
 export interface SectorConstituent {
@@ -292,6 +347,7 @@ export interface AnalysisResponse {
   picks: Pick[];
   sectors: SectorAnalysis[];
   errors: Array<{ symbol: string; error: string }>;
+  portfolio?: PortfolioAnalysis;
   scan?: {
     auto: boolean;
     source: string;
@@ -320,6 +376,7 @@ export type AnalysisStreamEvent =
       generatedAt: string;
       markets: MarketOption[];
       strategy: Strategy;
+      portfolio?: PortfolioAnalysis | null;
       scan: AnalysisScan;
     }
   | {
@@ -327,6 +384,7 @@ export type AnalysisStreamEvent =
       pick: Pick;
       picks?: Pick[];
       sectors?: SectorAnalysis[];
+      portfolio?: PortfolioAnalysis | null;
       rank: number;
       scan: AnalysisScan;
     }
@@ -335,6 +393,7 @@ export type AnalysisStreamEvent =
       symbol: string;
       error: string;
       sectors?: SectorAnalysis[];
+      portfolio?: PortfolioAnalysis | null;
       scan: AnalysisScan;
     }
   | AnalysisResponse & {
@@ -662,6 +721,7 @@ export async function analyzeStocks(payload: {
   strategyId?: string;
   customWeights?: StrategyWeights;
   refresh?: boolean;
+  portfolio?: PortfolioImportResponse | PortfolioAnalysis;
 }): Promise<AnalysisResponse> {
   if (staticDemoBuild || usingStaticFallback) {
     return fallbackAnalysis(payload);
@@ -688,6 +748,7 @@ export async function analyzeStocksStream(
     strategyId?: string;
     customWeights?: StrategyWeights;
     refresh?: boolean;
+    portfolio?: PortfolioImportResponse | PortfolioAnalysis;
   },
   onEvent: (event: AnalysisStreamEvent) => void,
   options: { signal?: AbortSignal } = {}
@@ -770,4 +831,22 @@ export async function analyzeStocksStream(
   consumeLine(buffer);
   if (!finalResult) throw new Error('Analysis stream ended before completion');
   return finalResult;
+}
+
+export async function importPortfolioFile(file: File): Promise<PortfolioImportResponse> {
+  if (staticDemoBuild || usingStaticFallback) {
+    throw new Error('Holdings import requires the live Python backend.');
+  }
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await fetch('/api/portfolio/import', {
+    method: 'POST',
+    body: formData
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.error || 'Failed to import holdings file');
+  }
+  if (!hasContentType(response, 'application/json')) throw new Error('Holdings import requires the live Python backend.');
+  return response.json();
 }
