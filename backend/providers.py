@@ -1191,14 +1191,14 @@ def _eastmoney_cn_fundamentals(symbol: str) -> dict[str, Any]:
         except Exception:
             time.sleep(0.25 * (attempt + 1))
     if not data:
-        return {}
+        return _cn_fund_flow(symbol)
 
     pe = _eastmoney_scaled(data.get("f162"))
     pb = _eastmoney_scaled(data.get("f167"))
     turnover = _eastmoney_scaled(data.get("f168"))
     change = _eastmoney_scaled(data.get("f170"))
     volume = _eastmoney_number(data.get("f47"))
-    return {
+    fundamentals = {
         "shortName": data.get("f58"),
         "trailingPE": pe if pe and pe > 0 else None,
         "priceToBook": pb if pb and pb > 0 else None,
@@ -1209,6 +1209,135 @@ def _eastmoney_cn_fundamentals(symbol: str) -> dict[str, Any]:
         "marketCap": _eastmoney_number(data.get("f116")),
         "floatMarketCap": _eastmoney_number(data.get("f117")),
     }
+    fundamentals.update(_cn_fund_flow(symbol))
+    return fundamentals
+
+
+def _cn_fund_flow(symbol: str) -> dict[str, Any]:
+    for provider in [_sina_cn_fund_flow, _eastmoney_cn_fund_flow]:
+        try:
+            flow = provider(symbol)
+        except Exception:
+            flow = {}
+        if any(key != "fundFlowSource" for key in flow):
+            return flow
+    return {}
+
+
+def _sina_cn_symbol(symbol: str) -> str:
+    upper = symbol.upper()
+    code = upper.split(".")[0]
+    prefix = "sh" if upper.endswith(".SS") else "sz"
+    return f"{prefix}{code}"
+
+
+def _sina_ratio_percent(value: Any) -> float | None:
+    number = _eastmoney_number(value)
+    if number is None:
+        return None
+    return number * 100 if abs(number) <= 1 else number
+
+
+def _sina_cn_fund_flow(symbol: str) -> dict[str, Any]:
+    market = infer_market(symbol)
+    if market != "CN":
+        return {}
+
+    sina_symbol = _sina_cn_symbol(symbol)
+    url = (
+        "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+        f"MoneyFlow.ssl_qsfx_lscjfb?page=1&num=1&sort=opendate&asc=0&daima={quote(sina_symbol)}"
+    )
+    request = Request(
+        url,
+        headers={
+            "User-Agent": EastmoneyCnMarketDataProvider.user_agent,
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": f"https://vip.stock.finance.sina.com.cn/moneyflow/#!ssfx!{quote(sina_symbol)}",
+        },
+    )
+    row = {}
+    for attempt in range(2):
+        try:
+            with urlopen(request, timeout=6) as response:
+                payload = json.loads(response.read().decode("utf-8-sig"))
+            if isinstance(payload, list) and payload:
+                row = payload[0] or {}
+                break
+        except Exception:
+            time.sleep(0.2 * (attempt + 1))
+    if not row:
+        return {}
+
+    has_main_ratio = row.get("r0_ratio") not in (None, "", "-")
+    fund_flow = {
+        "fundFlowSource": "Sina",
+        "fundFlowMainNet": _eastmoney_number(row.get("r0_net") if has_main_ratio else row.get("netamount")),
+        "fundFlowMainRatio": _sina_ratio_percent(row.get("r0_ratio") or row.get("ratioamount")),
+        "fundFlowSuperLargeNet": _eastmoney_number(row.get("r0_net")),
+        "fundFlowLargeNet": _eastmoney_number(row.get("r1_net")),
+        "fundFlowMediumNet": _eastmoney_number(row.get("r2_net")),
+        "fundFlowSmallNet": _eastmoney_number(row.get("r3_net")),
+    }
+    parsed = {key: value for key, value in fund_flow.items() if value is not None}
+    if not any(key != "fundFlowSource" for key in parsed):
+        return {}
+    return parsed
+
+
+def _eastmoney_cn_fund_flow(symbol: str) -> dict[str, Any]:
+    market = infer_market(symbol)
+    if market != "CN":
+        return {}
+
+    upper = symbol.upper()
+    code = upper.split(".")[0]
+    secid_prefix = "1" if upper.endswith(".SS") else "0"
+    fields = "f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
+    url = (
+        "https://push2.eastmoney.com/api/qt/ulist.np/get?"
+        f"fltt=2&secids={secid_prefix}.{quote(code)}&fields={fields}"
+    )
+    headers = {
+        "User-Agent": EastmoneyCnMarketDataProvider.user_agent,
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": f"https://data.eastmoney.com/zjlx/{quote(code)}.html",
+    }
+    row = {}
+    for attempt in range(3):
+        try:
+            request = Request(url, headers=headers)
+            with urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8-sig"))
+            rows = (payload.get("data") or {}).get("diff") or []
+            if rows:
+                row = rows[0] or {}
+                break
+        except Exception:
+            time.sleep(0.2 * (attempt + 1))
+    if not row:
+        return {}
+
+    def number(field: str) -> float | None:
+        return _eastmoney_number(row.get(field))
+
+    fund_flow = {
+        "fundFlowSource": "Eastmoney",
+        "fundFlowMainNet": number("f62"),
+        "fundFlowMainRatio": number("f184"),
+        "fundFlowSuperLargeNet": number("f66"),
+        "fundFlowSuperLargeRatio": number("f69"),
+        "fundFlowLargeNet": number("f72"),
+        "fundFlowLargeRatio": number("f75"),
+        "fundFlowMediumNet": number("f78"),
+        "fundFlowMediumRatio": number("f81"),
+        "fundFlowSmallNet": number("f84"),
+        "fundFlowSmallRatio": number("f87"),
+    }
+    parsed = {key: value for key, value in fund_flow.items() if value is not None}
+    if not any(key != "fundFlowSource" for key in parsed):
+        return {}
+    return parsed
 
 
 def _eastmoney_scaled(value: Any) -> float | None:

@@ -8,15 +8,18 @@ from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
 from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceMarketDataProvider, infer_market, local_company_name, volatility_score
+from backend.strategy_library import DETAILED_WEIGHT_KEYS, all_runtime_strategies, get_strategy_catalog
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider
 
 
 FACTOR_ORDER = ["sentiment", "momentum", "value", "risk", "quality"]
 AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET = 96
+AUTO_SCAN_SINGLE_MARKET_DISCOVERY_LIMIT = 160
 AUTO_SCAN_EXPANSION_LIMITS_PER_MARKET = (96, 160, 240)
 AUTO_SCAN_TARGET_QUALITY_BUYS = 4
 AUTO_SCAN_TARGET_ACTIONABLE_CANDIDATES = 10
 AUTO_SCAN_RESULT_LIMIT = 48
+AUTO_SCAN_SINGLE_MARKET_RESULT_LIMIT = 120
 AUTO_SCAN_BUY_LIMIT = 14
 AUTO_SCAN_TRADE_LIMIT = 14
 AUTO_SCAN_SELL_LIMIT = 8
@@ -39,12 +42,16 @@ DOWNSIDE_EXIT_FLOOR = 62
 DOWNSIDE_URGENT_EXIT_FLOOR = 72
 T_TRADE_CANDIDATE_FLOOR = 68
 T_TRADE_WATCH_FLOOR = 54
+NEXT_SESSION_CONTINUATION_BUY_FLOOR = 52
+NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR = 68
 
 
 def get_config() -> dict:
+    strategy_catalog = get_strategy_catalog(refresh=False)
     return {
         "markets": MARKETS,
-        "strategies": STRATEGIES,
+        "strategies": all_runtime_strategies(STRATEGIES, refresh=False),
+        "strategyLibrary": strategy_catalog,
         "defaultSymbols": DEFAULT_SYMBOLS,
         "scanUniverseSize": {market["id"]: "dynamic" for market in MARKETS},
     }
@@ -91,16 +98,19 @@ def _is_extreme_price_jump(value) -> bool:
 def _strategy_from_payload(payload: dict) -> dict:
     custom_weights = payload.get("customWeights")
     if custom_weights:
+        custom_detailed = payload.get("customDetailedWeights")
         return {
             "id": "custom",
             "name": "Custom AI Strategy",
             "description": "User-defined scoring weights from the web interface.",
             "weights": custom_weights,
+            "detailedWeights": custom_detailed if isinstance(custom_detailed, dict) else None,
             "riskTolerance": 55,
         }
 
-    strategy_id = payload.get("strategyId", "balanced")
-    return next((strategy for strategy in STRATEGIES if strategy["id"] == strategy_id), STRATEGIES[0])
+    strategy_id = payload.get("strategyId", "ai_smart_blend")
+    strategies = all_runtime_strategies(STRATEGIES, refresh=bool(payload.get("refreshStrategies")))
+    return next((strategy for strategy in strategies if strategy["id"] == strategy_id), strategies[0])
 
 
 def _age_hours(published_at: datetime | None, now: datetime) -> int:
@@ -286,6 +296,93 @@ def _news_analysis(articles: list[Article]) -> dict:
     }
 
 
+def _freshness_score(articles: list[Article]) -> float:
+    if not articles:
+        return 0.0
+    now = datetime.now(timezone.utc)
+    scores = []
+    for article in articles:
+        age = _age_hours(article.published_at, now)
+        scores.append(_clamp_score(100 - age * 2.4) * article.credibility * article.relevance)
+    return round(_clamp_score(mean(scores)), 1)
+
+
+def _news_heat_analysis(articles: list[Article], news_analysis: dict) -> dict:
+    events = news_analysis.get("events") or []
+    total = len(articles)
+    source_count = len({article.source for article in articles if article.source})
+    freshness = _freshness_score(articles)
+    count_score = _clamp_score(100 * (1 - exp(-total / 3))) if total else 0.0
+    source_score = _clamp_score(source_count * 24)
+    event_raw = sum(abs(float(event.get("score") or 0)) * float(event.get("weight") or 0) for event in events)
+    event_intensity = _clamp_score(100 * (1 - exp(-event_raw / 115))) if event_raw else 0.0
+    heat_score = round(
+        _clamp_score(
+            count_score * 0.28
+            + freshness * 0.25
+            + source_score * 0.18
+            + event_intensity * 0.29
+        ),
+        1,
+    )
+    net_score = float(news_analysis.get("netScore") or 0)
+    if total == 0:
+        impact_score = 45.0
+        summary_key = "newsHeatColdSummary"
+    elif net_score >= 12 and heat_score >= 52:
+        impact_score = _clamp_score(50 + heat_score * 0.24 + net_score * 0.32)
+        summary_key = "newsHeatHotPositiveSummary"
+    elif net_score <= -12 and heat_score >= 52:
+        impact_score = _clamp_score(50 - heat_score * 0.24 + net_score * 0.32)
+        summary_key = "newsHeatHotNegativeSummary"
+    elif heat_score >= 52:
+        impact_score = _clamp_score(50 + net_score * 0.22 - abs(net_score) * 0.04)
+        summary_key = "newsHeatHotMixedSummary"
+    else:
+        impact_score = _clamp_score(47 + net_score * 0.18)
+        summary_key = "newsHeatColdSummary"
+
+    params = {
+        "heat": round(heat_score, 1),
+        "impact": round(impact_score, 1),
+        "netScore": round(net_score, 1),
+        "count": total,
+        "sources": source_count,
+    }
+    positives = []
+    negatives = []
+    watch_items = []
+    if impact_score >= 62:
+        positives.append({"key": "newsHeatSupport", "params": params})
+    elif impact_score <= 42:
+        negatives.append({"key": "newsHeatRisk", "params": params})
+    else:
+        watch_items.append({"key": "newsHeatWatch", "params": params})
+    if freshness >= 70:
+        positives.append({"key": "newsHeatFresh", "params": {"score": freshness}})
+    elif total and freshness <= 35:
+        watch_items.append({"key": "newsHeatStale", "params": {"score": freshness}})
+
+    return {
+        "summary": {"key": summary_key, "params": params},
+        "heatScore": heat_score,
+        "impactScore": round(impact_score, 1),
+        "freshnessScore": freshness,
+        "sourceCount": source_count,
+        "eventIntensityScore": round(event_intensity, 1),
+        "metrics": [
+            {"key": "newsHeat", "value": f"{heat_score:.1f}/100", "score": heat_score},
+            {"key": "newsHeatImpact", "value": f"{impact_score:.1f}/100", "score": round(impact_score, 1)},
+            {"key": "newsFreshness", "value": f"{freshness:.1f}/100", "score": freshness},
+            {"key": "newsSourceBreadth", "value": str(source_count), "score": round(source_score, 1)},
+            {"key": "newsEventIntensity", "value": f"{event_intensity:.1f}/100", "score": round(event_intensity, 1)},
+        ],
+        "positives": positives[:4],
+        "negatives": negatives[:4],
+        "watchItems": watch_items[:4],
+    }
+
+
 def _effective_weights(weights: dict[str, float], availability: dict[str, bool] | None = None) -> dict[str, float]:
     if not availability:
         return weights
@@ -354,7 +451,7 @@ def _relative_verdicts(picks: list[dict]) -> None:
             pick["verdict"] = "sell"
         else:
             pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"), pick.get("breakoutSetupScore"), pick.get("pullbackRiskScore"))
+        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"), pick.get("breakoutSetupScore"), pick.get("pullbackRiskScore"), pick.get("fundFlow"))
         pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"], pick.get("change"), pick.get("pullbackRiskScore"))
 
     for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
@@ -364,6 +461,15 @@ def _relative_verdicts(picks: list[dict]) -> None:
 def _investment_priority(pick: dict) -> float:
     metrics = pick["metrics"]
     setup_score = float(pick.get("breakoutSetupScore") or 0)
+    overall = pick.get("overallAssessment") or {}
+    if overall:
+        return round(
+            float(overall.get("totalScore") or 0) * 0.58
+            + float(pick.get("opportunityScore") or 0) * 0.24
+            + setup_score * 0.10
+            + float((pick.get("trendAnalysis") or {}).get("continuationScore") or 0) * 0.08,
+            3,
+        )
     if "opportunityScore" in pick:
         return round(float(pick["opportunityScore"]) * 0.82 + setup_score * 0.18, 3)
     return round(
@@ -534,6 +640,7 @@ def _pullback_risk_score(snapshot: MarketSnapshot, news: dict) -> float:
     )
     turnover_percent = _latest_turnover_percent(snapshot.info)
     positive_news, negative_news, net_news = _news_strengths(news)
+    fund_flow = _fund_flow_profile(snapshot.info)
 
     risk = 6.0
     if change is not None:
@@ -589,6 +696,9 @@ def _pullback_risk_score(snapshot: MarketSnapshot, news: dict) -> float:
         risk += 14
     elif positive_news >= 24 and net_news >= 12:
         risk -= 6
+    if fund_flow.get("available"):
+        risk += float(fund_flow.get("negativeScore") or 0) * 0.20
+        risk -= float(fund_flow.get("positiveScore") or 0) * 0.12
 
     return round(_clamp_score(risk), 1)
 
@@ -610,6 +720,7 @@ def _breakout_setup_score(snapshot: MarketSnapshot, news: dict) -> float:
     )
     turnover_percent = _latest_turnover_percent(snapshot.info)
     positive_news, negative_news, net_news = _news_strengths(news)
+    fund_flow = _fund_flow_profile(snapshot.info)
 
     setup = 12.0
     has_fresh_impulse = volume_surge >= 1.25 or (change is not None and change >= 2.0) or return_5 >= 3.0
@@ -665,6 +776,9 @@ def _breakout_setup_score(snapshot: MarketSnapshot, news: dict) -> float:
         setup += 10
     elif negative_news > positive_news + 8:
         setup -= 16
+    if fund_flow.get("available"):
+        setup += float(fund_flow.get("positiveScore") or 0) * 0.16
+        setup -= float(fund_flow.get("negativeScore") or 0) * 0.14
 
     recent_drawdown = _max_drawdown(closes, 20)
     if recent_drawdown <= 0.08:
@@ -682,8 +796,14 @@ def _prediction_scores(
     price_change,
     breakout_setup_score: float = 0.0,
     pullback_risk_score: float = 0.0,
+    fund_flow: dict | None = None,
+    trend_profile: dict | None = None,
 ) -> tuple[float, float]:
     positive_news, negative_news, net_news = _news_strengths(news)
+    positive_flow = float((fund_flow or {}).get("positiveScore") or 0)
+    negative_flow = float((fund_flow or {}).get("negativeScore") or 0)
+    continuation_score = float((trend_profile or {}).get("continuationScore") or 50)
+    reversal_risk_score = float((trend_profile or {}).get("reversalRiskScore") or 50)
     opportunity = _clamp_score(
         score * 0.28
         + metrics["quality"] * 0.20
@@ -693,10 +813,14 @@ def _prediction_scores(
         + metrics["sentiment"] * 0.08
         + positive_news * 0.08
         + max(0, net_news) * 0.06
+        + positive_flow * 0.12
         + breakout_setup_score * 0.18
+        + continuation_score * 0.10
         + _price_action_bonus(price_change)
         - negative_news * 0.10
+        - negative_flow * 0.08
         - pullback_risk_score * 0.16
+        - reversal_risk_score * 0.10
     )
     downside = _clamp_score(
         (100 - score) * 0.22
@@ -706,9 +830,13 @@ def _prediction_scores(
         + (100 - metrics["quality"]) * 0.10
         + negative_news * 0.16
         + max(0, -net_news) * 0.08
+        + negative_flow * 0.14
         + _price_action_risk(price_change)
         + pullback_risk_score * 0.28
+        + reversal_risk_score * 0.16
         - positive_news * 0.06
+        - positive_flow * 0.06
+        - continuation_score * 0.05
         - breakout_setup_score * 0.04
     )
     return round(opportunity, 1), round(downside, 1)
@@ -740,6 +868,9 @@ def _t_trade_score(
     turnover_score = _turnover_trade_score(turnover_percent)
     positive_news, negative_news, net_news = _news_strengths(news)
     change = _metric_number(snapshot.change)
+    fund_flow = _fund_flow_profile(snapshot.info)
+    positive_flow = float(fund_flow.get("positiveScore") or 0)
+    negative_flow = float(fund_flow.get("negativeScore") or 0)
 
     score = (
         liquidity_score * 0.22
@@ -751,7 +882,9 @@ def _t_trade_score(
         + turnover_score * 0.06
         + max(0, net_news) * 0.06
         + positive_news * 0.04
+        + positive_flow * 0.08
         - negative_news * 0.08
+        - negative_flow * 0.10
         - pullback_risk_score * 0.22
         - downside_risk_score * 0.14
     )
@@ -876,10 +1009,25 @@ def _is_quality_investment_candidate(pick: dict) -> bool:
     positive_news, negative_news, _ = _news_strengths(news)
     downside_score = pick.get("downsideRiskScore")
     pullback_risk = float(pick.get("pullbackRiskScore") or 0)
+    trend = pick.get("trendAnalysis") or {}
+    continuation = float(trend.get("continuationScore") or 50)
+    reversal = float(trend.get("reversalRiskScore") or 50)
+    overall = pick.get("overallAssessment") or {}
+    components = overall.get("components") or {}
+    overall_total = float(overall.get("totalScore") or pick["score"])
+    today_buy = float(components.get("todayBuyScore") or pick["score"])
+    future_rise = float(components.get("futureRiseScore") or pick.get("opportunityScore") or 0)
+    profitable_exit = float(components.get("profitableExitScore") or pick.get("tScore") or 55)
     return (
         float(pick.get("opportunityScore") or 0) >= OPPORTUNITY_BUY_FLOOR
         and float(downside_score if downside_score is not None else 100) <= 45
         and pullback_risk < PULLBACK_RISK_BLOCK_BUY_FLOOR
+        and continuation >= NEXT_SESSION_CONTINUATION_BUY_FLOOR
+        and reversal < NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR
+        and overall_total >= 68
+        and today_buy >= 60
+        and future_rise >= 58
+        and profitable_exit >= 54
         and pick["score"] >= STRICT_BUY_SCORE_FLOOR
         and _investment_priority(pick) >= STRICT_BUY_PRIORITY_FLOOR
         and metrics["quality"] >= STRICT_BUY_QUALITY_FLOOR
@@ -900,11 +1048,26 @@ def _is_breakout_setup_candidate(pick: dict) -> bool:
     downside_score = pick.get("downsideRiskScore")
     setup_score = float(pick.get("breakoutSetupScore") or 0)
     pullback_risk = float(pick.get("pullbackRiskScore") or 0)
+    trend = pick.get("trendAnalysis") or {}
+    continuation = float(trend.get("continuationScore") or 50)
+    reversal = float(trend.get("reversalRiskScore") or 50)
+    overall = pick.get("overallAssessment") or {}
+    components = overall.get("components") or {}
+    overall_total = float(overall.get("totalScore") or pick["score"])
+    today_buy = float(components.get("todayBuyScore") or pick["score"])
+    future_rise = float(components.get("futureRiseScore") or pick.get("opportunityScore") or 0)
+    profitable_exit = float(components.get("profitableExitScore") or pick.get("tScore") or 55)
     return (
         setup_score >= BREAKOUT_SETUP_BUY_FLOOR
         and float(pick.get("opportunityScore") or 0) >= OPPORTUNITY_BUY_FLOOR
         and float(downside_score if downside_score is not None else 100) <= BREAKOUT_SETUP_DOWNSIDE_CEILING
         and pullback_risk < PULLBACK_RISK_BLOCK_BUY_FLOOR
+        and continuation >= max(NEXT_SESSION_CONTINUATION_BUY_FLOOR, 56)
+        and reversal < NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR
+        and overall_total >= 66
+        and today_buy >= 58
+        and future_rise >= 58
+        and profitable_exit >= 52
         and _investment_priority(pick) >= BREAKOUT_SETUP_PRIORITY_FLOOR
         and metrics["momentum"] >= 60
         and metrics["risk"] >= 38
@@ -952,7 +1115,7 @@ def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
             pick["verdict"] = "sell"
         else:
             pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"), pick.get("breakoutSetupScore"), pick.get("pullbackRiskScore"))
+        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"), pick.get("breakoutSetupScore"), pick.get("pullbackRiskScore"), pick.get("fundFlow"))
         pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"], pick.get("change"), pick.get("pullbackRiskScore"))
 
     for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
@@ -1178,6 +1341,10 @@ def _sector_analysis(picks: list[dict]) -> list[dict]:
 
 
 def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
+    return _curated_auto_scan_picks_for_limit(picks, AUTO_SCAN_RESULT_LIMIT)
+
+
+def _curated_auto_scan_picks_for_limit(picks: list[dict], result_limit: int) -> list[dict]:
     if len(picks) <= 2:
         return sorted(
             [pick for pick in picks if _is_buy_candidate(pick) or _is_urgent_exit_candidate(pick) or _is_watch_candidate(pick)],
@@ -1224,19 +1391,34 @@ def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
     )
 
     selected: list[dict] = []
-    selected.extend(buy_candidates[:AUTO_SCAN_BUY_LIMIT])
-    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+    scale = max(1.0, result_limit / AUTO_SCAN_RESULT_LIMIT)
+    buy_limit = max(AUTO_SCAN_BUY_LIMIT, round(AUTO_SCAN_BUY_LIMIT * scale))
+    trade_limit = max(AUTO_SCAN_TRADE_LIMIT, round(AUTO_SCAN_TRADE_LIMIT * scale))
+    sell_limit = max(AUTO_SCAN_SELL_LIMIT, round(AUTO_SCAN_SELL_LIMIT * scale))
+
+    selected.extend(buy_candidates[:buy_limit])
+    remaining = result_limit - len(selected)
     if remaining > 0:
-        selected.extend(t_trade_candidates[: min(AUTO_SCAN_TRADE_LIMIT, remaining)])
-    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+        selected.extend(t_trade_candidates[: min(trade_limit, remaining)])
+    remaining = result_limit - len(selected)
     if remaining > 0:
-        selected.extend(urgent_sell_candidates[: min(AUTO_SCAN_SELL_LIMIT, remaining)])
-    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+        selected.extend(urgent_sell_candidates[: min(sell_limit, remaining)])
+    remaining = result_limit - len(selected)
     if remaining > 0:
         selected.extend(watch_candidates[:remaining])
-    remaining = AUTO_SCAN_RESULT_LIMIT - len(selected)
+    remaining = result_limit - len(selected)
     if remaining > 0:
         selected.extend(fallback_watch_candidates[:remaining])
+    remaining = result_limit - len(selected)
+    if remaining > 0:
+        selected_symbols = {pick["symbol"] for pick in selected}
+        selected.extend(
+            [
+                pick
+                for pick in sorted(picks, key=_display_priority_key)
+                if pick["symbol"] not in selected_symbols
+            ][:remaining]
+        )
 
     seen = set()
     unique_selected = []
@@ -1244,7 +1426,7 @@ def _curated_auto_scan_picks(picks: list[dict]) -> list[dict]:
         if pick["symbol"] not in seen:
             unique_selected.append(pick)
             seen.add(pick["symbol"])
-    return sorted(unique_selected, key=_display_priority_key)
+    return sorted(unique_selected, key=_display_priority_key)[:result_limit]
 
 
 def _reason_codes(
@@ -1254,6 +1436,7 @@ def _reason_codes(
     price_change: float | None = None,
     breakout_setup_score: float = 0.0,
     pullback_risk_score: float = 0.0,
+    trend_profile: dict | None = None,
 ) -> list[dict]:
     strongest = sorted(metrics.items(), key=lambda item: item[1], reverse=True)[:2]
     weakest = min(metrics.items(), key=lambda item: item[1])
@@ -1272,6 +1455,13 @@ def _reason_codes(
         reasons.append({"key": "pullbackRisk", "params": {"risk": round(pullback_risk_score, 1)}})
     if breakout_setup_score >= BREAKOUT_SETUP_BUY_FLOOR:
         reasons.append({"key": "breakoutSetup", "params": {"score": round(breakout_setup_score, 1)}})
+    if trend_profile:
+        continuation = float(trend_profile.get("continuationScore") or 0)
+        reversal = float(trend_profile.get("reversalRiskScore") or 0)
+        if reversal >= NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR or continuation < NEXT_SESSION_CONTINUATION_BUY_FLOOR:
+            reasons.append({"key": "nextSessionRisk", "params": {"continuation": round(continuation, 1), "risk": round(reversal, 1)}})
+        elif continuation >= 64 and reversal < 60:
+            reasons.append({"key": "nextSessionSupport", "params": {"continuation": round(continuation, 1), "risk": round(reversal, 1)}})
     if weakest[1] < 50:
         reasons.append({"key": "belowThreshold", "params": {"factor": weakest[0]}})
     elif score >= 72:
@@ -1290,6 +1480,7 @@ def _decision_details(
     price_change: float | None = None,
     breakout_setup_score: float | None = None,
     pullback_risk_score: float | None = None,
+    fund_flow: dict | None = None,
 ) -> dict:
     positives = []
     negatives = []
@@ -1327,6 +1518,17 @@ def _decision_details(
         negatives.append({"key": "newsPressure", "params": news_params})
     else:
         watch_items.append({"key": "watchNewsFlow", "params": news_params})
+
+    if fund_flow and fund_flow.get("available"):
+        positive_flow = float(fund_flow.get("positiveScore") or 0)
+        negative_flow = float(fund_flow.get("negativeScore") or 0)
+        flow_params = _fund_flow_decision_params(fund_flow)
+        if positive_flow >= 18:
+            positives.append({"key": "fundFlowSupport", "params": flow_params})
+        elif negative_flow >= 18:
+            negatives.append({"key": "fundFlowPressure", "params": flow_params})
+        else:
+            watch_items.append({"key": "fundFlowWatch", "params": flow_params})
 
     if signal_count == 0:
         negatives.append({"key": "insufficientNews", "params": {}})
@@ -1398,6 +1600,10 @@ def _english_reasons(reason_codes: list[dict]) -> list[str]:
             output.append(f"Pullback risk is elevated at {params['risk']}/100; wait for follow-through or a controlled reset.")
         elif reason["key"] == "breakoutSetup":
             output.append(f"Early breakout setup scores {params['score']}/100 from recent price and volume confirmation.")
+        elif reason["key"] == "nextSessionSupport":
+            output.append(f"Next-session trend continuation is {params['continuation']}/100 while reversal risk is {params['risk']}/100.")
+        elif reason["key"] == "nextSessionRisk":
+            output.append(f"Current edge may not carry into the next session: continuation is {params['continuation']}/100 and reversal risk is {params['risk']}/100.")
         elif reason["key"] == "clearsBuyThreshold":
             output.append("Composite score clears the buy threshold under the selected strategy.")
         elif reason["key"] == "notHighConviction":
@@ -1415,6 +1621,22 @@ def _dedupe_discovered_symbols(symbols: list[DiscoveredSymbol]) -> list[Discover
             deduped.append(item)
             seen.add(item.symbol)
     return deduped
+
+
+def _is_cn_only_auto_scan(requested_markets: list[str] | set[str], auto_scan: bool) -> bool:
+    return auto_scan and set(requested_markets) == {"CN"}
+
+
+def _initial_discovery_limit(requested_markets: list[str] | set[str], auto_scan: bool) -> int:
+    if _is_cn_only_auto_scan(requested_markets, auto_scan):
+        return AUTO_SCAN_SINGLE_MARKET_DISCOVERY_LIMIT
+    return AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET
+
+
+def _auto_scan_display_limit(requested_markets: list[str] | set[str], auto_scan: bool) -> int:
+    if _is_cn_only_auto_scan(requested_markets, auto_scan):
+        return AUTO_SCAN_SINGLE_MARKET_RESULT_LIMIT
+    return AUTO_SCAN_RESULT_LIMIT
 
 
 def _symbols_from_payload(
@@ -1451,6 +1673,547 @@ def _moving_average(closes: list[float], window: int) -> float | None:
     if len(closes) < window:
         return None
     return mean(closes[-window:])
+
+
+def _price_distance_percent(price: float, reference: float | None) -> float | None:
+    if reference is None or reference <= 0:
+        return None
+    return (price / reference - 1) * 100
+
+
+def _ema_series(values: list[float], window: int) -> list[float]:
+    if not values:
+        return []
+    multiplier = 2 / (window + 1)
+    output = [values[0]]
+    for value in values[1:]:
+        output.append(value * multiplier + output[-1] * (1 - multiplier))
+    return output
+
+
+def _rsi_value(closes: list[float], window: int = 14) -> float | None:
+    if len(closes) <= window:
+        return None
+    changes = [current - previous for previous, current in zip(closes[-window - 1 : -1], closes[-window:])]
+    gains = [max(change, 0) for change in changes]
+    losses = [abs(min(change, 0)) for change in changes]
+    average_gain = mean(gains) if gains else 0
+    average_loss = mean(losses) if losses else 0
+    if average_loss == 0:
+        return 100.0 if average_gain > 0 else 50.0
+    relative_strength = average_gain / average_loss
+    return round(100 - 100 / (1 + relative_strength), 1)
+
+
+def _macd_profile(closes: list[float]) -> dict:
+    if len(closes) < 35:
+        return {"available": False}
+    ema_12 = _ema_series(closes, 12)
+    ema_26 = _ema_series(closes, 26)
+    macd_line = [fast - slow for fast, slow in zip(ema_12, ema_26)]
+    signal_line = _ema_series(macd_line, 9)
+    histogram = [macd - signal for macd, signal in zip(macd_line, signal_line)]
+    if len(histogram) < 2:
+        return {"available": False}
+    price = closes[-1] or 1
+    histogram_pct = histogram[-1] / price * 100
+    slope_pct = (histogram[-1] - histogram[-2]) / price * 100
+    score = _clamp_score(50 + histogram_pct * 10 + slope_pct * 24)
+    return {
+        "available": True,
+        "histogramPct": round(histogram_pct, 3),
+        "slopePct": round(slope_pct, 3),
+        "score": round(score, 1),
+    }
+
+
+def _trend_metric_value(value: float | None, suffix: str = "") -> str:
+    return "N/A" if value is None else f"{value:.1f}{suffix}"
+
+
+def _trend_profile(snapshot: MarketSnapshot, news: dict, fund_flow: dict | None = None) -> dict:
+    closes = snapshot.closes
+    if len(closes) < 22:
+        return {
+            "regime": "insufficient",
+            "continuationScore": 48.0,
+            "reversalRiskScore": 54.0,
+            "maStructureScore": 50.0,
+            "momentumShapeScore": 50.0,
+            "rsiScore": 50.0,
+            "macdScore": 50.0,
+            "volumeConfirmationScore": 48.0,
+            "supportDistancePct": None,
+            "resistanceDistancePct": None,
+            "rsi14": None,
+            "macdHistogramPct": None,
+            "macdSlopePct": None,
+            "return1dPct": None,
+            "return5dPct": None,
+            "return20dPct": None,
+            "return60dPct": None,
+        }
+
+    price = closes[-1]
+    change = _metric_number(snapshot.change)
+    returns = {
+        "return1dPct": _price_return(closes, 1) * 100,
+        "return5dPct": _price_return(closes, 5) * 100,
+        "return20dPct": _price_return(closes, 20) * 100,
+        "return60dPct": _price_return(closes, 60) * 100,
+        "return120dPct": _price_return(closes, 120) * 100,
+    }
+    ma20 = _moving_average(closes, 20)
+    ma60 = _moving_average(closes, 60)
+    ma120 = _moving_average(closes, 120)
+    ma_structure_score = 50.0
+    if ma20 is not None:
+        ma_structure_score += 14 if price > ma20 else -16
+    if ma20 is not None and ma60 is not None:
+        ma_structure_score += 14 if ma20 > ma60 else -12
+    if ma60 is not None and ma120 is not None:
+        ma_structure_score += 10 if ma60 > ma120 else -8
+    ma_structure_score = _clamp_score(ma_structure_score)
+
+    momentum_shape_score = _clamp_score(
+        50
+        + returns["return5dPct"] * 1.5
+        + returns["return20dPct"] * 0.85
+        + returns["return60dPct"] * 0.30
+        - min(20, _max_drawdown(closes, 30) * 80)
+    )
+
+    rsi14 = _rsi_value(closes, 14)
+    if rsi14 is None:
+        rsi_score = 50.0
+    elif 45 <= rsi14 <= 68:
+        rsi_score = _clamp_score(78 - abs(rsi14 - 56) * 0.8)
+    elif 68 < rsi14 <= 76:
+        rsi_score = _clamp_score(70 - (rsi14 - 68) * 2.8)
+    elif rsi14 > 76:
+        rsi_score = _clamp_score(48 - (rsi14 - 76) * 2.5)
+    elif 35 <= rsi14 < 45:
+        rsi_score = _clamp_score(56 - (45 - rsi14) * 1.8)
+    else:
+        rsi_score = _clamp_score(34 - (35 - rsi14) * 1.5)
+
+    macd = _macd_profile(closes)
+    macd_score = float(macd.get("score") or 50.0)
+
+    volume_surge = max(
+        _metric_number(snapshot.info.get("volumeSurge20")) or 0,
+        _metric_number(snapshot.info.get("amountSurge20")) or 0,
+    )
+    if volume_surge >= 1.35 and (change or 0) >= 0:
+        volume_confirmation_score = _clamp_score(62 + min(24, (volume_surge - 1.35) * 10) + min(10, (change or 0) * 1.2))
+    elif volume_surge >= 1.35 and (change or 0) < 0:
+        volume_confirmation_score = _clamp_score(42 - min(18, abs(change or 0) * 2.2))
+    elif (change or 0) >= 4:
+        volume_confirmation_score = 43.0
+    else:
+        volume_confirmation_score = 50.0
+
+    prior_window = closes[-21:-1]
+    recent_window = closes[-20:]
+    resistance = max(prior_window) if prior_window else None
+    recent_low = min(recent_window) if recent_window else None
+    support_candidates = [value for value in [recent_low, ma20 if ma20 and ma20 < price else None] if value is not None]
+    support = max(support_candidates) if support_candidates else None
+    support_distance_pct = _price_distance_percent(price, support)
+    resistance_distance_pct = (resistance / price - 1) * 100 if resistance and price else None
+
+    positive_news, negative_news, net_news = _news_strengths(news)
+    positive_flow = float((fund_flow or {}).get("positiveScore") or 0)
+    negative_flow = float((fund_flow or {}).get("negativeScore") or 0)
+    continuation = _clamp_score(
+        ma_structure_score * 0.24
+        + momentum_shape_score * 0.22
+        + volume_confirmation_score * 0.17
+        + macd_score * 0.14
+        + rsi_score * 0.12
+        + min(100, max(0, 50 + net_news)) * 0.06
+        + min(100, max(0, 50 + positive_flow - negative_flow)) * 0.05
+    )
+
+    extension_risk = 0.0
+    if change is not None:
+        if change >= EXTREME_PRICE_JUMP_PCT:
+            extension_risk += 34
+        elif change >= OVERHEATED_PRICE_JUMP_PCT:
+            extension_risk += 24
+        elif change >= 7:
+            extension_risk += 13
+    if returns["return5dPct"] >= 20:
+        extension_risk += 16
+    elif returns["return5dPct"] >= 13:
+        extension_risk += 9
+    if ma20:
+        distance_to_ma20 = _price_distance_percent(price, ma20)
+        if distance_to_ma20 is not None:
+            if distance_to_ma20 >= 24:
+                extension_risk += 18
+            elif distance_to_ma20 >= 14:
+                extension_risk += 10
+    if rsi14 is not None and rsi14 >= 76:
+        extension_risk += min(24, (rsi14 - 76) * 2.5 + 8)
+    if resistance_distance_pct is not None and -0.2 <= resistance_distance_pct <= 2.0:
+        extension_risk += 8
+    if volume_confirmation_score < 45:
+        extension_risk += 8
+
+    reversal_risk = _clamp_score(
+        (100 - ma_structure_score) * 0.17
+        + (100 - momentum_shape_score) * 0.18
+        + (100 - macd_score) * 0.12
+        + (100 - rsi_score) * 0.10
+        + (100 - volume_confirmation_score) * 0.12
+        + negative_news * 0.12
+        + negative_flow * 0.10
+        + extension_risk
+        - positive_news * 0.04
+        - positive_flow * 0.03
+    )
+
+    if reversal_risk >= 72:
+        regime = "overheated" if (change or 0) >= 7 or (rsi14 or 0) >= 76 else "bearish"
+    elif continuation >= 66 and reversal_risk < 58:
+        regime = "bullish"
+    elif continuation >= 56 and reversal_risk < 64:
+        regime = "constructive"
+    elif continuation < 46 or reversal_risk >= 66:
+        regime = "fragile"
+    else:
+        regime = "neutral"
+
+    return {
+        "regime": regime,
+        "continuationScore": round(continuation, 1),
+        "reversalRiskScore": round(reversal_risk, 1),
+        "maStructureScore": round(ma_structure_score, 1),
+        "momentumShapeScore": round(momentum_shape_score, 1),
+        "rsiScore": round(rsi_score, 1),
+        "macdScore": round(macd_score, 1),
+        "volumeConfirmationScore": round(volume_confirmation_score, 1),
+        "supportDistancePct": round(support_distance_pct, 1) if support_distance_pct is not None else None,
+        "resistanceDistancePct": round(resistance_distance_pct, 1) if resistance_distance_pct is not None else None,
+        "rsi14": rsi14,
+        "macdHistogramPct": macd.get("histogramPct"),
+        "macdSlopePct": macd.get("slopePct"),
+        "volumeSurge": round(volume_surge, 2) if volume_surge else None,
+        **{key: round(value, 1) for key, value in returns.items()},
+    }
+
+
+def _trend_decision_params(profile: dict) -> dict:
+    return {
+        "continuation": round(float(profile.get("continuationScore") or 0), 1),
+        "risk": round(float(profile.get("reversalRiskScore") or 0), 1),
+    }
+
+
+def _trend_analysis(snapshot: MarketSnapshot, news: dict, fund_flow: dict | None = None) -> dict:
+    profile = _trend_profile(snapshot, news, fund_flow)
+    continuation = float(profile.get("continuationScore") or 0)
+    reversal = float(profile.get("reversalRiskScore") or 0)
+    regime = str(profile.get("regime") or "neutral")
+    summary_key = {
+        "bullish": "trendBullishSummary",
+        "constructive": "trendConstructiveSummary",
+        "overheated": "trendRiskSummary",
+        "bearish": "trendRiskSummary",
+        "fragile": "trendRiskSummary",
+        "insufficient": "trendNeutralSummary",
+    }.get(regime, "trendNeutralSummary")
+
+    metrics = [
+        {"key": "trendContinuation", "value": _trend_metric_value(continuation, "/100"), "score": continuation},
+        {"key": "trendReversalRisk", "value": _trend_metric_value(reversal, "/100"), "score": round(_clamp_score(100 - reversal), 1)},
+        {"key": "trendMaStructure", "value": _trend_metric_value(profile.get("maStructureScore"), "/100"), "score": profile.get("maStructureScore")},
+        {
+            "key": "trendShortReturns",
+            "value": f"1d {_trend_metric_value(profile.get('return1dPct'), '%')} / 5d {_trend_metric_value(profile.get('return5dPct'), '%')} / 20d {_trend_metric_value(profile.get('return20dPct'), '%')}",
+            "score": profile.get("momentumShapeScore"),
+        },
+        {"key": "trendRsi14", "value": _trend_metric_value(profile.get("rsi14")), "score": profile.get("rsiScore")},
+        {
+            "key": "trendMacd",
+            "value": f"hist {_trend_metric_value(profile.get('macdHistogramPct'), '%')} / slope {_trend_metric_value(profile.get('macdSlopePct'), '%')}",
+            "score": profile.get("macdScore"),
+        },
+        {
+            "key": "trendVolume",
+            "value": f"{_trend_metric_value(profile.get('volumeSurge'), 'x')}",
+            "score": profile.get("volumeConfirmationScore"),
+        },
+        {
+            "key": "trendSupportResistance",
+            "value": f"support {_trend_metric_value(profile.get('supportDistancePct'), '%')} / resistance {_trend_metric_value(profile.get('resistanceDistancePct'), '%')}",
+            "score": round(_clamp_score(continuation - reversal + 50), 1),
+        },
+    ]
+
+    positives = []
+    negatives = []
+    watch_items = []
+    params = _trend_decision_params(profile)
+    if continuation >= 64 and reversal < 60:
+        positives.append({"key": "trendContinuationSupport", "params": params})
+    elif continuation < NEXT_SESSION_CONTINUATION_BUY_FLOOR or reversal >= NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR:
+        negatives.append({"key": "trendContinuationWeak", "params": params})
+    else:
+        watch_items.append({"key": "trendContinuationWatch", "params": params})
+
+    ma_score = float(profile.get("maStructureScore") or 50)
+    if ma_score >= 66:
+        positives.append({"key": "trendStructureSupport", "params": {"score": round(ma_score, 1)}})
+    elif ma_score <= 44:
+        negatives.append({"key": "trendStructureWeak", "params": {"score": round(ma_score, 1)}})
+
+    rsi14 = profile.get("rsi14")
+    if rsi14 is not None:
+        if rsi14 >= 76:
+            negatives.append({"key": "trendOverextended", "params": {"rsi": round(float(rsi14), 1)}})
+        elif 45 <= rsi14 <= 68:
+            positives.append({"key": "trendRsiHealthy", "params": {"rsi": round(float(rsi14), 1)}})
+
+    macd_score = float(profile.get("macdScore") or 50)
+    if macd_score >= 58:
+        positives.append({"key": "trendMacdSupport", "params": {"score": round(macd_score, 1)}})
+    elif macd_score <= 42:
+        negatives.append({"key": "trendMacdPressure", "params": {"score": round(macd_score, 1)}})
+
+    volume_score = float(profile.get("volumeConfirmationScore") or 50)
+    if volume_score >= 62:
+        positives.append({"key": "trendVolumeConfirm", "params": {"score": round(volume_score, 1)}})
+    elif volume_score <= 44:
+        negatives.append({"key": "trendVolumeDivergence", "params": {"score": round(volume_score, 1)}})
+
+    resistance_distance = profile.get("resistanceDistancePct")
+    support_distance = profile.get("supportDistancePct")
+    if resistance_distance is not None and -0.2 <= float(resistance_distance) <= 2.0:
+        watch_items.append({"key": "trendNearResistance", "params": {"distance": round(float(resistance_distance), 1)}})
+    if support_distance is not None and 0 <= float(support_distance) <= 4.0:
+        watch_items.append({"key": "trendNearSupport", "params": {"distance": round(float(support_distance), 1)}})
+
+    return {
+        "summary": {"key": summary_key, "params": params},
+        "regime": regime,
+        "continuationScore": round(continuation, 1),
+        "reversalRiskScore": round(reversal, 1),
+        "metrics": [metric for metric in metrics if metric.get("score") is not None],
+        "positives": positives[:4],
+        "negatives": negatives[:4],
+        "watchItems": watch_items[:4],
+        "profile": profile,
+    }
+
+
+def _detailed_weight_value(detailed_weights: dict | None, key: str) -> float:
+    if not isinstance(detailed_weights, dict):
+        return 0.0
+    try:
+        return max(0.0, float(detailed_weights.get(key) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _overall_component_weights(detailed_weights: dict | None) -> dict[str, float]:
+    defaults = {
+        "todayBuyScore": 0.34,
+        "futureRiseScore": 0.31,
+        "profitableExitScore": 0.23,
+        "newsHeatImpactScore": 0.12,
+    }
+    if not isinstance(detailed_weights, dict):
+        return defaults
+
+    detailed_total = sum(_detailed_weight_value(detailed_weights, key) for key in DETAILED_WEIGHT_KEYS)
+    if detailed_total <= 0:
+        return defaults
+
+    raw = {
+        "todayBuyScore": (
+            _detailed_weight_value(detailed_weights, "todayBuy") * 1.00
+            + _detailed_weight_value(detailed_weights, "volumeConfirmation") * 0.32
+            + _detailed_weight_value(detailed_weights, "supportResistance") * 0.25
+            + _detailed_weight_value(detailed_weights, "maStructure") * 0.14
+            + _detailed_weight_value(detailed_weights, "riskControl") * 0.16
+        ),
+        "futureRiseScore": (
+            _detailed_weight_value(detailed_weights, "futureRise") * 1.00
+            + _detailed_weight_value(detailed_weights, "trendContinuation") * 0.42
+            + _detailed_weight_value(detailed_weights, "momentum") * 0.30
+            + _detailed_weight_value(detailed_weights, "macdConfirmation") * 0.20
+            + _detailed_weight_value(detailed_weights, "maStructure") * 0.20
+            + _detailed_weight_value(detailed_weights, "quality") * 0.12
+            + _detailed_weight_value(detailed_weights, "fundFlow") * 0.12
+        ),
+        "profitableExitScore": (
+            _detailed_weight_value(detailed_weights, "profitableExit") * 1.00
+            + _detailed_weight_value(detailed_weights, "tTrade") * 0.55
+            + _detailed_weight_value(detailed_weights, "riskControl") * 0.35
+            + _detailed_weight_value(detailed_weights, "supportResistance") * 0.22
+            + _detailed_weight_value(detailed_weights, "volumeConfirmation") * 0.20
+            + _detailed_weight_value(detailed_weights, "rsiHealth") * 0.18
+        ),
+        "newsHeatImpactScore": (
+            _detailed_weight_value(detailed_weights, "newsHeat") * 1.00
+            + _detailed_weight_value(detailed_weights, "fundFlow") * 0.28
+            + _detailed_weight_value(detailed_weights, "volumeConfirmation") * 0.12
+            + _detailed_weight_value(detailed_weights, "momentum") * 0.08
+        ),
+    }
+    total = sum(raw.values())
+    if total <= 0:
+        return defaults
+    strategy_weights = {key: value / total for key, value in raw.items()}
+    return {key: defaults[key] * 0.45 + strategy_weights[key] * 0.55 for key in defaults}
+
+
+def _overall_assessment(
+    score: float,
+    metrics: dict[str, float],
+    news_heat: dict,
+    trend_analysis: dict,
+    t_plan: dict,
+    opportunity_score: float,
+    downside_risk_score: float,
+    breakout_setup_score: float,
+    pullback_risk_score: float,
+    price_change,
+    detailed_weights: dict | None = None,
+) -> dict:
+    continuation = float(trend_analysis.get("continuationScore") or 50)
+    reversal = float(trend_analysis.get("reversalRiskScore") or 50)
+    heat_impact = float(news_heat.get("impactScore") or 45)
+    t_score = float(t_plan.get("score") or 50)
+    t_components = t_plan.get("components") or {}
+    liquidity_score = float(t_components.get("liquidityScore") or 50)
+    volatility_score = float(t_components.get("volatilityScore") or 50)
+    change = _metric_number(price_change)
+
+    today_buy_score = _clamp_score(
+        score * 0.28
+        + breakout_setup_score * 0.18
+        + (100 - pullback_risk_score) * 0.16
+        + metrics["risk"] * 0.14
+        + metrics["value"] * 0.08
+        + metrics["sentiment"] * 0.06
+        + heat_impact * 0.10
+        + _price_action_bonus(change) * 0.55
+    )
+    future_rise_score = _clamp_score(
+        opportunity_score * 0.28
+        + continuation * 0.24
+        + metrics["momentum"] * 0.14
+        + metrics["quality"] * 0.10
+        + heat_impact * 0.10
+        + (100 - downside_risk_score) * 0.10
+        - reversal * 0.10
+    )
+    profitable_exit_score = _clamp_score(
+        t_score * 0.24
+        + liquidity_score * 0.16
+        + volatility_score * 0.10
+        + continuation * 0.15
+        + (100 - downside_risk_score) * 0.17
+        + (100 - pullback_risk_score) * 0.11
+        + heat_impact * 0.07
+    )
+    component_weights = _overall_component_weights(detailed_weights)
+    total_score = _clamp_score(
+        today_buy_score * component_weights["todayBuyScore"]
+        + future_rise_score * component_weights["futureRiseScore"]
+        + profitable_exit_score * component_weights["profitableExitScore"]
+        + heat_impact * component_weights["newsHeatImpactScore"]
+    )
+    if _is_severe_price_drop(change) or downside_risk_score >= DOWNSIDE_URGENT_EXIT_FLOOR:
+        total_score = min(total_score, 38)
+    elif _is_large_price_drop(change) or downside_risk_score >= DOWNSIDE_EXIT_FLOOR:
+        total_score = min(total_score, 52)
+    if reversal >= NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR:
+        total_score = min(total_score, 62)
+
+    if total_score >= 76 and today_buy_score >= 68 and future_rise_score >= 66 and profitable_exit_score >= 60:
+        suitability = "strongBuy"
+        summary_key = "overallStrongBuySummary"
+    elif total_score >= 68 and today_buy_score >= 60 and future_rise_score >= 58 and profitable_exit_score >= 54:
+        suitability = "buy"
+        summary_key = "overallBuySummary"
+    elif total_score <= 42 or downside_risk_score >= DOWNSIDE_URGENT_EXIT_FLOOR or _is_severe_price_drop(change):
+        suitability = "sell"
+        summary_key = "overallSellSummary"
+    elif total_score <= 54 or today_buy_score < 48 or future_rise_score < 48:
+        suitability = "avoid"
+        summary_key = "overallAvoidSummary"
+    else:
+        suitability = "watch"
+        summary_key = "overallWatchSummary"
+
+    params = {
+        "score": round(total_score, 1),
+        "today": round(today_buy_score, 1),
+        "future": round(future_rise_score, 1),
+        "exit": round(profitable_exit_score, 1),
+        "heat": round(float(news_heat.get("heatScore") or 0), 1),
+        "impact": round(heat_impact, 1),
+        "risk": round(downside_risk_score, 1),
+    }
+    positives = []
+    negatives = []
+    watch_items = []
+    if today_buy_score >= 62:
+        positives.append({"key": "overallTodayBuySupport", "params": params})
+    elif today_buy_score <= 50:
+        negatives.append({"key": "overallTodayBuyWeak", "params": params})
+    else:
+        watch_items.append({"key": "overallTodayBuyWatch", "params": params})
+
+    if future_rise_score >= 62:
+        positives.append({"key": "overallFutureRiseSupport", "params": params})
+    elif future_rise_score <= 50:
+        negatives.append({"key": "overallFutureRiseWeak", "params": params})
+    else:
+        watch_items.append({"key": "overallFutureRiseWatch", "params": params})
+
+    if profitable_exit_score >= 58:
+        positives.append({"key": "overallProfitableExitSupport", "params": params})
+    elif profitable_exit_score <= 48:
+        negatives.append({"key": "overallProfitableExitWeak", "params": params})
+    else:
+        watch_items.append({"key": "overallProfitableExitWatch", "params": params})
+
+    if heat_impact >= 62:
+        positives.append({"key": "overallNewsHeatSupport", "params": params})
+    elif heat_impact <= 42:
+        negatives.append({"key": "overallNewsHeatRisk", "params": params})
+    else:
+        watch_items.append({"key": "overallNewsHeatWatch", "params": params})
+    if downside_risk_score >= DOWNSIDE_EXIT_FLOOR or reversal >= NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR:
+        negatives.append({"key": "overallRiskTooHigh", "params": params})
+
+    return {
+        "summary": {"key": summary_key, "params": params},
+        "suitability": suitability,
+        "totalScore": round(total_score, 1),
+        "components": {
+            "todayBuyScore": round(today_buy_score, 1),
+            "futureRiseScore": round(future_rise_score, 1),
+            "profitableExitScore": round(profitable_exit_score, 1),
+            "newsHeatImpactScore": round(heat_impact, 1),
+        },
+        "componentWeights": {key: round(value * 100, 1) for key, value in component_weights.items()},
+        "metrics": [
+            {"key": "overallTotal", "value": f"{total_score:.1f}/100", "score": round(total_score, 1)},
+            {"key": "overallTodayBuy", "value": f"{today_buy_score:.1f}/100", "score": round(today_buy_score, 1)},
+            {"key": "overallFutureRise", "value": f"{future_rise_score:.1f}/100", "score": round(future_rise_score, 1)},
+            {"key": "overallProfitableExit", "value": f"{profitable_exit_score:.1f}/100", "score": round(profitable_exit_score, 1)},
+            {"key": "overallNewsHeatImpact", "value": f"{heat_impact:.1f}/100", "score": round(heat_impact, 1)},
+        ],
+        "positives": positives[:5],
+        "negatives": negatives[:5],
+        "watchItems": watch_items[:5],
+    }
 
 
 def _max_drawdown(closes: list[float], window: int = 60) -> float:
@@ -1495,6 +2258,7 @@ def _momentum_score(closes: list[float]) -> float:
 
 def _metric_availability(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, bool]:
     info = snapshot.info
+    fund_flow_available = bool(_fund_flow_profile(info).get("available"))
     has_quality = any(
         _metric_number(info.get(key)) is not None
         for key in ["returnOnEquity", "profitMargins", "revenueGrowth", "earningsGrowth", "debtToEquity", "marketCap", "regularMarketVolume"]
@@ -1504,7 +2268,7 @@ def _metric_availability(snapshot: MarketSnapshot, articles: list[Article]) -> d
         for key in ["trailingPE", "forwardPE", "priceToBook", "fiftyTwoWeekHigh", "fiftyTwoWeekLow"]
     )
     return {
-        "sentiment": bool(articles),
+        "sentiment": bool(articles) or fund_flow_available,
         "momentum": len(snapshot.closes) >= 22,
         "value": has_value,
         "risk": len(snapshot.closes) >= 22 or _metric_number(info.get("beta")) is not None,
@@ -1534,9 +2298,113 @@ def _liquidity_score(info: dict) -> float | None:
     return mean(scores) if scores else None
 
 
+def _clamp_signed_score(value: float) -> float:
+    return max(-100, min(100, value))
+
+
+def _fund_flow_money_label(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    absolute = abs(value)
+    if absolute >= 1_000_000_000:
+        return f"CNY {value / 1_000_000_000:+.2f}b"
+    if absolute >= 1_000_000:
+        return f"CNY {value / 1_000_000:+.1f}m"
+    if absolute >= 1_000:
+        return f"CNY {value / 1_000:+.1f}k"
+    return f"CNY {value:+.0f}"
+
+
+def _fund_flow_metric_value(amount: float | None, ratio: float | None) -> str:
+    ratio_label = "N/A" if ratio is None else f"{ratio:+.1f}%"
+    return f"{_fund_flow_money_label(amount)} ({ratio_label})"
+
+
+def _fund_flow_profile(info: dict) -> dict:
+    main_net = _metric_number(info.get("fundFlowMainNet"))
+    main_ratio = _metric_number(info.get("fundFlowMainRatio"))
+    super_large_net = _metric_number(info.get("fundFlowSuperLargeNet"))
+    super_large_ratio = _metric_number(info.get("fundFlowSuperLargeRatio"))
+    large_net = _metric_number(info.get("fundFlowLargeNet"))
+    large_ratio = _metric_number(info.get("fundFlowLargeRatio"))
+    medium_net = _metric_number(info.get("fundFlowMediumNet"))
+    medium_ratio = _metric_number(info.get("fundFlowMediumRatio"))
+    small_net = _metric_number(info.get("fundFlowSmallNet"))
+    small_ratio = _metric_number(info.get("fundFlowSmallRatio"))
+    turnover = _metric_number(info.get("turnoverValue"))
+
+    if main_ratio is None and main_net is not None and turnover and turnover > 0:
+        main_ratio = main_net / turnover * 100
+    if main_ratio is None:
+        parts = [value for value in [super_large_ratio, large_ratio] if value is not None]
+        if parts:
+            main_ratio = sum(parts)
+
+    available = any(
+        value is not None
+        for value in [
+            main_net,
+            main_ratio,
+            super_large_net,
+            super_large_ratio,
+            large_net,
+            large_ratio,
+            medium_net,
+            medium_ratio,
+            small_net,
+            small_ratio,
+        ]
+    )
+    if not available:
+        return {"available": False, "score": 0.0, "positiveScore": 0.0, "negativeScore": 0.0}
+
+    signed_score = (main_ratio or 0) * 4.0
+    if super_large_ratio is not None:
+        signed_score += super_large_ratio * 0.7
+    if large_ratio is not None:
+        signed_score += large_ratio * 0.6
+    if small_ratio is not None:
+        signed_score -= small_ratio * 0.4
+    if main_net is not None and abs(main_net) >= 1_000_000:
+        amount_bonus = min(12, log10(abs(main_net) / 1_000_000 + 1) * 4.0)
+        signed_score += amount_bonus if main_net > 0 else -amount_bonus
+
+    signed_score = round(_clamp_signed_score(signed_score), 1)
+    return {
+        "available": True,
+        "source": info.get("fundFlowSource") or "Eastmoney",
+        "score": signed_score,
+        "positiveScore": round(max(0, signed_score), 1),
+        "negativeScore": round(max(0, -signed_score), 1),
+        "mainNet": main_net,
+        "mainRatio": main_ratio,
+        "superLargeNet": super_large_net,
+        "superLargeRatio": super_large_ratio,
+        "largeNet": large_net,
+        "largeRatio": large_ratio,
+        "mediumNet": medium_net,
+        "mediumRatio": medium_ratio,
+        "smallNet": small_net,
+        "smallRatio": small_ratio,
+    }
+
+
+def _fund_flow_decision_params(fund_flow: dict) -> dict:
+    return {
+        "score": round(float(fund_flow.get("score") or 0), 1),
+        "amount": _fund_flow_money_label(_metric_number(fund_flow.get("mainNet"))),
+        "ratio": round(float(fund_flow.get("mainRatio") or 0), 1),
+        "source": str(fund_flow.get("source") or "Eastmoney"),
+    }
+
+
 def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, float]:
     closes = snapshot.closes
     momentum = _momentum_score(closes)
+    fund_flow = _fund_flow_profile(snapshot.info)
+    flow_score = float(fund_flow.get("score") or 0)
+    if fund_flow.get("available"):
+        momentum = _clamp_score(momentum + flow_score * 0.12)
 
     pe = _metric_number(snapshot.info.get("trailingPE") or snapshot.info.get("forwardPE"))
     pb = _metric_number(snapshot.info.get("priceToBook"))
@@ -1553,6 +2421,8 @@ def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, flo
     beta = _metric_number(snapshot.info.get("beta"))
     beta_score = 65 if beta is None else _clamp_score(100 - abs(beta - 1) * 42)
     risk = round((beta_score * 0.45) + (volatility_score(closes) * 0.55), 1)
+    if fund_flow.get("available"):
+        risk = round(_clamp_score(risk + flow_score * 0.08), 1)
 
     roe = _metric_number(snapshot.info.get("returnOnEquity"))
     margin = _metric_number(snapshot.info.get("profitMargins"))
@@ -1580,7 +2450,7 @@ def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, flo
     return {
         "momentum": round(momentum, 1),
         "value": round(value, 1),
-        "sentiment": round(_sentiment_score(articles), 1),
+        "sentiment": round(_clamp_score(_sentiment_score(articles) + (flow_score * 0.18 if fund_flow.get("available") else 0)), 1),
         "risk": risk,
         "quality": round(mean(quality_parts), 1) if quality_parts else 50,
     }
@@ -1626,6 +2496,51 @@ def _financial_analysis(snapshot: MarketSnapshot) -> dict:
     positives = []
     negatives = []
     watch_items = []
+    fund_flow = _fund_flow_profile(info)
+
+    if fund_flow.get("available"):
+        flow_score = round(float(fund_flow.get("score") or 0), 1)
+        positive_flow = float(fund_flow.get("positiveScore") or 0)
+        negative_flow = float(fund_flow.get("negativeScore") or 0)
+        metrics.append(
+            {
+                "key": "fundFlowMain",
+                "value": _fund_flow_metric_value(
+                    _metric_number(fund_flow.get("mainNet")),
+                    _metric_number(fund_flow.get("mainRatio")),
+                ),
+                "score": round(_clamp_score(50 + flow_score / 2), 1),
+            }
+        )
+        if fund_flow.get("superLargeNet") is not None or fund_flow.get("superLargeRatio") is not None:
+            metrics.append(
+                {
+                    "key": "fundFlowSuperLarge",
+                    "value": _fund_flow_metric_value(
+                        _metric_number(fund_flow.get("superLargeNet")),
+                        _metric_number(fund_flow.get("superLargeRatio")),
+                    ),
+                    "score": round(_clamp_score(50 + (_metric_number(fund_flow.get("superLargeRatio")) or 0) * 2.6), 1),
+                }
+            )
+        if fund_flow.get("largeNet") is not None or fund_flow.get("largeRatio") is not None:
+            metrics.append(
+                {
+                    "key": "fundFlowLarge",
+                    "value": _fund_flow_metric_value(
+                        _metric_number(fund_flow.get("largeNet")),
+                        _metric_number(fund_flow.get("largeRatio")),
+                    ),
+                    "score": round(_clamp_score(50 + (_metric_number(fund_flow.get("largeRatio")) or 0) * 2.3), 1),
+                }
+            )
+        params = _fund_flow_decision_params(fund_flow)
+        if positive_flow >= 18:
+            positives.append({"key": "fundFlowSupport", "params": params})
+        elif negative_flow >= 18:
+            negatives.append({"key": "fundFlowPressure", "params": params})
+        else:
+            watch_items.append({"key": "fundFlowWatch", "params": params})
 
     if pe is not None:
         score = max(0, min(100, 100 - abs(pe - 18) * 2.2))
@@ -1830,6 +2745,8 @@ def _portfolio_context_from_payload(payload: dict) -> dict | None:
         }
         if position["marketValue"] is None and position["quantity"] and position["lastPrice"] is not None:
             position["marketValue"] = round(position["quantity"] * position["lastPrice"], 4)
+        if position["frozenQuantity"] is None and position["availableQuantity"] is not None:
+            position["frozenQuantity"] = max(0, position["quantity"] - position["availableQuantity"])
         if position["costAmount"] is None and position["quantity"] and position["costPrice"] is not None:
             position["costAmount"] = round(position["quantity"] * position["costPrice"], 4)
         if position["unrealizedPnl"] is None and position["marketValue"] is not None and position["costAmount"] is not None:
@@ -1939,15 +2856,58 @@ def _portfolio_summary(context: dict, picks: list[dict]) -> dict | None:
         "totalUnrealizedPnl": portfolio["totalUnrealizedPnl"],
         "totalUnrealizedPnlPct": portfolio["totalUnrealizedPnlPct"],
         "warnings": warnings[:8],
-    }
+}
+
+
+def _enrich_position_with_live_price(position: dict, pick: dict) -> dict:
+    quantity = _metric_number(position.get("quantity")) or 0
+    cost_price = _metric_number(position.get("costPrice"))
+    live_price = _metric_number(pick.get("price"))
+    if quantity <= 0 or live_price is None:
+        return position
+
+    updated = dict(position)
+    updated["lastPrice"] = live_price
+    updated["marketValue"] = round(quantity * live_price, 4)
+    if cost_price is not None:
+        updated["costAmount"] = round(quantity * cost_price, 4)
+    cost_amount = _metric_number(updated.get("costAmount"))
+    market_value = _metric_number(updated.get("marketValue"))
+    if market_value is not None and cost_amount is not None:
+        updated["unrealizedPnl"] = round(market_value - cost_amount, 4)
+        updated["unrealizedPnlPct"] = round((market_value - cost_amount) / cost_amount * 100, 4) if cost_amount else None
+    return updated
+
+
+def _refresh_portfolio_totals(portfolio: dict) -> None:
+    positions = portfolio.get("positions") or []
+    total_market_value = sum(_metric_number(position.get("marketValue")) or 0 for position in positions)
+    total_cost_amount = sum(_metric_number(position.get("costAmount")) or 0 for position in positions)
+    total_unrealized_pnl = sum(_metric_number(position.get("unrealizedPnl")) or 0 for position in positions)
+    portfolio["totalMarketValue"] = round(total_market_value, 4)
+    portfolio["totalCostAmount"] = round(total_cost_amount, 4)
+    portfolio["totalUnrealizedPnl"] = round(total_unrealized_pnl, 4)
+    portfolio["totalUnrealizedPnlPct"] = round(total_unrealized_pnl / total_cost_amount * 100, 4) if total_cost_amount else None
 
 
 def _apply_portfolio_context(context: dict, picks: list[dict]) -> dict | None:
     portfolio = context.get("portfolio")
     if not portfolio:
         return None
-    total_market_value = portfolio.get("totalMarketValue") or 0
     position_map = portfolio["position_map"]
+    for pick in picks:
+        position = position_map.get(pick["symbol"])
+        if not position:
+            continue
+        enriched = _enrich_position_with_live_price(position, pick)
+        position_map[pick["symbol"]] = enriched
+        for index, item in enumerate(portfolio["positions"]):
+            if item["symbol"] == pick["symbol"]:
+                portfolio["positions"][index] = enriched
+                break
+
+    _refresh_portfolio_totals(portfolio)
+    total_market_value = portfolio.get("totalMarketValue") or 0
     for pick in picks:
         position = position_map.get(pick["symbol"])
         if not position:
@@ -1976,10 +2936,11 @@ def _analysis_context(payload: dict, market_provider=None, news_crawler=None, un
         symbol_payload = {**payload, "symbols": requested_symbols}
     auto_scan = not requested_symbols
     requested_markets = payload.get("markets") or [market["id"] for market in MARKETS]
+    discovery_limit = _initial_discovery_limit(requested_markets, auto_scan)
     discovered_symbols, discovery_errors, universe_source = _symbols_from_payload(
         symbol_payload,
         universe_provider,
-        AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET,
+        discovery_limit,
     )
     symbols = [item for item in discovered_symbols if infer_market(item.symbol) in markets]
 
@@ -1993,10 +2954,11 @@ def _analysis_context(payload: dict, market_provider=None, news_crawler=None, un
         "requested_markets": requested_markets,
         "symbols": symbols,
         "auto_scan": auto_scan,
+        "display_limit": _auto_scan_display_limit(requested_markets, auto_scan),
         "refresh": bool(payload.get("refresh")),
         "discovery_errors": discovery_errors,
         "universe_source": universe_source,
-        "discovery_limit": AUTO_SCAN_DISCOVERY_LIMIT_PER_MARKET,
+        "discovery_limit": discovery_limit,
         "portfolio": portfolio_context,
     }
 
@@ -2064,24 +3026,41 @@ def _fetch_news_articles(news_crawler, symbol: str, name: str, refresh: bool = F
     return list(news_crawler.fetch(symbol, name))
 
 
-def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weights: dict[str, float], refresh: bool = False) -> dict:
+def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weights: dict[str, float], strategy: dict | None = None, refresh: bool = False) -> dict:
     snapshot = _fetch_market_snapshot(market_provider, item.symbol, refresh)
     raw_name = snapshot.name if snapshot.name and snapshot.name.upper() != snapshot.symbol.upper() else item.name
     company_name = local_company_name(snapshot.symbol, raw_name)
     articles = _dedupe_articles([*item.evidence, *_fetch_news_articles(news_crawler, snapshot.symbol, company_name, refresh)])
     metrics = _metrics(snapshot, articles)
     availability = _metric_availability(snapshot, articles)
+    fund_flow = _fund_flow_profile(snapshot.info)
     sentiment_delta = _sentiment_boost(articles)
     score = round(_score_stock(metrics, weights, availability), 1)
     signals = _signals_for(articles)
     news_analysis = _news_analysis(articles)
+    news_heat_analysis = _news_heat_analysis(articles, news_analysis)
     breakout_setup_score = _breakout_setup_score(snapshot, news_analysis)
     pullback_risk_score = _pullback_risk_score(snapshot, news_analysis)
-    opportunity_score, downside_risk_score = _prediction_scores(metrics, score, news_analysis, snapshot.change, breakout_setup_score, pullback_risk_score)
+    trend_analysis = _trend_analysis(snapshot, news_analysis, fund_flow)
+    trend_profile = trend_analysis.get("profile") or {}
+    opportunity_score, downside_risk_score = _prediction_scores(metrics, score, news_analysis, snapshot.change, breakout_setup_score, pullback_risk_score, fund_flow, trend_profile)
     t_score, t_components = _t_trade_score(snapshot, metrics, news_analysis, breakout_setup_score, pullback_risk_score, downside_risk_score)
     t_plan = _t_trade_plan(snapshot, metrics, t_score, t_components, breakout_setup_score, pullback_risk_score, downside_risk_score)
+    overall_assessment = _overall_assessment(
+        score,
+        metrics,
+        news_heat_analysis,
+        trend_analysis,
+        t_plan,
+        opportunity_score,
+        downside_risk_score,
+        breakout_setup_score,
+        pullback_risk_score,
+        snapshot.change,
+        (strategy or {}).get("detailedWeights"),
+    )
     verdict = _verdict(score, metrics["risk"], metrics["quality"], metrics["sentiment"], snapshot.change)
-    reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change, breakout_setup_score, pullback_risk_score)
+    reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change, breakout_setup_score, pullback_risk_score, trend_profile)
     financial_analysis = _financial_analysis(snapshot)
     return {
         "symbol": snapshot.symbol,
@@ -2096,13 +3075,24 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "downsideRiskScore": downside_risk_score,
         "breakoutSetupScore": breakout_setup_score,
         "pullbackRiskScore": pullback_risk_score,
+        "nextSessionContinuationScore": trend_analysis["continuationScore"],
+        "nextSessionReversalRiskScore": trend_analysis["reversalRiskScore"],
         "tScore": t_score,
         "tPlan": t_plan,
+        "fundFlow": fund_flow if fund_flow.get("available") else None,
+        "overallAssessment": overall_assessment,
         "prediction": {
             "opportunityScore": opportunity_score,
             "downsideRiskScore": downside_risk_score,
             "breakoutSetupScore": breakout_setup_score,
             "pullbackRiskScore": pullback_risk_score,
+            "nextSessionContinuationScore": trend_analysis["continuationScore"],
+            "nextSessionReversalRiskScore": trend_analysis["reversalRiskScore"],
+            "overallScore": overall_assessment["totalScore"],
+            "todayBuyScore": overall_assessment["components"]["todayBuyScore"],
+            "futureRiseScore": overall_assessment["components"]["futureRiseScore"],
+            "profitableExitScore": overall_assessment["components"]["profitableExitScore"],
+            "newsHeatImpactScore": overall_assessment["components"]["newsHeatImpactScore"],
             "tScore": t_score,
             "edge": round(opportunity_score - downside_risk_score, 1),
         },
@@ -2113,8 +3103,10 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "signals": signals,
         "metrics": metrics,
         "scoreBreakdown": _score_breakdown(metrics, weights, availability),
-        "decision": _decision_details(verdict, score, metrics, signals, news_analysis, snapshot.change, breakout_setup_score, pullback_risk_score),
+        "decision": _decision_details(verdict, score, metrics, signals, news_analysis, snapshot.change, breakout_setup_score, pullback_risk_score, fund_flow),
         "newsAnalysis": news_analysis,
+        "newsHeatAnalysis": news_heat_analysis,
+        "trendAnalysis": trend_analysis,
         "financialAnalysis": financial_analysis,
         "actionPlan": _action_plan(verdict, score, metrics, news_analysis, financial_analysis, snapshot.change, pullback_risk_score),
     }
@@ -2156,11 +3148,11 @@ def _friendly_data_error(symbol: str, exc: Exception) -> str:
     return message or f"行情资料暂时不可用，已跳过 {symbol}。"
 
 
-def _finish_picks(picks: list[dict], auto_scan: bool = False) -> list[dict]:
+def _finish_picks(picks: list[dict], auto_scan: bool = False, display_limit: int = AUTO_SCAN_RESULT_LIMIT) -> list[dict]:
     picks.sort(key=lambda item: item["score"], reverse=True)
     if auto_scan:
         _apply_auto_scan_search_algorithm(picks)
-        display_picks = _curated_auto_scan_picks(picks)
+        display_picks = _curated_auto_scan_picks_for_limit(picks, display_limit)
     else:
         _relative_verdicts(picks)
         display_picks = sorted(picks, key=_display_priority_key)
@@ -2175,11 +3167,11 @@ def _refresh_scan_quality_context(context: dict, picks: list[dict]) -> None:
     context["actionable"] = _actionable_candidate_count(picks)
 
 
-def _process_symbol_batch(symbols: list[DiscoveredSymbol], market_provider, news_crawler, weights: dict[str, float], refresh: bool = False) -> tuple[list[dict], list[dict]]:
+def _process_symbol_batch(symbols: list[DiscoveredSymbol], market_provider, news_crawler, weights: dict[str, float], strategy: dict | None = None, refresh: bool = False) -> tuple[list[dict], list[dict]]:
     picks = []
     errors = []
     with ThreadPoolExecutor(max_workers=min(6, max(1, len(symbols)))) as executor:
-        futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights, refresh): item.symbol for item in symbols}
+        futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights, strategy, refresh): item.symbol for item in symbols}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -2205,12 +3197,12 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
     while True:
         pending_symbols = [item for item in symbols if item.symbol not in evaluated_symbols]
         if pending_symbols:
-            batch_picks, batch_errors = _process_symbol_batch(pending_symbols, market_provider, news_crawler, weights, context["refresh"])
+            batch_picks, batch_errors = _process_symbol_batch(pending_symbols, market_provider, news_crawler, weights, strategy, context["refresh"])
             picks.extend(batch_picks)
             errors.extend(batch_errors)
             evaluated_symbols.update(item.symbol for item in pending_symbols)
 
-        display_picks = _finish_picks(picks, context["auto_scan"])
+        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
         _refresh_scan_quality_context(context, picks)
         next_limit = _next_auto_scan_limit(context, picks)
         if next_limit is None:
@@ -2264,13 +3256,13 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
         pending_symbols = [item for item in symbols if item.symbol not in evaluated_symbols]
         if pending_symbols:
             with ThreadPoolExecutor(max_workers=min(6, max(1, len(pending_symbols)))) as executor:
-                futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights, context["refresh"]): item.symbol for item in pending_symbols}
+                futures = {executor.submit(_process_symbol, item, market_provider, news_crawler, weights, strategy, context["refresh"]): item.symbol for item in pending_symbols}
                 for future in as_completed(futures):
                     symbol = futures[future]
                     try:
                         pick = future.result()
                         picks.append(pick)
-                        display_picks = _finish_picks(picks, context["auto_scan"])
+                        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
                         portfolio_summary = _apply_portfolio_context(context, display_picks)
                         _refresh_scan_quality_context(context, picks)
                         sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
@@ -2279,13 +3271,13 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                     except Exception as exc:
                         error_message = _friendly_data_error(symbol, exc)
                         errors.append({"symbol": symbol, "error": error_message})
-                        display_picks = _finish_picks(picks, context["auto_scan"])
+                        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
                         portfolio_summary = _apply_portfolio_context(context, display_picks)
                         _refresh_scan_quality_context(context, picks)
                         yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(picks if context["auto_scan"] else display_picks), scan=_scan_state(context, display_picks, errors), portfolio=portfolio_summary)
             evaluated_symbols.update(item.symbol for item in pending_symbols)
 
-        display_picks = _finish_picks(picks, context["auto_scan"])
+        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
         _refresh_scan_quality_context(context, picks)
         next_limit = _next_auto_scan_limit(context, picks)
         if next_limit is None:
@@ -2294,7 +3286,7 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
             break
         symbols = context["symbols"]
 
-    display_picks = display_picks or _finish_picks(picks, context["auto_scan"])
+    display_picks = display_picks or _finish_picks(picks, context["auto_scan"], context["display_limit"])
     portfolio_summary = _apply_portfolio_context(context, display_picks)
     _refresh_scan_quality_context(context, picks)
     sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)

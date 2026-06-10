@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, currentDataMode, fetchConfig, importPortfolioFile, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type HoldingAction, type HoldingNote, type Market, type NewsEvent, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type Strategy, type StrategyWeights } from './api';
+import { analyzeStocksStream, currentDataMode, fetchConfig, fetchStockChart, importPortfolioFile, refreshStrategyLibrary, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyLibrary, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -9,8 +9,23 @@ type LocalizedText = Partial<Record<StandardLocale, string>> & { en: string };
 type YogurtSoundCue = 'appear' | 'tap';
 type ResultMarketFilter = 'all' | Market;
 type ResultVerdictFilter = 'all' | Pick['verdict'] | 't';
+type ResultSortKey =
+  | 'recommended'
+  | 'overall'
+  | 'score'
+  | 'todayBuy'
+  | 'futureRise'
+  | 'profitableExit'
+  | 'newsHeat'
+  | 'continuation'
+  | 'riskLow'
+  | 'tScore'
+  | 'change'
+  | 'confidence';
+type SortDirection = 'desc' | 'asc';
 type DataMode = ReturnType<typeof currentDataMode>;
 type DataIssue = { symbol: string; error: string };
+type ChartTab = 'intraday' | 'daily';
 type SavedScan = {
   id: string;
   title: string;
@@ -36,7 +51,7 @@ const languageMenuOpen = ref(false);
 const languageMenuRef = ref<HTMLElement | null>(null);
 const config = ref<AppConfig | null>(null);
 const selectedMarkets = ref<Market[]>(['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW']);
-const selectedStrategyId = ref('balanced');
+const selectedStrategyId = ref('ai_smart_blend');
 const useCustom = ref(false);
 const loading = ref(false);
 const error = ref('');
@@ -47,6 +62,8 @@ const sectors = ref<SectorAnalysis[]>([]);
 const activeView = ref<'stocks' | 'sectors'>('stocks');
 const resultMarketFilter = ref<ResultMarketFilter>('all');
 const resultVerdictFilter = ref<ResultVerdictFilter>('all');
+const resultSortKey = ref<ResultSortKey>('recommended');
+const resultSortDirection = ref<SortDirection>('desc');
 const dataIssues = ref<DataIssue[]>([]);
 const scanInfo = ref<{ auto: boolean; requested: number; succeeded: number; failed: number } | null>(null);
 const loadingStartedAt = ref(0);
@@ -61,6 +78,16 @@ const importedPortfolio = ref<PortfolioImportResponse | null>(null);
 const analysisPortfolio = ref<PortfolioAnalysis | null>(null);
 const importingPortfolio = ref(false);
 const portfolioImportError = ref('');
+const manualHoldingText = ref('');
+const refreshingStrategies = ref(false);
+const strategyRefreshError = ref('');
+const detailPick = ref<Pick | null>(null);
+const detailChart = ref<StockChartResponse | null>(null);
+const detailChartTab = ref<ChartTab>('intraday');
+const detailChartLoading = ref(false);
+const detailChartError = ref('');
+const chartSvgRef = ref<SVGSVGElement | null>(null);
+const chartPointerIndex = ref<number | null>(null);
 const yogurtSecretPrimed = ref(false);
 const yogurtSecretOpen = ref(false);
 let loadingTimer: number | undefined;
@@ -76,6 +103,7 @@ const SAVED_SCAN_LIMIT = 6;
 const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
 const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 't', 'watch', 'sell'];
+const resultSortOptions: ResultSortKey[] = ['recommended', 'overall', 'score', 'todayBuy', 'futureRise', 'profitableExit', 'newsHeat', 'continuation', 'riskLow', 'tScore', 'change', 'confidence'];
 const languageOptions: Array<{ id: Locale; label: string; shortLabel: string; flagClass: string }> = [
   { id: 'en', label: 'English', shortLabel: 'EN', flagClass: 'flag-uk' },
   { id: 'zh-CN', label: '简体中文', shortLabel: '简', flagClass: 'flag-cn' },
@@ -85,6 +113,270 @@ const languageOptions: Array<{ id: Locale; label: string; shortLabel: string; fl
   { id: 'ko', label: '한국어', shortLabel: '한', flagClass: 'flag-kr' }
 ];
 
+const strategyLibraryText: Record<Locale, {
+  refreshStrategies: string;
+  refreshingStrategies: string;
+  onlineStrategies: string;
+  sources: string;
+  availableSources: string;
+  detailedWeights: string;
+  aiBlendHint: string;
+  updated: string;
+  sourceLibrary: string;
+  sourcePending: string;
+  sourceAvailable: string;
+  sourceFailed: string;
+  matchedKeywords: string;
+  openDetail: string;
+  stockDetail: string;
+  intraday: string;
+  dailyK: string;
+  loadingChart: string;
+  chartUnavailable: string;
+  chartSource: string;
+  limitUp: string;
+  closeDetail: string;
+}> = {
+  en: {
+    refreshStrategies: 'Refresh online strategies',
+    refreshingStrategies: 'Refreshing strategies',
+    onlineStrategies: 'online strategies',
+    sources: 'sources',
+    availableSources: 'available sources',
+    detailedWeights: 'Detailed weights',
+    aiBlendHint: 'AI Smart Blend will rebalance after the online source crawl refreshes.',
+    updated: 'Updated',
+    sourceLibrary: 'Source library',
+    sourcePending: 'pending',
+    sourceAvailable: 'live',
+    sourceFailed: 'failed',
+    matchedKeywords: 'matched',
+    openDetail: 'Intraday / daily K',
+    stockDetail: 'Stock detail',
+    intraday: 'Intraday',
+    dailyK: 'Daily K',
+    loadingChart: 'Loading chart',
+    chartUnavailable: 'Chart temporarily unavailable',
+    chartSource: 'Chart source',
+    limitUp: 'Limit up',
+    closeDetail: 'Close'
+  },
+  'zh-CN': {
+    refreshStrategies: '刷新网上策略',
+    refreshingStrategies: '正在刷新策略',
+    onlineStrategies: '网上策略',
+    sources: '来源',
+    availableSources: '可用来源',
+    detailedWeights: '细分权重',
+    aiBlendHint: 'AI 智慧策略会在刷新网上来源后自动重新平衡。',
+    updated: '更新时间',
+    sourceLibrary: '策略来源库',
+    sourcePending: '待刷新',
+    sourceAvailable: '可用',
+    sourceFailed: '失败',
+    matchedKeywords: '命中',
+    openDetail: '分时 / 日K',
+    stockDetail: '个股详情',
+    intraday: '分时',
+    dailyK: '日K',
+    loadingChart: '正在加载图表',
+    chartUnavailable: '图表暂时不可用',
+    chartSource: '图表来源',
+    limitUp: '涨停价',
+    closeDetail: '关闭'
+  },
+  'zh-TW': {
+    refreshStrategies: '刷新網上策略',
+    refreshingStrategies: '正在刷新策略',
+    onlineStrategies: '網上策略',
+    sources: '來源',
+    availableSources: '可用來源',
+    detailedWeights: '細分權重',
+    aiBlendHint: 'AI 智慧策略會在刷新網上來源後自動重新平衡。',
+    updated: '更新時間',
+    sourceLibrary: '策略來源庫',
+    sourcePending: '待刷新',
+    sourceAvailable: '可用',
+    sourceFailed: '失敗',
+    matchedKeywords: '命中',
+    openDetail: '分時 / 日K',
+    stockDetail: '個股詳情',
+    intraday: '分時',
+    dailyK: '日K',
+    loadingChart: '正在載入圖表',
+    chartUnavailable: '圖表暫時不可用',
+    chartSource: '圖表來源',
+    limitUp: '漲停價',
+    closeDetail: '關閉'
+  },
+  'nan-TW': {
+    refreshStrategies: '刷新網路策略',
+    refreshingStrategies: '策略刷新中',
+    onlineStrategies: '網路策略',
+    sources: '來源',
+    availableSources: '會用的來源',
+    detailedWeights: '細分權重',
+    aiBlendHint: 'AI 智慧策略會照新抓著的來源自動重排權重。',
+    updated: '更新時間',
+    sourceLibrary: '策略來源庫',
+    sourcePending: '等待刷新',
+    sourceAvailable: '會用',
+    sourceFailed: '失敗',
+    matchedKeywords: '命中',
+    openDetail: '分時 / 日K',
+    stockDetail: '個股詳情',
+    intraday: '分時',
+    dailyK: '日K',
+    loadingChart: '圖表載入中',
+    chartUnavailable: '圖表暫時無法度用',
+    chartSource: '圖表來源',
+    limitUp: '漲停價',
+    closeDetail: '關閉'
+  },
+  ja: {
+    refreshStrategies: 'オンライン戦略を更新',
+    refreshingStrategies: '戦略を更新中',
+    onlineStrategies: 'オンライン戦略',
+    sources: 'ソース',
+    availableSources: '利用可能ソース',
+    detailedWeights: '詳細ウェイト',
+    aiBlendHint: 'AI Smart Blend はオンラインソース更新後に自動で再調整します。',
+    updated: '更新',
+    sourceLibrary: '戦略ソース',
+    sourcePending: '未更新',
+    sourceAvailable: '有効',
+    sourceFailed: '失敗',
+    matchedKeywords: '一致',
+    openDetail: '分足 / 日足',
+    stockDetail: '銘柄詳細',
+    intraday: '分足',
+    dailyK: '日足',
+    loadingChart: 'チャート読込中',
+    chartUnavailable: 'チャートを一時的に取得できません',
+    chartSource: 'チャートソース',
+    limitUp: 'ストップ高',
+    closeDetail: '閉じる'
+  },
+  ko: {
+    refreshStrategies: '온라인 전략 새로고침',
+    refreshingStrategies: '전략 새로고침 중',
+    onlineStrategies: '온라인 전략',
+    sources: '출처',
+    availableSources: '사용 가능한 출처',
+    detailedWeights: '세부 가중치',
+    aiBlendHint: 'AI Smart Blend는 온라인 출처를 새로 수집한 뒤 자동으로 재조정됩니다.',
+    updated: '업데이트',
+    sourceLibrary: '전략 출처',
+    sourcePending: '대기',
+    sourceAvailable: '사용 가능',
+    sourceFailed: '실패',
+    matchedKeywords: '일치',
+    openDetail: '분시 / 일봉',
+    stockDetail: '종목 상세',
+    intraday: '분시',
+    dailyK: '일봉',
+    loadingChart: '차트 로딩 중',
+    chartUnavailable: '차트를 일시적으로 사용할 수 없습니다',
+    chartSource: '차트 출처',
+    limitUp: '상한가',
+    closeDetail: '닫기'
+  }
+};
+
+const detailedWeightText: Record<Locale, Record<string, string>> = {
+  en: {},
+  'zh-CN': {
+    todayBuy: '今日值得买入',
+    futureRise: '未来上涨潜力',
+    profitableExit: '之后盈利卖出',
+    newsHeat: '新闻热度',
+    trendContinuation: '趋势延续',
+    maStructure: '均线结构',
+    momentum: '动能',
+    volumeConfirmation: '量能确认',
+    rsiHealth: 'RSI 健康度',
+    macdConfirmation: 'MACD 确认',
+    supportResistance: '支撑 / 压力',
+    fundFlow: '资金流',
+    valuation: '估值',
+    quality: '基本面质量',
+    riskControl: '风险控制',
+    tTrade: '做T / 卖出窗口'
+  },
+  'zh-TW': {
+    todayBuy: '今日值得買入',
+    futureRise: '未來上漲潛力',
+    profitableExit: '之後盈利賣出',
+    newsHeat: '新聞熱度',
+    trendContinuation: '趨勢延續',
+    maStructure: '均線結構',
+    momentum: '動能',
+    volumeConfirmation: '量能確認',
+    rsiHealth: 'RSI 健康度',
+    macdConfirmation: 'MACD 確認',
+    supportResistance: '支撐 / 壓力',
+    fundFlow: '資金流',
+    valuation: '估值',
+    quality: '基本面品質',
+    riskControl: '風險控制',
+    tTrade: '做T / 賣出窗口'
+  },
+  'nan-TW': {
+    todayBuy: '今仔日敢好買',
+    futureRise: '後勢上漲',
+    profitableExit: '後擺賣有趁',
+    newsHeat: '新聞熱度',
+    trendContinuation: '趨勢延續',
+    maStructure: '均線結構',
+    momentum: '動能',
+    volumeConfirmation: '量能確認',
+    rsiHealth: 'RSI 健康',
+    macdConfirmation: 'MACD 確認',
+    supportResistance: '支撐 / 壓力',
+    fundFlow: '資金流',
+    valuation: '估值',
+    quality: '基本面品質',
+    riskControl: '風險控制',
+    tTrade: '做T / 賣出窗口'
+  },
+  ja: {
+    todayBuy: '本日買い適性',
+    futureRise: '将来上昇余地',
+    profitableExit: '利益確定余地',
+    newsHeat: 'ニュース熱量',
+    trendContinuation: 'トレンド継続',
+    maStructure: '移動平均構造',
+    momentum: 'モメンタム',
+    volumeConfirmation: '出来高確認',
+    rsiHealth: 'RSI 健全性',
+    macdConfirmation: 'MACD 確認',
+    supportResistance: '支持 / 抵抗',
+    fundFlow: '資金フロー',
+    valuation: 'バリュエーション',
+    quality: 'ファンダメンタル品質',
+    riskControl: 'リスク管理',
+    tTrade: 'T取引 / 売却窓'
+  },
+  ko: {
+    todayBuy: '오늘 매수 적합도',
+    futureRise: '향후 상승 잠재력',
+    profitableExit: '수익 매도 가능성',
+    newsHeat: '뉴스 열기',
+    trendContinuation: '추세 지속',
+    maStructure: '이동평균 구조',
+    momentum: '모멘텀',
+    volumeConfirmation: '거래량 확인',
+    rsiHealth: 'RSI 건강도',
+    macdConfirmation: 'MACD 확인',
+    supportResistance: '지지 / 저항',
+    fundFlow: '자금 흐름',
+    valuation: '밸류에이션',
+    quality: '펀더멘털 품질',
+    riskControl: '리스크 관리',
+    tTrade: 'T 매매 / 매도 창'
+  }
+};
+
 type PersistedSettings = {
   locale?: Locale;
   selectedMarkets?: Market[];
@@ -92,6 +384,9 @@ type PersistedSettings = {
   useCustom?: boolean;
   customWeights?: Partial<StrategyWeights>;
   symbolText?: string;
+  manualHoldingText?: string;
+  resultSortKey?: ResultSortKey;
+  resultSortDirection?: SortDirection;
 };
 
 const customWeights = reactive<StrategyWeights>({
@@ -160,18 +455,126 @@ const marketLabels: Record<Locale, Record<Market, string>> = {
 };
 
 const t = computed(() => messages[locale.value]);
+const strategyUi = computed(() => strategyLibraryText[locale.value]);
 const activeLanguageOption = computed(() => languageOptions.find((option) => option.id === locale.value) ?? languageOptions[0]);
 const strategies = computed<Strategy[]>(() => config.value?.strategies ?? []);
 const selectedStrategy = computed(() => strategies.value.find((item) => item.id === selectedStrategyId.value));
+const strategyLibrary = computed(() => config.value?.strategyLibrary ?? null);
+const strategySources = computed(() => strategyLibrary.value?.sources ?? []);
+const selectedDetailedWeightEntries = computed(() => {
+  const weights = selectedStrategy.value?.detailedWeights;
+  if (!weights) return [];
+  const keys = strategyLibrary.value?.detailedWeightKeys?.length ? strategyLibrary.value.detailedWeightKeys : Object.keys(weights);
+  return keys
+    .filter((key) => weights[key] !== undefined)
+    .map((key) => ({ key, value: Number(weights[key] ?? 0) }))
+    .sort((left, right) => right.value - left.value);
+});
+const selectedStrategySources = computed(() => {
+  const ids = new Set(selectedStrategy.value?.sourceStrategyIds ?? []);
+  if (!ids.size) return [];
+  return strategySources.value.filter((source) => ids.has(source.id));
+});
+const strategySourceSummary = computed(() => {
+  const total = strategySources.value.length;
+  const available = strategySources.value.filter((source) => source.available === true).length;
+  const selected = selectedStrategySources.value.length;
+  if (!total) return '';
+  if (available) return `${selected || total}/${total} ${strategyUi.value.onlineStrategies} · ${available} ${strategyUi.value.availableSources}`;
+  return `${selected || total}/${total} ${strategyUi.value.onlineStrategies}`;
+});
+const strategyUpdatedLabel = computed(() => {
+  const refreshedAt = strategyLibrary.value?.refreshedAt;
+  if (!refreshedAt) return '';
+  return `${strategyUi.value.updated} ${new Date(refreshedAt).toLocaleString()}`;
+});
+const visibleChartPoints = computed<StockChartPoint[]>(() => {
+  const chart = detailChart.value;
+  if (!chart) return [];
+  const points = detailChartTab.value === 'intraday' ? chart.intraday : chart.daily;
+  return points.slice(detailChartTab.value === 'intraday' ? -90 : -110);
+});
+const chartRange = computed(() => {
+  const points = visibleChartPoints.value;
+  const values = points.flatMap((point) => [
+    point.open,
+    point.high,
+    point.low,
+    point.close,
+    point.ma5,
+    point.ma10,
+    point.ma20,
+    point.limitUpPrice
+  ]).filter((value): value is number => Number.isFinite(value));
+  if (!values.length) return { min: 0, max: 1 };
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const padding = Math.max((max - min) * 0.08, Math.abs(max) * 0.004, 0.01);
+  return { min: min - padding, max: max + padding };
+});
+const chartLinePath = computed(() => makeChartLinePath(visibleChartPoints.value));
+const chartAreaPath = computed(() => makeChartAreaPath(visibleChartPoints.value));
+const chartMa5Path = computed(() => makeChartValuePath(visibleChartPoints.value, 'ma5'));
+const chartMa10Path = computed(() => makeChartValuePath(visibleChartPoints.value, 'ma10'));
+const chartMa20Path = computed(() => makeChartValuePath(visibleChartPoints.value, 'ma20'));
+const activeChartPoint = computed(() => {
+  const points = visibleChartPoints.value;
+  const index = chartPointerIndex.value;
+  if (index === null || !points[index]) return null;
+  return { point: points[index], index };
+});
+const activeChartX = computed(() => {
+  const active = activeChartPoint.value;
+  if (!active) return 40;
+  return chartX(active.index, Math.max(1, visibleChartPoints.value.length - 1));
+});
+const activeChartY = computed(() => {
+  const active = activeChartPoint.value;
+  if (!active) return 220;
+  return detailChartTab.value === 'daily' && active.point.isLimitUp ? 28 : chartY(active.point.close);
+});
+const chartTooltipStyle = computed(() => {
+  const x = activeChartX.value;
+  return {
+    left: `${Math.min(74, Math.max(16, (x / 720) * 100))}%`,
+    transform: x > 520 ? 'translateX(-100%)' : 'translateX(0)'
+  };
+});
+const chartCandles = computed(() => {
+  const points = visibleChartPoints.value;
+  if (detailChartTab.value !== 'daily') return [];
+  const total = Math.max(1, points.length - 1);
+  const candleWidth = Math.max(3, Math.min(8, 640 / Math.max(1, points.length) * 0.55));
+  return points.map((point, index) => {
+    const open = point.open ?? point.close;
+    const close = point.close;
+    const high = point.high ?? Math.max(open, close);
+    const low = point.low ?? Math.min(open, close);
+    const x = chartX(index, total);
+    const yOpen = chartY(open);
+    const yClose = chartY(close);
+    return {
+      x,
+      width: candleWidth,
+      yHigh: chartY(high),
+      yLow: chartY(low),
+      yBody: Math.min(yOpen, yClose),
+      bodyHeight: Math.max(2, Math.abs(yClose - yOpen)),
+      rising: close >= open
+    };
+  });
+});
 const marketOptions = computed(() => config.value?.markets ?? []);
 const filteredPicks = computed(() => picks.value.filter((pick) => {
   const marketMatches = resultMarketFilter.value === 'all' || pick.market === resultMarketFilter.value;
   const verdictMatches = resultVerdictFilter.value === 'all'
-    || (resultVerdictFilter.value === 't' ? pick.tPlan?.suitability === 'candidate' : pick.verdict === resultVerdictFilter.value);
+    || (resultVerdictFilter.value === 't' ? pick.tPlan?.suitability === 'candidate' : finalVerdictBucket(pick) === resultVerdictFilter.value);
   return marketMatches && verdictMatches;
-}));
+}).map((pick, index) => ({ pick, index }))
+  .sort((left, right) => compareSortedPicks(left, right))
+  .map((item) => item.pick));
 const flattenedSignals = computed(() => filteredPicks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
-const resultFiltersActive = computed(() => resultMarketFilter.value !== 'all' || resultVerdictFilter.value !== 'all');
+const resultFiltersActive = computed(() => resultMarketFilter.value !== 'all' || resultVerdictFilter.value !== 'all' || resultSortKey.value !== 'recommended' || resultSortDirection.value !== 'desc');
 const isDemoDataMode = computed(() => dataMode.value === 'demo');
 const dataModeLabel = computed(() => (isDemoDataMode.value ? t.value.demoPreview : t.value.liveBackend));
 const dataModeDescription = computed(() => (isDemoDataMode.value ? t.value.demoPreviewDetail : t.value.liveBackendDetail));
@@ -273,6 +676,14 @@ function isMarket(value: unknown): value is Market {
   return defaultMarkets.includes(value as Market);
 }
 
+function isResultSortKey(value: unknown): value is ResultSortKey {
+  return resultSortOptions.includes(value as ResultSortKey);
+}
+
+function isSortDirection(value: unknown): value is SortDirection {
+  return value === 'asc' || value === 'desc';
+}
+
 function normalizeWeight(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.min(40, Math.max(0, value)) : null;
 }
@@ -284,7 +695,10 @@ function persistSettings() {
     selectedStrategyId: selectedStrategyId.value,
     useCustom: useCustom.value,
     customWeights: { ...customWeights },
-    symbolText: symbolText.value
+    symbolText: symbolText.value,
+    manualHoldingText: manualHoldingText.value,
+    resultSortKey: resultSortKey.value,
+    resultSortDirection: resultSortDirection.value
   };
   try {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
@@ -325,6 +739,15 @@ function restoreSettings() {
     }
     if (typeof settings.symbolText === 'string') {
       symbolText.value = settings.symbolText;
+    }
+    if (typeof settings.manualHoldingText === 'string') {
+      manualHoldingText.value = settings.manualHoldingText;
+    }
+    if (isResultSortKey(settings.resultSortKey)) {
+      resultSortKey.value = settings.resultSortKey;
+    }
+    if (isSortDirection(settings.resultSortDirection)) {
+      resultSortDirection.value = settings.resultSortDirection;
     }
   } catch {
     try {
@@ -368,7 +791,7 @@ function persistSavedScans() {
 function normalizeStrategySelection() {
   if (!strategies.value.length) return;
   if (!strategies.value.some((strategy) => strategy.id === selectedStrategyId.value)) {
-    selectedStrategyId.value = strategies.value[0].id;
+    selectedStrategyId.value = strategies.value.find((strategy) => strategy.id === 'ai_smart_blend')?.id ?? strategies.value[0].id;
   }
 }
 
@@ -389,12 +812,195 @@ function strategyDescription(strategy?: Strategy) {
   return strategyText[locale.value][strategy.id]?.description ?? strategy.description;
 }
 
+function detailedWeightLabel(key: string) {
+  return detailedWeightText[locale.value][key] ?? strategyLibrary.value?.detailedWeightLabels?.[key] ?? key;
+}
+
+function applyStrategyLibrary(library: StrategyLibrary) {
+  if (!config.value) return;
+  const runtimeStrategies = library.runtimeStrategies?.length ? library.runtimeStrategies : library.strategies;
+  config.value = {
+    ...config.value,
+    strategies: runtimeStrategies,
+    strategyLibrary: library
+  };
+  normalizeStrategySelection();
+}
+
+async function refreshOnlineStrategies() {
+  if (refreshingStrategies.value) return;
+  refreshingStrategies.value = true;
+  strategyRefreshError.value = '';
+  try {
+    const library = await refreshStrategyLibrary();
+    applyStrategyLibrary(library);
+  } catch (cause) {
+    strategyRefreshError.value = cause instanceof Error ? cause.message : 'Strategy refresh failed';
+  } finally {
+    refreshingStrategies.value = false;
+    refreshDataMode();
+  }
+}
+
+function chartX(index: number, total: number) {
+  return 40 + (index / Math.max(1, total)) * 640;
+}
+
+function chartY(value: number | null | undefined) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return 220;
+  const range = chartRange.value;
+  return 220 - ((numberValue - range.min) / Math.max(0.01, range.max - range.min)) * 180;
+}
+
+function makeChartLinePath(points: StockChartPoint[]) {
+  if (!points.length) return '';
+  const total = Math.max(1, points.length - 1);
+  return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${chartX(index, total).toFixed(2)} ${chartY(point.close).toFixed(2)}`).join(' ');
+}
+
+function makeChartValuePath(points: StockChartPoint[], key: 'ma5' | 'ma10' | 'ma20') {
+  const total = Math.max(1, points.length - 1);
+  let path = '';
+  points.forEach((point, index) => {
+    const value = point[key];
+    if (!Number.isFinite(value)) return;
+    path += `${path ? ' L' : 'M'} ${chartX(index, total).toFixed(2)} ${chartY(value).toFixed(2)}`;
+  });
+  return path;
+}
+
+function makeChartAreaPath(points: StockChartPoint[]) {
+  const line = makeChartLinePath(points);
+  if (!line || !points.length) return '';
+  const total = Math.max(1, points.length - 1);
+  return `${line} L ${chartX(points.length - 1, total).toFixed(2)} 220 L ${chartX(0, total).toFixed(2)} 220 Z`;
+}
+
+function chartTickLabel(point: StockChartPoint | undefined) {
+  if (!point?.time) return '';
+  const date = new Date(point.time);
+  if (Number.isNaN(date.getTime())) return '';
+  return detailChartTab.value === 'intraday'
+    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function chartChangeLabel(points: StockChartPoint[]) {
+  if (points.length < 2) return '-';
+  const first = points[0].close;
+  const last = points[points.length - 1].close;
+  if (!first) return '-';
+  const change = ((last - first) / first) * 100;
+  return `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+}
+
+function chartNumberLabel(value: number | null | undefined, digits = 2) {
+  return Number.isFinite(value) ? Number(value).toFixed(digits) : '-';
+}
+
+function chartVolumeLabel(value: number | null | undefined) {
+  if (!Number.isFinite(value)) return '-';
+  const numberValue = Number(value);
+  if (numberValue >= 1_000_000_000) return `${(numberValue / 1_000_000_000).toFixed(2)}B`;
+  if (numberValue >= 1_000_000) return `${(numberValue / 1_000_000).toFixed(2)}M`;
+  if (numberValue >= 1_000) return `${(numberValue / 1_000).toFixed(1)}K`;
+  return numberValue.toFixed(0);
+}
+
+function chartTooltipRows(point: StockChartPoint) {
+  const rows = [
+    ['Open', chartNumberLabel(point.open)],
+    ['High', chartNumberLabel(point.high)],
+    ['Low', chartNumberLabel(point.low)],
+    ['Close', chartNumberLabel(point.close)],
+    ['Volume', chartVolumeLabel(point.volume)]
+  ];
+  if (Number.isFinite(point.ma5)) rows.push(['MA5', chartNumberLabel(point.ma5)]);
+  if (Number.isFinite(point.ma10)) rows.push(['MA10', chartNumberLabel(point.ma10)]);
+  if (Number.isFinite(point.ma20)) rows.push(['MA20', chartNumberLabel(point.ma20)]);
+  if (Number.isFinite(point.limitUpPrice)) rows.push([strategyUi.value.limitUp, chartNumberLabel(point.limitUpPrice)]);
+  return rows;
+}
+
+function chartPointTimeLabel(point: StockChartPoint) {
+  if (!point.time) return '';
+  const date = new Date(point.time);
+  if (Number.isNaN(date.getTime())) return point.time;
+  return detailChartTab.value === 'intraday'
+    ? date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function updateChartPointer(event: MouseEvent | TouchEvent) {
+  const svg = chartSvgRef.value;
+  const points = visibleChartPoints.value;
+  if (!svg || !points.length) return;
+  const rect = svg.getBoundingClientRect();
+  const clientX = 'touches' in event ? event.touches[0]?.clientX : event.clientX;
+  if (clientX === undefined) return;
+  const x = ((clientX - rect.left) / Math.max(1, rect.width)) * 720;
+  const clamped = Math.min(680, Math.max(40, x));
+  const index = Math.round(((clamped - 40) / 640) * Math.max(1, points.length - 1));
+  chartPointerIndex.value = Math.min(points.length - 1, Math.max(0, index));
+}
+
+function clearChartPointer() {
+  chartPointerIndex.value = null;
+}
+
+async function openStockDetail(pick: Pick, tab: ChartTab = 'intraday') {
+  detailPick.value = pick;
+  detailChartTab.value = tab;
+  detailChart.value = null;
+  detailChartError.value = '';
+  chartPointerIndex.value = null;
+  detailChartLoading.value = true;
+  try {
+    detailChart.value = await fetchStockChart(pick.symbol);
+  } catch (cause) {
+    detailChartError.value = cause instanceof Error ? cause.message : strategyUi.value.chartUnavailable;
+  } finally {
+    detailChartLoading.value = false;
+    refreshDataMode();
+  }
+}
+
+function closeStockDetail() {
+  detailPick.value = null;
+  detailChart.value = null;
+  detailChartError.value = '';
+}
+
 function marketLabel(market: Market) {
   return marketLabels[locale.value][market] ?? market;
 }
 
 function verdictLabel(verdict: Pick['verdict']) {
   return t.value[verdict];
+}
+
+function overallSuitabilityLabel(suitability: OverallSuitability) {
+  if (suitability === 'strongBuy' || suitability === 'buy') return t.value.buy;
+  if (suitability === 'watch') return t.value.watch;
+  if (suitability === 'sell') return t.value.sell;
+  if (locale.value === 'en') return 'Avoid new buy';
+  if (locale.value === 'zh-CN') return '暂不买入';
+  if (locale.value === 'ja') return '新規買い見送り';
+  if (locale.value === 'ko') return '신규 매수 보류';
+  return '暫不買入';
+}
+
+function finalVerdictLabel(pick: Pick) {
+  return pick.overallAssessment ? overallSuitabilityLabel(pick.overallAssessment.suitability) : verdictLabel(pick.verdict);
+}
+
+function finalVerdictBucket(pick: Pick): Pick['verdict'] {
+  const suitability = pick.overallAssessment?.suitability;
+  if (suitability === 'strongBuy' || suitability === 'buy') return 'buy';
+  if (suitability === 'sell') return 'sell';
+  if (suitability === 'avoid' || suitability === 'watch') return 'watch';
+  return pick.verdict;
 }
 
 function allMarketsFilterLabel() {
@@ -424,6 +1030,81 @@ function resultVerdictFilterLabel(option: ResultVerdictFilter) {
   return '全部判斷';
 }
 
+function resultSortLabel(option: ResultSortKey) {
+  const labels: Record<ResultSortKey, Partial<Record<Locale, string>> & { en: string }> = {
+    recommended: { en: 'AI recommended', 'zh-CN': 'AI 推荐顺序', 'zh-TW': 'AI 推薦順序', 'nan-TW': 'AI 推薦順序', ja: 'AI 推奨順', ko: 'AI 추천순' },
+    overall: { en: 'Final total', 'zh-CN': '最终总评', 'zh-TW': '最終總評', 'nan-TW': '最終總評', ja: '最終評価', ko: '최종 종합' },
+    score: { en: 'Base score', 'zh-CN': '原始评分', 'zh-TW': '原始評分', 'nan-TW': '原始評分', ja: '基本スコア', ko: '기본 점수' },
+    todayBuy: { en: 'Worth buying today', 'zh-CN': '今日买入', 'zh-TW': '今日買入', 'nan-TW': '今仔日買', ja: '本日買い', ko: '오늘 매수' },
+    futureRise: { en: 'Future rise', 'zh-CN': '未来上涨', 'zh-TW': '未來上漲', 'nan-TW': '後勢上漲', ja: '将来上昇', ko: '향후 상승' },
+    profitableExit: { en: 'Profitable exit', 'zh-CN': '盈利卖出', 'zh-TW': '盈利賣出', 'nan-TW': '趁錢賣出', ja: '利益確定', ko: '수익 매도' },
+    newsHeat: { en: 'News heat', 'zh-CN': '新闻热度', 'zh-TW': '新聞熱度', 'nan-TW': '新聞熱度', ja: 'ニュース熱量', ko: '뉴스 열기' },
+    continuation: { en: 'Next-session continuation', 'zh-CN': '次日延续', 'zh-TW': '隔日延續', 'nan-TW': '隔日延續', ja: '翌日継続', ko: '다음 세션 지속' },
+    riskLow: { en: 'Lowest risk', 'zh-CN': '风险最低', 'zh-TW': '風險最低', 'nan-TW': '風險上低', ja: '低リスク', ko: '낮은 리스크' },
+    tScore: { en: 'T suitability', 'zh-CN': '做T适配', 'zh-TW': '做T適配', 'nan-TW': '做T適配', ja: 'T適性', ko: 'T 적합도' },
+    change: { en: 'Price change', 'zh-CN': '涨跌幅', 'zh-TW': '漲跌幅', 'nan-TW': '起落幅', ja: '騰落率', ko: '등락률' },
+    confidence: { en: 'Confidence', 'zh-CN': '信心', 'zh-TW': '信心', 'nan-TW': '信心', ja: '信頼度', ko: '신뢰도' }
+  };
+  return labels[option][locale.value] ?? labels[option].en;
+}
+
+function sortDirectionLabel() {
+  if (resultSortDirection.value === 'desc') {
+    if (locale.value === 'en') return 'High first';
+    if (locale.value === 'zh-CN') return '高到低';
+    if (locale.value === 'ja') return '高い順';
+    if (locale.value === 'ko') return '높은 순';
+    return '高到低';
+  }
+  if (locale.value === 'en') return 'Low first';
+  if (locale.value === 'zh-CN') return '低到高';
+  if (locale.value === 'ja') return '低い順';
+  if (locale.value === 'ko') return '낮은 순';
+  return '低到高';
+}
+
+function sortFieldLabel() {
+  if (locale.value === 'en') return 'Sort by';
+  if (locale.value === 'zh-CN') return '排序';
+  if (locale.value === 'ja') return '並び順';
+  if (locale.value === 'ko') return '정렬';
+  if (locale.value === 'nan-TW') return '排序';
+  return '排序';
+}
+
+function pickSortValue(pick: Pick, option: ResultSortKey) {
+  if (option === 'recommended') return null;
+  if (option === 'overall') return pick.overallAssessment?.totalScore;
+  if (option === 'score') return pick.score;
+  if (option === 'todayBuy') return pick.overallAssessment?.components.todayBuyScore ?? pick.prediction?.todayBuyScore;
+  if (option === 'futureRise') return pick.overallAssessment?.components.futureRiseScore ?? pick.prediction?.futureRiseScore ?? pick.opportunityScore;
+  if (option === 'profitableExit') return pick.overallAssessment?.components.profitableExitScore ?? pick.prediction?.profitableExitScore;
+  if (option === 'newsHeat') return pick.newsHeatAnalysis?.impactScore ?? pick.prediction?.newsHeatImpactScore;
+  if (option === 'continuation') return pick.nextSessionContinuationScore ?? pick.trendAnalysis?.continuationScore;
+  if (option === 'riskLow') {
+    const risk = pick.downsideRiskScore ?? pick.nextSessionReversalRiskScore ?? pick.trendAnalysis?.reversalRiskScore;
+    return risk === undefined ? undefined : 100 - risk;
+  }
+  if (option === 'tScore') return pick.tScore;
+  if (option === 'change') return pick.change;
+  if (option === 'confidence') return pick.confidence;
+  return null;
+}
+
+function compareSortedPicks(left: { pick: Pick; index: number }, right: { pick: Pick; index: number }) {
+  if (resultSortKey.value === 'recommended') return left.index - right.index;
+  const leftValue = pickSortValue(left.pick, resultSortKey.value);
+  const rightValue = pickSortValue(right.pick, resultSortKey.value);
+  const leftMissing = !Number.isFinite(leftValue);
+  const rightMissing = !Number.isFinite(rightValue);
+  if (leftMissing && rightMissing) return left.index - right.index;
+  if (leftMissing) return 1;
+  if (rightMissing) return -1;
+  const direction = resultSortDirection.value === 'asc' ? 1 : -1;
+  const delta = (Number(leftValue) - Number(rightValue)) * direction;
+  return delta || left.index - right.index;
+}
+
 function resultCountLabel() {
   if (locale.value === 'en') return `${filteredPicks.value.length}/${picks.value.length} shown`;
   if (locale.value === 'zh-CN') return `显示 ${filteredPicks.value.length}/${picks.value.length}`;
@@ -449,6 +1130,11 @@ type PortfolioLocaleText = {
   scanLabel: (count: number) => string;
   importTitle: string;
   importHint: string;
+  manualTitle: string;
+  manualHint: string;
+  manualPlaceholder: string;
+  manualApply: string;
+  manualFailed: string;
   importing: string;
   chooseFile: string;
   clear: string;
@@ -466,6 +1152,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
     scanLabel: (count) => `${count} holdings`,
     importTitle: 'Import broker holdings',
     importHint: 'Supports Dongwu Securities A-share .xls text exports; current non-zero holdings are analyzed automatically.',
+    manualTitle: 'Paste holdings manually',
+    manualHint: 'One row per stock. Use headers or default order: symbol, name, quantity, available, cost, latest price.',
+    manualPlaceholder: 'symbol,name,quantity,available,cost,latest\n300750.SZ,CATL,100,80,200\n600519.SS,Kweichow Moutai,50,50,1200,1258',
+    manualApply: 'Analyze pasted holdings',
+    manualFailed: 'No valid holdings were found. Include at least symbol, quantity, and cost price.',
     importing: 'Importing...',
     chooseFile: 'Choose holdings file',
     clear: 'Clear',
@@ -506,6 +1197,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
     scanLabel: (count) => `持仓 ${count} 只`,
     importTitle: '导入券商持仓',
     importHint: '兼容东吴证券 A 股 .xls 文本导出；只识别当前实际数量大于 0 的持仓，并自动做策略分析。',
+    manualTitle: '批量粘贴持仓',
+    manualHint: '每行一只股票。可带表头；无表头时默认：代码、名称、实际数量、可用数量、成本价、最新价。',
+    manualPlaceholder: '代码,名称,实际数量,可用数量,成本价,最新价\n300750,宁德时代,100,80,200\n600519,贵州茅台,50,50,1200,1258',
+    manualApply: '分析粘贴持仓',
+    manualFailed: '没有识别到有效持仓。至少需要股票代码、实际数量和成本价。',
     importing: '正在导入...',
     chooseFile: '选择持仓文件',
     clear: '清除',
@@ -546,6 +1242,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
     scanLabel: (count) => `持倉 ${count} 檔`,
     importTitle: '匯入券商持倉',
     importHint: '兼容東吳證券 A 股 .xls 文字匯出；只識別目前實際數量大於 0 的持倉，並自動做策略分析。',
+    manualTitle: '批量貼上持倉',
+    manualHint: '每列一檔股票。可帶表頭；無表頭時預設：代碼、名稱、實際數量、可用數量、成本價、最新價。',
+    manualPlaceholder: '代碼,名稱,實際數量,可用數量,成本價,最新價\n300750,寧德時代,100,80,200\n600519,貴州茅台,50,50,1200,1258',
+    manualApply: '分析貼上持倉',
+    manualFailed: '沒有識別到有效持倉。至少需要股票代碼、實際數量和成本價。',
     importing: '正在匯入...',
     chooseFile: '選擇持倉檔',
     clear: '清除',
@@ -586,6 +1287,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
     scanLabel: (count) => `持倉 ${count} 檔`,
     importTitle: '匯入券商持倉',
     importHint: '支援東吳證券 A 股 .xls 匯出；只分析實際數量大過 0 的持倉。',
+    manualTitle: '批量貼持倉',
+    manualHint: '一列一檔。會使有表頭；無表頭照：代碼、名稱、實際數量、可用數量、成本價、最新價。',
+    manualPlaceholder: '代碼,名稱,實際數量,可用數量,成本價,最新價\n300750,寧德時代,100,80,200\n600519,貴州茅台,50,50,1200,1258',
+    manualApply: '分析貼上的持倉',
+    manualFailed: '無認出有效持倉。至少愛有股票代碼、實際數量佮成本價。',
     importing: '咧匯入...',
     chooseFile: '選持倉檔',
     clear: '清掉',
@@ -626,6 +1332,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
     scanLabel: (count) => `保有 ${count} 件`,
     importTitle: '証券会社の保有を取り込む',
     importHint: '東呉証券の A 株 .xls テキスト出力に対応し、現在数量がある保有だけを自動分析します。',
+    manualTitle: '保有を一括貼り付け',
+    manualHint: '1 行 1 銘柄。ヘッダー付き可。ヘッダーなしは: symbol, name, quantity, available, cost, latest.',
+    manualPlaceholder: 'symbol,name,quantity,available,cost,latest\n300750.SZ,CATL,100,80,200\n600519.SS,Kweichow Moutai,50,50,1200,1258',
+    manualApply: '貼り付け保有を分析',
+    manualFailed: '有効な保有が見つかりません。少なくともコード、数量、取得単価を入力してください。',
     importing: '取り込み中...',
     chooseFile: '保有ファイルを選択',
     clear: '解除',
@@ -666,6 +1377,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
     scanLabel: (count) => `보유 ${count}개`,
     importTitle: '증권사 보유 종목 가져오기',
     importHint: '동오증권 A주 .xls 텍스트 내보내기를 지원하며 현재 수량이 있는 보유 종목만 자동 분석합니다.',
+    manualTitle: '보유 종목 일괄 붙여넣기',
+    manualHint: '한 줄에 한 종목. 헤더 사용 가능. 헤더가 없으면 symbol, name, quantity, available, cost, latest 순서입니다.',
+    manualPlaceholder: 'symbol,name,quantity,available,cost,latest\n300750.SZ,CATL,100,80,200\n600519.SS,Kweichow Moutai,50,50,1200,1258',
+    manualApply: '붙여넣은 보유 분석',
+    manualFailed: '유효한 보유 종목을 찾지 못했습니다. 최소 코드, 수량, 평균 단가를 입력하세요.',
     importing: '가져오는 중...',
     chooseFile: '보유 파일 선택',
     clear: '지우기',
@@ -720,6 +1436,22 @@ function portfolioImportHint() {
   return portfolioText().importHint;
 }
 
+function portfolioManualTitle() {
+  return portfolioText().manualTitle;
+}
+
+function portfolioManualHint() {
+  return portfolioText().manualHint;
+}
+
+function portfolioManualPlaceholder() {
+  return portfolioText().manualPlaceholder;
+}
+
+function portfolioManualApplyLabel() {
+  return portfolioText().manualApply;
+}
+
 function portfolioImportButtonLabel() {
   return importingPortfolio.value ? portfolioText().importing : portfolioText().chooseFile;
 }
@@ -770,6 +1502,173 @@ function portfolioImportErrorLabel(cause: unknown) {
   if (!message || message === 'Failed to import holdings file') return copy.importFailed;
   if (message.includes('live Python backend') || message.includes('Static preview')) return copy.liveBackendRequired;
   return locale.value === 'en' ? message : copy.importFailed;
+}
+
+type ManualHoldingField = 'symbol' | 'name' | 'quantity' | 'availableQuantity' | 'costPrice' | 'lastPrice' | 'marketValue';
+const manualHoldingHeaderAliases: Record<ManualHoldingField, string[]> = {
+  symbol: ['symbol', 'ticker', 'code', 'stockcode', 'securitycode', '代码', '代碼', '股票代码', '股票代碼', '证券代码', '證券代碼', '종목코드', '銘柄コード'],
+  name: ['name', 'stockname', 'securityname', '名称', '名稱', '股票名称', '股票名稱', '证券名称', '證券名稱', '종목명', '銘柄名'],
+  quantity: ['quantity', 'qty', 'actualquantity', 'shares', '持仓数量', '持倉數量', '实际数量', '實際數量', '股票余额', '股票餘額', '保有数量', '보유수량'],
+  availableQuantity: ['available', 'availablequantity', '可用数量', '可用數量', '可用余额', '可用餘額', '可卖数量', '可賣數量', '매도가능수량'],
+  costPrice: ['cost', 'costprice', 'avgcost', 'averagecost', '成本价', '成本價', '持仓成本', '持倉成本', '平均单价', '平均單價', '取得単価', '평균단가'],
+  lastPrice: ['last', 'lastprice', 'latest', 'latestprice', 'price', 'marketprice', '最新价', '最新價', '现价', '現價', '市价', '市價', '現在値', '현재가'],
+  marketValue: ['marketvalue', 'value', '市值', '持仓市值', '持倉市值', '评价金额', '評価額', '평가금액'],
+};
+
+function normalizeManualHeader(value: string) {
+  return value.toLowerCase().replace(/[\s:_\-./()（）\[\]【】]+/g, '');
+}
+
+function fieldFromManualHeader(value: string): ManualHoldingField | null {
+  const normalized = normalizeManualHeader(value);
+  for (const [field, aliases] of Object.entries(manualHoldingHeaderAliases) as Array<[ManualHoldingField, string[]]>) {
+    if (aliases.some((alias) => normalizeManualHeader(alias) === normalized)) return field;
+  }
+  return null;
+}
+
+function splitManualHoldingLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return [];
+  const delimiter = /[\t,，]/.test(trimmed) ? /[\t,，]+/ : /\s+/;
+  return trimmed.split(delimiter).map((cell) => cell.trim()).filter(Boolean);
+}
+
+function manualHoldingNumber(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const normalized = value.replace(/[,%￥¥$]/g, '').trim();
+  if (!normalized || normalized === '-' || normalized === '--') return null;
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeManualHoldingSymbol(value: string) {
+  const raw = value.trim().toUpperCase().replace(/^[("'`]+|[)"'`]+$/g, '');
+  if (/^SH\d{6}$/.test(raw)) return `${raw.slice(2)}.SS`;
+  if (/^SZ\d{6}$/.test(raw)) return `${raw.slice(2)}.SZ`;
+  if (/^\d{6}$/.test(raw)) return `${raw}.${raw.startsWith('6') || raw.startsWith('9') ? 'SS' : 'SZ'}`;
+  if (/^\d{4,5}$/.test(raw)) return `${raw.padStart(5, '0')}.HK`;
+  return raw;
+}
+
+function marketFromManualSymbol(symbol: string): Market {
+  const upper = symbol.toUpperCase();
+  if (upper.endsWith('.SS') || upper.endsWith('.SZ')) return 'CN';
+  if (upper.endsWith('.HK')) return 'HK';
+  if (upper.endsWith('.T')) return 'JP';
+  if (upper.endsWith('.KS') || upper.endsWith('.KQ')) return 'KR';
+  if (upper.endsWith('.SI')) return 'SG';
+  if (upper.endsWith('.TW')) return 'TW';
+  return 'US';
+}
+
+function manualPositionFromCells(cells: string[], headerMap: Partial<Record<ManualHoldingField, number>> | null): HoldingPosition | null {
+  const get = (field: ManualHoldingField) => {
+    const index = headerMap?.[field];
+    return index === undefined ? undefined : cells[index];
+  };
+  const hasExplicitHeader = Boolean(headerMap);
+  const secondIsNumber = manualHoldingNumber(cells[1]) !== null;
+  const symbolTextValue = hasExplicitHeader ? get('symbol') : cells[0];
+  if (!symbolTextValue) return null;
+
+  const symbol = normalizeManualHoldingSymbol(symbolTextValue);
+  const name = (hasExplicitHeader ? get('name') : (secondIsNumber ? '' : cells[1])) || symbol;
+  const quantity = manualHoldingNumber(hasExplicitHeader ? get('quantity') : cells[secondIsNumber ? 1 : 2]);
+  const availableQuantity = manualHoldingNumber(hasExplicitHeader ? get('availableQuantity') : cells[secondIsNumber ? 2 : 3]);
+  const costPrice = manualHoldingNumber(hasExplicitHeader ? get('costPrice') : cells[secondIsNumber ? 3 : 4]);
+  const lastPrice = manualHoldingNumber(hasExplicitHeader ? get('lastPrice') : cells[secondIsNumber ? 4 : 5]);
+  const explicitMarketValue = manualHoldingNumber(hasExplicitHeader ? get('marketValue') : cells[secondIsNumber ? 5 : 6]);
+  if (!symbol || quantity === null || quantity <= 0 || costPrice === null) return null;
+
+  const costAmount = quantity * costPrice;
+  const marketValue = explicitMarketValue ?? (lastPrice !== null ? quantity * lastPrice : null);
+  const unrealizedPnl = marketValue !== null ? marketValue - costAmount : null;
+  return {
+    symbol,
+    code: symbol.split('.')[0],
+    name,
+    market: marketFromManualSymbol(symbol),
+    quantity,
+    availableQuantity: availableQuantity ?? quantity,
+    frozenQuantity: Math.max(0, quantity - (availableQuantity ?? quantity)),
+    costPrice,
+    lastPrice,
+    marketValue,
+    costAmount,
+    unrealizedPnl,
+    unrealizedPnlPct: unrealizedPnl !== null && costAmount ? unrealizedPnl / costAmount * 100 : null,
+  };
+}
+
+function manualPortfolioFromText(text: string): PortfolioImportResponse {
+  const rawLines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let headerMap: Partial<Record<ManualHoldingField, number>> | null = null;
+  const positions: HoldingPosition[] = [];
+  let ignoredRows = 0;
+
+  rawLines.forEach((line, lineIndex) => {
+    const cells = splitManualHoldingLine(line);
+    if (!cells.length) return;
+    const candidateHeaderMap: Partial<Record<ManualHoldingField, number>> = {};
+    cells.forEach((cell, index) => {
+      const field = fieldFromManualHeader(cell);
+      if (field && candidateHeaderMap[field] === undefined) candidateHeaderMap[field] = index;
+    });
+    if (lineIndex === 0 && candidateHeaderMap.symbol !== undefined && candidateHeaderMap.quantity !== undefined) {
+      headerMap = candidateHeaderMap;
+      return;
+    }
+    const position = manualPositionFromCells(cells, headerMap);
+    if (position) {
+      positions.push(position);
+    } else {
+      ignoredRows += 1;
+    }
+  });
+
+  const uniquePositions = Array.from(new Map(positions.map((position) => [position.symbol, position])).values());
+  if (!uniquePositions.length) {
+    throw new Error(portfolioText().manualFailed);
+  }
+  const symbols = uniquePositions.map((position) => position.symbol);
+  const totalMarketValue = uniquePositions.reduce((sum, position) => sum + (Number(position.marketValue) || 0), 0);
+  const totalCostAmount = uniquePositions.reduce((sum, position) => sum + (Number(position.costAmount) || 0), 0);
+  const totalUnrealizedPnl = uniquePositions.reduce((sum, position) => sum + (Number(position.unrealizedPnl) || 0), 0);
+  return {
+    sourceName: portfolioText().manualTitle,
+    sourceType: 'manual-holdings',
+    importedAt: new Date().toISOString(),
+    positions: uniquePositions,
+    symbols,
+    recognizedCount: uniquePositions.length,
+    ignoredRows,
+    totalMarketValue: Number(totalMarketValue.toFixed(4)),
+    totalCostAmount: Number(totalCostAmount.toFixed(4)),
+    totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
+    totalUnrealizedPnlPct: totalCostAmount ? Number((totalUnrealizedPnl / totalCostAmount * 100).toFixed(4)) : null,
+    warnings: [],
+  };
+}
+
+async function applyManualHoldings() {
+  if (loading.value || importingPortfolio.value) return;
+  portfolioImportError.value = '';
+  analysisPortfolio.value = null;
+  try {
+    const imported = manualPortfolioFromText(manualHoldingText.value);
+    importedPortfolio.value = imported;
+    symbolText.value = imported.symbols.join(', ');
+    const importedMarkets = [...new Set(imported.positions.map((position) => position.market).filter(isMarket))];
+    if (importedMarkets.length) selectedMarkets.value = importedMarkets;
+    resultMarketFilter.value = 'all';
+    resultVerdictFilter.value = 'all';
+    activeView.value = 'stocks';
+    await nextTick();
+    await runAnalysis();
+  } catch (cause) {
+    portfolioImportError.value = cause instanceof Error ? cause.message : portfolioText().manualFailed;
+  }
 }
 
 function triggerPortfolioImport() {
@@ -866,6 +1765,7 @@ function loadSavedScan(scan: SavedScan) {
   selectedMarkets.value = scan.markets.filter(isMarket);
   symbolText.value = scan.symbols.join(', ');
   selectedStrategyId.value = scan.strategyId || selectedStrategyId.value;
+  normalizeStrategySelection();
   useCustom.value = scan.useCustom;
   weightKeys.forEach((key) => {
     customWeights[key] = normalizeWeight(scan.customWeights?.[key]) ?? customWeights[key];
@@ -938,11 +1838,13 @@ function currentScanMarkdown() {
     lines.push(`## ${index + 1}. ${pick.symbol} · ${pick.name}`);
     lines.push('');
     lines.push(`- Market: ${marketLabel(pick.market)}`);
-    lines.push(`- Verdict: ${verdictLabel(pick.verdict)}`);
+    lines.push(`- Verdict: ${finalVerdictLabel(pick)}`);
     lines.push(`- Score: ${pick.score}/100`);
     lines.push(`- Confidence: ${pick.confidence}%`);
     lines.push(`- Price: ${pick.currency} ${pick.price} (${pick.change > 0 ? '+' : ''}${pick.change}%)`);
+    if (pick.overallAssessment) lines.push(`- ${t.value.finalReview}: ${markdownLine(pointLabel(pick.overallAssessment.summary))}`);
     if (pick.decision) lines.push(`- Decision: ${markdownLine(pointLabel(pick.decision.summary))}`);
+    if (pick.newsHeatAnalysis) lines.push(`- ${t.value.newsHeat}: ${markdownLine(pointLabel(pick.newsHeatAnalysis.summary))}`);
     if (pick.actionPlan) lines.push(`- Action: ${markdownLine(pointLabel(pick.actionPlan.summary))}`);
     if (pick.tPlan) {
       lines.push(`- T plan: ${markdownLine(pointLabel(pick.tPlan.summary))}`);
@@ -1019,16 +1921,178 @@ function scoreWeightLabel(item: { weight: number; baseWeight?: number; available
   return base !== effective ? `${base}% -> ${effective}%` : `${effective}%`;
 }
 
-function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pullback' | 't', pick: Pick) {
+function uniquePointLabels(points: Array<DecisionPoint | undefined>, limit = 5) {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  points.forEach((point) => {
+    if (!point) return;
+    const label = pointLabel(point);
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    labels.push(label);
+  });
+  return labels.slice(0, limit);
+}
+
+function reportSupportItems(pick: Pick) {
+  return uniquePointLabels([
+    ...(pick.overallAssessment?.positives ?? []),
+    ...(pick.decision?.positives ?? []),
+    ...(pick.trendAnalysis?.positives ?? []),
+    ...(pick.newsHeatAnalysis?.positives ?? []),
+    ...(pick.financialAnalysis?.positives ?? []),
+    ...(pick.tPlan?.reasons ?? [])
+  ]);
+}
+
+function reportRiskItems(pick: Pick) {
+  return uniquePointLabels([
+    ...(pick.overallAssessment?.negatives ?? []),
+    ...(pick.decision?.negatives ?? []),
+    ...(pick.trendAnalysis?.negatives ?? []),
+    ...(pick.newsHeatAnalysis?.negatives ?? []),
+    ...(pick.financialAnalysis?.negatives ?? []),
+    ...(pick.tPlan?.riskControls ?? []),
+    ...(pick.actionPlan?.riskControls ?? [])
+  ]);
+}
+
+function reportWatchItems(pick: Pick) {
+  return uniquePointLabels([
+    ...(pick.overallAssessment?.watchItems ?? []),
+    ...(pick.decision?.watchItems ?? []),
+    ...(pick.trendAnalysis?.watchItems ?? []),
+    ...(pick.newsHeatAnalysis?.watchItems ?? []),
+    ...(pick.financialAnalysis?.watchItems ?? []),
+    ...(pick.actionPlan?.watchItems ?? [])
+  ]);
+}
+
+function reportSummaryTitle(pick: Pick) {
+  const summary = pick.overallAssessment?.summary ?? pick.decision?.summary ?? pick.actionPlan?.summary;
+  return summary ? pointLabel(summary) : finalVerdictLabel(pick);
+}
+
+function reportSummarySubtitle(pick: Pick) {
+  return uniquePointLabels([
+    pick.actionPlan?.summary,
+    pick.trendAnalysis?.summary,
+    pick.newsHeatAnalysis?.summary,
+    pick.financialAnalysis?.summary
+  ], 3).join(' · ');
+}
+
+function reportMetricItems(pick: Pick) {
+  const metrics = pick.overallAssessment?.metrics?.slice(0, 5).map((metric) => ({
+    key: metric.key,
+    label: overallMetricLabel(metric),
+    value: metric.value,
+    score: metric.score
+  })) ?? [];
+  if (metrics.length) return metrics;
+  return [
+    { key: 'score', label: t.value.score, value: `${pick.score}/100`, score: pick.score },
+    { key: 'confidence', label: t.value.confidence, value: `${pick.confidence}%`, score: pick.confidence }
+  ];
+}
+
+function primaryScoreCaption(pick: Pick) {
+  if (!pick.overallAssessment) return t.value.score;
+  if (locale.value === 'en') return 'Final';
+  if (locale.value === 'zh-CN') return '最终分';
+  if (locale.value === 'ja') return '最終点';
+  if (locale.value === 'ko') return '최종점';
+  return '最終分';
+}
+
+function fundFlowTone(flow: FundFlowProfile | null | undefined) {
+  const positive = Number(flow?.positiveScore ?? 0);
+  const negative = Number(flow?.negativeScore ?? 0);
+  if (positive >= 18 && positive >= negative) return 'support';
+  if (negative >= 18 && negative > positive) return 'pressure';
+  return 'watch';
+}
+
+function fundFlowDecisionPoint(flow: FundFlowProfile | null | undefined, currency: string): DecisionPoint {
+  const params = {
+    score: Number(flow?.score ?? 0).toFixed(1),
+    amount: signedMoneyLabel(flow?.mainNet, currency),
+    ratio: Number(flow?.mainRatio ?? 0).toFixed(1),
+    source: flow?.source || 'Eastmoney'
+  };
+  const tone = fundFlowTone(flow);
+  if (tone === 'support') return { key: 'fundFlowSupport', params };
+  if (tone === 'pressure') return { key: 'fundFlowPressure', params };
+  return { key: 'fundFlowWatch', params };
+}
+
+function fundFlowMetricValue(amount: number | null | undefined, ratio: number | null | undefined, currency: string) {
+  return `${signedMoneyLabel(amount, currency)} · ${percentLabel(ratio)}`;
+}
+
+function fundFlowUnavailableLabel(pick: Pick) {
+  if (locale.value === 'en') return `Online fund flow did not return for ${pick.symbol}; this scan does not fabricate local flow data.`;
+  if (locale.value === 'zh-CN') return `${pick.symbol} 在线资金流暂未返回；本次不会用本地或伪造资金流。`;
+  if (locale.value === 'ja') return `${pick.symbol} のオンライン資金フローは未返却です。ローカル値や推測値は使いません。`;
+  if (locale.value === 'ko') return `${pick.symbol} 온라인 자금 흐름이 반환되지 않았습니다. 로컬 또는 추정 데이터는 쓰지 않습니다.`;
+  return `${pick.symbol} 線上資金流暫未返回；本次不會用本地或偽造資金流。`;
+}
+
+function fundFlowChipLabel(pick: Pick) {
+  if (!pick.fundFlow?.available) {
+    if (locale.value === 'en') return 'Fund flow unavailable';
+    if (locale.value === 'zh-CN') return '资金流：在线未返回';
+    if (locale.value === 'ja') return '資金フロー未返却';
+    if (locale.value === 'ko') return '자금 흐름 미반환';
+    return '資金流：線上未返回';
+  }
+  return `${factorLabel('fundFlow')} ${fundFlowMetricValue(pick.fundFlow.mainNet, pick.fundFlow.mainRatio, pick.currency)}`;
+}
+
+function fundFlowRows(pick: Pick) {
+  const flow = pick.fundFlow;
+  if (!flow?.available) return [];
+  const rows = [
+    {
+      key: 'fundFlowMain',
+      label: financialMetricLabel({ key: 'fundFlowMain', value: '', score: flow.score }),
+      value: fundFlowMetricValue(flow.mainNet, flow.mainRatio, pick.currency),
+      score: Number(flow.score ?? 0).toFixed(1)
+    }
+  ];
+  if (flow.superLargeNet !== undefined || flow.superLargeRatio !== undefined) {
+    rows.push({
+      key: 'fundFlowSuperLarge',
+      label: financialMetricLabel({ key: 'fundFlowSuperLarge', value: '', score: flow.score }),
+      value: fundFlowMetricValue(flow.superLargeNet, flow.superLargeRatio, pick.currency),
+      score: Number(50 + Number(flow.superLargeRatio ?? 0) * 2.6).toFixed(1)
+    });
+  }
+  if (flow.largeNet !== undefined || flow.largeRatio !== undefined) {
+    rows.push({
+      key: 'fundFlowLarge',
+      label: financialMetricLabel({ key: 'fundFlowLarge', value: '', score: flow.score }),
+      value: fundFlowMetricValue(flow.largeNet, flow.largeRatio, pick.currency),
+      score: Number(50 + Number(flow.largeRatio ?? 0) * 2.3).toFixed(1)
+    });
+  }
+  return rows;
+}
+
+function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pullback' | 'continuation' | 'reversal' | 't', pick: Pick) {
   const value = kind === 'opportunity'
     ? pick.opportunityScore
     : kind === 'downside'
       ? pick.downsideRiskScore
       : kind === 'setup'
         ? pick.breakoutSetupScore
-        : kind === 't'
-          ? pick.tScore
-          : pick.pullbackRiskScore;
+        : kind === 'continuation'
+          ? pick.nextSessionContinuationScore ?? pick.trendAnalysis?.continuationScore
+          : kind === 'reversal'
+            ? pick.nextSessionReversalRiskScore ?? pick.trendAnalysis?.reversalRiskScore
+            : kind === 't'
+              ? pick.tScore
+              : pick.pullbackRiskScore;
   const score = value === undefined ? '-' : Number(value).toFixed(1);
   if (kind === 't') {
     if (locale.value === 'en') return `T suitability ${score}/100`;
@@ -1061,6 +2125,22 @@ function predictionScoreLabel(kind: 'opportunity' | 'downside' | 'setup' | 'pull
     if (locale.value === 'ko') return `되돌림 리스크 ${score}/100`;
     if (locale.value === 'nan-TW') return `回落風險 ${score}/100`;
     return `回落風險 ${score}/100`;
+  }
+  if (kind === 'continuation') {
+    if (locale.value === 'en') return `Next-session continuation ${score}/100`;
+    if (locale.value === 'zh-CN') return `次日延续 ${score}/100`;
+    if (locale.value === 'ja') return `翌日継続 ${score}/100`;
+    if (locale.value === 'ko') return `다음 세션 지속 ${score}/100`;
+    if (locale.value === 'nan-TW') return `隔日延續 ${score}/100`;
+    return `次日延續 ${score}/100`;
+  }
+  if (kind === 'reversal') {
+    if (locale.value === 'en') return `Next-session reversal risk ${score}/100`;
+    if (locale.value === 'zh-CN') return `次日反转风险 ${score}/100`;
+    if (locale.value === 'ja') return `翌日反転リスク ${score}/100`;
+    if (locale.value === 'ko') return `다음 세션 반전 리스크 ${score}/100`;
+    if (locale.value === 'nan-TW') return `隔日反轉風險 ${score}/100`;
+    return `次日反轉風險 ${score}/100`;
   }
   if (locale.value === 'en') return `Downside risk ${score}/100`;
   if (locale.value === 'zh-CN') return `下跌风险 ${score}/100`;
@@ -1179,6 +2259,22 @@ function reasonLabel(reason: ReasonCode) {
     if (locale.value === 'nan-TW') return `早期突破 setup ${params.score}/100，有價格佮成交量確認。`;
     return `早期突破 setup ${params.score}/100，來自價格與成交量確認。`;
   }
+  if (reason.key === 'nextSessionSupport') {
+    if (locale.value === 'en') return `Next-session continuation is ${params.continuation}/100 while reversal risk is ${params.risk}/100.`;
+    if (locale.value === 'zh-CN') return `次日延续分 ${params.continuation}/100，反转风险 ${params.risk}/100。`;
+    if (locale.value === 'ja') return `翌日継続性は ${params.continuation}/100、反転リスクは ${params.risk}/100 です。`;
+    if (locale.value === 'ko') return `다음 세션 지속성은 ${params.continuation}/100, 반전 리스크는 ${params.risk}/100입니다.`;
+    if (locale.value === 'nan-TW') return `隔日延續分 ${params.continuation}/100，反轉風險 ${params.risk}/100。`;
+    return `次日延續分 ${params.continuation}/100，反轉風險 ${params.risk}/100。`;
+  }
+  if (reason.key === 'nextSessionRisk') {
+    if (locale.value === 'en') return `Today's edge may not carry forward: continuation ${params.continuation}/100, reversal risk ${params.risk}/100.`;
+    if (locale.value === 'zh-CN') return `今天的优势可能无法延续：次日延续 ${params.continuation}/100，反转风险 ${params.risk}/100。`;
+    if (locale.value === 'ja') return `今日の優位性は続かない可能性があります。継続性 ${params.continuation}/100、反転リスク ${params.risk}/100。`;
+    if (locale.value === 'ko') return `오늘의 우위가 이어지지 않을 수 있습니다. 지속성 ${params.continuation}/100, 반전 리스크 ${params.risk}/100.`;
+    if (locale.value === 'nan-TW') return `今仔日的優勢可能袂延續：隔日延續 ${params.continuation}/100，反轉風險 ${params.risk}/100。`;
+    return `今天的優勢可能無法延續：次日延續 ${params.continuation}/100，反轉風險 ${params.risk}/100。`;
+  }
   if (reason.key === 'clearsBuyThreshold') {
     if (locale.value === 'en') return 'Composite score clears the buy threshold under the selected strategy.';
     if (locale.value === 'zh-CN') return '综合评分已通过当前策略的买入门槛。';
@@ -1220,6 +2316,17 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
   const change = Number(p.change ?? 0).toFixed(1);
   const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
   const range = Number(p.range ?? 0).toFixed(1);
+  const amount = String(p.amount ?? 'N/A');
+  const ratio = Number(p.ratio ?? 0).toFixed(1);
+  const continuation = Number(p.continuation ?? 0).toFixed(1);
+  const risk = Number(p.risk ?? 0).toFixed(1);
+  const distance = Number(p.distance ?? 0).toFixed(1);
+  const rsi = Number(p.rsi ?? 0).toFixed(1);
+  const heat = Number(p.heat ?? 0).toFixed(1);
+  const impact = Number(p.impact ?? 0).toFixed(1);
+  const today = Number(p.today ?? 0).toFixed(1);
+  const future = Number(p.future ?? 0).toFixed(1);
+  const exit = Number(p.exit ?? 0).toFixed(1);
   switch (point.key) {
     case 'buySummary':
       return `會使買入：總分 ${p.score}/100，這个方案相對有力。`;
@@ -1269,6 +2376,100 @@ function nanDecisionPointLabel(point: DecisionPoint, score: string, count: numbe
       return `基本面品質偏弱，只有 ${score}/100。`;
     case 'watchNewsFlow':
       return `新聞正面 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}；繼續看後續新聞轉正抑是轉負。`;
+    case 'fundFlowSupport':
+      return `當日主力資金淨流入 ${amount}，佔比 ${ratio}%，資金面有支撐。`;
+    case 'fundFlowPressure':
+      return `當日主力資金淨流出 ${amount}，佔比 ${ratio}%，資金面偏壓抑。`;
+    case 'fundFlowWatch':
+      return `當日主力資金 ${amount}，佔比 ${ratio}%，資金面方向猶未明確。`;
+    case 'newsHeatHotPositiveSummary':
+      return `新聞熱度 ${heat}/100、影響 ${impact}/100，市場關注偏正面。`;
+    case 'newsHeatHotNegativeSummary':
+      return `新聞熱度 ${heat}/100、影響 ${impact}/100，市場關注偏負面。`;
+    case 'newsHeatHotMixedSummary':
+      return `新聞熱度 ${heat}/100，但是多空方向猶混合。`;
+    case 'newsHeatColdSummary':
+      return `新聞熱度 ${heat}/100，題材關注度有限。`;
+    case 'newsHeatSupport':
+      return `新聞熱度影響 ${impact}/100，對總評有加分。`;
+    case 'newsHeatRisk':
+      return `新聞熱度影響 ${impact}/100，熱門消息反而偏風險。`;
+    case 'newsHeatWatch':
+      return `新聞熱度影響 ${impact}/100，方向猶著觀察。`;
+    case 'newsHeatFresh':
+      return `新聞時效 ${score}/100，資料夠新。`;
+    case 'newsHeatStale':
+      return `新聞時效 ${score}/100，熱度資料較舊。`;
+    case 'overallStrongBuySummary':
+      return `最後總評 ${p.score}/100：今日可買、後續上漲佮盈利賣出條件攏較完整。`;
+    case 'overallBuySummary':
+      return `最後總評 ${p.score}/100：今日有買入價值，也有後續獲利空間。`;
+    case 'overallWatchSummary':
+      return `最後總評 ${p.score}/100：條件未完整，先列重點觀察。`;
+    case 'overallAvoidSummary':
+      return `最後總評 ${p.score}/100：今日不適合新買，等條件修復。`;
+    case 'overallSellSummary':
+      return `最後總評 ${p.score}/100：風險優先，偏向減倉或退出。`;
+    case 'overallTodayBuySupport':
+      return `今日買入分 ${today}/100，當下買點有支撐。`;
+    case 'overallTodayBuyWeak':
+      return `今日買入分 ${today}/100，這馬買入條件無夠。`;
+    case 'overallTodayBuyWatch':
+      return `今日買入分 ${today}/100，愛閣等確認。`;
+    case 'overallFutureRiseSupport':
+      return `後續上漲分 ${future}/100，延續機會較好。`;
+    case 'overallFutureRiseWeak':
+      return `後續上漲分 ${future}/100，後勢無明確優勢。`;
+    case 'overallFutureRiseWatch':
+      return `後續上漲分 ${future}/100，方向猶未定。`;
+    case 'overallProfitableExitSupport':
+      return `盈利賣出分 ${exit}/100，明日以後較有機會賣出獲利。`;
+    case 'overallProfitableExitWeak':
+      return `盈利賣出分 ${exit}/100，明日以後賣出獲利空間無清楚。`;
+    case 'overallProfitableExitWatch':
+      return `盈利賣出分 ${exit}/100，愛看量價有無延續。`;
+    case 'overallNewsHeatSupport':
+      return `新聞熱度影響 ${impact}/100，熱度方向對總評有幫助。`;
+    case 'overallNewsHeatRisk':
+      return `新聞熱度影響 ${impact}/100，熱度方向拖累總評。`;
+    case 'overallNewsHeatWatch':
+      return `新聞熱度影響 ${impact}/100，尚未形成明確加減分。`;
+    case 'overallRiskTooHigh':
+      return `下跌或反轉風險 ${risk}/100，總評需要降級。`;
+    case 'trendBullishSummary':
+      return `日線延續 ${continuation}/100，隔日反轉風險 ${risk}/100，趨勢有支撐。`;
+    case 'trendConstructiveSummary':
+      return `日線延續 ${continuation}/100，趨勢有條件，但是猶著等確認。`;
+    case 'trendNeutralSummary':
+      return `日線延續 ${continuation}/100，方向猶未明確。`;
+    case 'trendRiskSummary':
+      return `隔日反轉風險 ${risk}/100，今日優勢可能袂延續。`;
+    case 'trendContinuationSupport':
+      return `隔日延續分 ${continuation}/100、風險 ${risk}/100，短線較有機會接續。`;
+    case 'trendContinuationWeak':
+      return `隔日延續分 ${continuation}/100、風險 ${risk}/100，毋通共今日優勢當作明仔載也有效。`;
+    case 'trendContinuationWatch':
+      return `隔日延續分 ${continuation}/100，愛閣看明仔載量價確認。`;
+    case 'trendStructureSupport':
+      return `均線結構 ${score}/100，日線排列有支撐。`;
+    case 'trendStructureWeak':
+      return `均線結構 ${score}/100，趨勢排列偏弱。`;
+    case 'trendRsiHealthy':
+      return `RSI ${rsi}，動能無明顯過熱。`;
+    case 'trendOverextended':
+      return `RSI ${rsi}，短線過熱風險上升。`;
+    case 'trendMacdSupport':
+      return `MACD 動能 ${score}/100，短線有支持。`;
+    case 'trendMacdPressure':
+      return `MACD 動能 ${score}/100，短線轉弱。`;
+    case 'trendVolumeConfirm':
+      return `量能確認 ${score}/100，價格變動有成交量配合。`;
+    case 'trendVolumeDivergence':
+      return `量能確認 ${score}/100，價量配合無夠。`;
+    case 'trendNearResistance':
+      return `距離近壓力約 ${distance}%，需要突破確認。`;
+    case 'trendNearSupport':
+      return `距離近支撐約 ${distance}%，觀察有無守住。`;
     case 'newsBullishSummary':
       return `新聞淨偏多：正面強度 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}，來自 ${p.total} 則近期新聞。`;
     case 'newsBearishSummary':
@@ -1398,6 +2599,17 @@ function jaKoDecisionPointLabel(point: DecisionPoint, score: string, count: numb
   const change = Number(p.change ?? 0).toFixed(1);
   const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
   const range = Number(p.range ?? 0).toFixed(1);
+  const amount = String(p.amount ?? 'N/A');
+  const ratio = Number(p.ratio ?? 0).toFixed(1);
+  const continuation = Number(p.continuation ?? 0).toFixed(1);
+  const risk = Number(p.risk ?? 0).toFixed(1);
+  const distance = Number(p.distance ?? 0).toFixed(1);
+  const rsi = Number(p.rsi ?? 0).toFixed(1);
+  const heat = Number(p.heat ?? 0).toFixed(1);
+  const impact = Number(p.impact ?? 0).toFixed(1);
+  const today = Number(p.today ?? 0).toFixed(1);
+  const future = Number(p.future ?? 0).toFixed(1);
+  const exit = Number(p.exit ?? 0).toFixed(1);
 
   switch (point.key) {
     case 'buySummary':
@@ -1496,6 +2708,128 @@ function jaKoDecisionPointLabel(point: DecisionPoint, score: string, count: numb
       return isJa
         ? `ニュースはまだ混在しています。ポジティブ ${positiveScore}/100、ネガティブ ${negativeScore}/100、ネット ${netScore}。`
         : `뉴스 흐름은 아직 혼재되어 있습니다. 긍정 ${positiveScore}/100, 부정 ${negativeScore}/100, 순점수 ${netScore}.`;
+    case 'fundFlowSupport':
+      return isJa
+        ? `当日主力資金は ${amount}、比率 ${ratio}% の純流入で、需給面を支えています。`
+        : `당일 주력 자금은 ${amount}, 비중 ${ratio}% 순유입으로 수급을 지지합니다.`;
+    case 'fundFlowPressure':
+      return isJa
+        ? `当日主力資金は ${amount}、比率 ${ratio}% の純流出で、需給面の圧力です。`
+        : `당일 주력 자금은 ${amount}, 비중 ${ratio}% 순유출로 수급 압력입니다.`;
+    case 'fundFlowWatch':
+      return isJa
+        ? `当日主力資金は ${amount}、比率 ${ratio}% で、方向感はまだ限定的です。`
+        : `당일 주력 자금은 ${amount}, 비중 ${ratio}%로 방향성이 아직 제한적입니다.`;
+    case 'newsHeatHotPositiveSummary':
+      return isJa ? `ニュース注目度は ${heat}/100、影響は ${impact}/100 でポジティブです。` : `뉴스 관심도는 ${heat}/100, 영향은 ${impact}/100으로 긍정적입니다.`;
+    case 'newsHeatHotNegativeSummary':
+      return isJa ? `ニュース注目度は ${heat}/100、影響は ${impact}/100 でリスク寄りです。` : `뉴스 관심도는 ${heat}/100, 영향은 ${impact}/100으로 리스크 쪽입니다.`;
+    case 'newsHeatHotMixedSummary':
+      return isJa ? `ニュース注目度は ${heat}/100 ですが、強弱はまだ混在しています。` : `뉴스 관심도는 ${heat}/100이지만 방향성은 아직 혼재되어 있습니다.`;
+    case 'newsHeatColdSummary':
+      return isJa ? `ニュース注目度は ${heat}/100 で、材料の広がりは限定的です。` : `뉴스 관심도는 ${heat}/100으로 이슈 확산은 제한적입니다.`;
+    case 'newsHeatSupport':
+      return isJa ? `ニュース注目度の影響は ${impact}/100 で、総合評価を支えます。` : `뉴스 관심도 영향은 ${impact}/100으로 종합 평가를 지지합니다.`;
+    case 'newsHeatRisk':
+      return isJa ? `ニュース注目度の影響は ${impact}/100 で、人気材料がリスク要因です。` : `뉴스 관심도 영향은 ${impact}/100으로 인기 이슈가 리스크 요인입니다.`;
+    case 'newsHeatWatch':
+      return isJa ? `ニュース注目度の影響は ${impact}/100 で、方向確認が必要です。` : `뉴스 관심도 영향은 ${impact}/100으로 방향 확인이 필요합니다.`;
+    case 'newsHeatFresh':
+      return isJa ? `ニュース鮮度は ${score}/100 で、材料は新しいです。` : `뉴스 신선도는 ${score}/100으로 자료가 최신에 가깝습니다.`;
+    case 'newsHeatStale':
+      return isJa ? `ニュース鮮度は ${score}/100 で、材料が古くなっています。` : `뉴스 신선도는 ${score}/100으로 자료가 다소 오래되었습니다.`;
+    case 'overallStrongBuySummary':
+      return isJa
+        ? `最終総合評価 ${p.score}/100。今日の買い、今後の上昇、利益確定条件がそろっています。`
+        : `최종 종합 평가 ${p.score}/100. 오늘 매수, 향후 상승, 수익 실현 조건이 모두 비교적 갖춰졌습니다.`;
+    case 'overallBuySummary':
+      return isJa
+        ? `最終総合評価 ${p.score}/100。今日の買い価値と今後の利益余地があります。`
+        : `최종 종합 평가 ${p.score}/100. 오늘 매수 가치와 이후 수익 여지가 있습니다.`;
+    case 'overallWatchSummary':
+      return isJa ? `最終総合評価 ${p.score}/100。条件は未完成で注視です。` : `최종 종합 평가 ${p.score}/100. 조건이 아직 완전하지 않아 관찰입니다.`;
+    case 'overallAvoidSummary':
+      return isJa ? `最終総合評価 ${p.score}/100。今日の新規買いは避けます。` : `최종 종합 평가 ${p.score}/100. 오늘 신규 매수는 피합니다.`;
+    case 'overallSellSummary':
+      return isJa ? `最終総合評価 ${p.score}/100。リスク優先で縮小または撤退寄りです。` : `최종 종합 평가 ${p.score}/100. 리스크 우선으로 축소 또는 이탈 쪽입니다.`;
+    case 'overallTodayBuySupport':
+      return isJa ? `今日の買い評価は ${today}/100 で、現時点の買い場を支えます。` : `오늘 매수 평가는 ${today}/100으로 현재 매수 지점을 지지합니다.`;
+    case 'overallTodayBuyWeak':
+      return isJa ? `今日の買い評価は ${today}/100 で、買い条件が不足しています。` : `오늘 매수 평가는 ${today}/100으로 매수 조건이 부족합니다.`;
+    case 'overallTodayBuyWatch':
+      return isJa ? `今日の買い評価は ${today}/100 で、追加確認が必要です。` : `오늘 매수 평가는 ${today}/100으로 추가 확인이 필요합니다.`;
+    case 'overallFutureRiseSupport':
+      return isJa ? `今後の上昇評価は ${future}/100 で、継続余地があります。` : `향후 상승 평가는 ${future}/100으로 지속 여지가 있습니다.`;
+    case 'overallFutureRiseWeak':
+      return isJa ? `今後の上昇評価は ${future}/100 で、優位性は弱いです。` : `향후 상승 평가는 ${future}/100으로 우위가 약합니다.`;
+    case 'overallFutureRiseWatch':
+      return isJa ? `今後の上昇評価は ${future}/100 で、方向確認が必要です。` : `향후 상승 평가는 ${future}/100으로 방향 확인이 필요합니다.`;
+    case 'overallProfitableExitSupport':
+      return isJa ? `利益確定評価は ${exit}/100 で、明日以降に利益を出して売る余地があります。` : `수익 실현 평가는 ${exit}/100으로 내일 이후 수익 매도 여지가 있습니다.`;
+    case 'overallProfitableExitWeak':
+      return isJa ? `利益確定評価は ${exit}/100 で、明日以降の売却利益は不明瞭です。` : `수익 실현 평가는 ${exit}/100으로 내일 이후 수익 매도 여지가 불명확합니다.`;
+    case 'overallProfitableExitWatch':
+      return isJa ? `利益確定評価は ${exit}/100 で、次の出来高と価格確認が必要です。` : `수익 실현 평가는 ${exit}/100으로 다음 거래량과 가격 확인이 필요합니다.`;
+    case 'overallNewsHeatSupport':
+      return isJa ? `ニュース注目度の影響は ${impact}/100 で、総合評価を押し上げます。` : `뉴스 관심도 영향은 ${impact}/100으로 종합 평가를 끌어올립니다.`;
+    case 'overallNewsHeatRisk':
+      return isJa ? `ニュース注目度の影響は ${impact}/100 で、総合評価を押し下げます。` : `뉴스 관심도 영향은 ${impact}/100으로 종합 평가를 낮춥니다.`;
+    case 'overallNewsHeatWatch':
+      return isJa ? `ニュース注目度の影響は ${impact}/100 で、明確な加点・減点はまだありません。` : `뉴스 관심도 영향은 ${impact}/100으로 뚜렷한 가감점은 아직 없습니다.`;
+    case 'overallRiskTooHigh':
+      return isJa ? `下落または反転リスクは ${risk}/100 で、総合評価を下げます。` : `하락 또는 반전 리스크는 ${risk}/100으로 종합 평가를 낮춥니다.`;
+    case 'trendBullishSummary':
+      return isJa
+        ? `日足の継続性は ${continuation}/100、翌日反転リスクは ${risk}/100 です。`
+        : `일봉 지속성은 ${continuation}/100, 다음 세션 반전 리스크는 ${risk}/100입니다.`;
+    case 'trendConstructiveSummary':
+      return isJa
+        ? `日足の継続性は ${continuation}/100 で、追加確認が必要です。`
+        : `일봉 지속성은 ${continuation}/100이며 추가 확인이 필요합니다.`;
+    case 'trendNeutralSummary':
+      return isJa
+        ? `日足の継続性は ${continuation}/100 で、方向感はまだ中立です。`
+        : `일봉 지속성은 ${continuation}/100이며 방향성은 아직 중립입니다.`;
+    case 'trendRiskSummary':
+      return isJa
+        ? `翌日反転リスクは ${risk}/100 で、今日の優位性が続かない可能性があります。`
+        : `다음 세션 반전 리스크는 ${risk}/100이라 오늘의 우위가 이어지지 않을 수 있습니다.`;
+    case 'trendContinuationSupport':
+      return isJa
+        ? `翌日継続性 ${continuation}/100、反転リスク ${risk}/100 で、短期継続を支えます。`
+        : `다음 세션 지속성 ${continuation}/100, 반전 리스크 ${risk}/100으로 단기 지속을 지지합니다.`;
+    case 'trendContinuationWeak':
+      return isJa
+        ? `翌日継続性 ${continuation}/100、反転リスク ${risk}/100 です。今日の優位性を翌日まで固定しません。`
+        : `다음 세션 지속성 ${continuation}/100, 반전 리스크 ${risk}/100입니다. 오늘의 우위를 다음 세션까지 고정하지 않습니다.`;
+    case 'trendContinuationWatch':
+      return isJa
+        ? `翌日継続性 ${continuation}/100 です。次の価格と出来高確認を待ちます。`
+        : `다음 세션 지속성 ${continuation}/100입니다. 다음 가격과 거래량 확인이 필요합니다.`;
+    case 'trendStructureSupport':
+      return isJa
+        ? `移動平均構造は ${score}/100 で、日足配列を支えています。`
+        : `이동평균 구조는 ${score}/100이며 일봉 배열을 지지합니다.`;
+    case 'trendStructureWeak':
+      return isJa
+        ? `移動平均構造は ${score}/100 で、トレンド配列は弱めです。`
+        : `이동평균 구조는 ${score}/100이며 추세 배열이 약합니다.`;
+    case 'trendRsiHealthy':
+      return isJa ? `RSI は ${rsi} で、明確な過熱ではありません。` : `RSI는 ${rsi}로 뚜렷한 과열은 아닙니다.`;
+    case 'trendOverextended':
+      return isJa ? `RSI は ${rsi} で、短期過熱リスクが上がっています。` : `RSI는 ${rsi}로 단기 과열 리스크가 높아졌습니다.`;
+    case 'trendMacdSupport':
+      return isJa ? `MACD モメンタムは ${score}/100 で短期を支えます。` : `MACD 모멘텀은 ${score}/100으로 단기를 지지합니다.`;
+    case 'trendMacdPressure':
+      return isJa ? `MACD モメンタムは ${score}/100 で短期が弱まっています。` : `MACD 모멘텀은 ${score}/100으로 단기가 약해졌습니다.`;
+    case 'trendVolumeConfirm':
+      return isJa ? `出来高確認は ${score}/100 で、価格変動を支えます。` : `거래량 확인은 ${score}/100으로 가격 변동을 지지합니다.`;
+    case 'trendVolumeDivergence':
+      return isJa ? `出来高確認は ${score}/100 で、価格と出来高の整合性が弱いです。` : `거래량 확인은 ${score}/100으로 가격과 거래량의 정합성이 약합니다.`;
+    case 'trendNearResistance':
+      return isJa ? `直近レジスタンスまで約 ${distance}% です。突破確認が必要です。` : `가까운 저항까지 약 ${distance}%입니다. 돌파 확인이 필요합니다.`;
+    case 'trendNearSupport':
+      return isJa ? `直近サポートから約 ${distance}% です。維持できるか確認します。` : `가까운 지지선에서 약 ${distance}%입니다. 지지 유지 여부를 확인합니다.`;
     case 'newsBullishSummary':
       return isJa
         ? `ニュースはネットで強気です。ポジティブ ${positiveScore}/100、ネガティブ ${negativeScore}/100、ネット ${netScore}、直近記事 ${p.total} 件。`
@@ -1654,6 +2988,17 @@ function pointLabel(point: DecisionPoint) {
   const change = Number(p.change ?? 0).toFixed(1);
   const pullbackRisk = Number(p.risk ?? 0).toFixed(1);
   const range = Number(p.range ?? 0).toFixed(1);
+  const amount = String(p.amount ?? 'N/A');
+  const ratio = Number(p.ratio ?? 0).toFixed(1);
+  const continuation = Number(p.continuation ?? 0).toFixed(1);
+  const risk = Number(p.risk ?? 0).toFixed(1);
+  const distance = Number(p.distance ?? 0).toFixed(1);
+  const rsi = Number(p.rsi ?? 0).toFixed(1);
+  const heat = Number(p.heat ?? 0).toFixed(1);
+  const impact = Number(p.impact ?? 0).toFixed(1);
+  const today = Number(p.today ?? 0).toFixed(1);
+  const future = Number(p.future ?? 0).toFixed(1);
+  const exit = Number(p.exit ?? 0).toFixed(1);
   if (locale.value === 'nan-TW') {
     return nanDecisionPointLabel(point, score, count, hours);
   }
@@ -1780,6 +3125,241 @@ function pointLabel(point: DecisionPoint) {
       en: `News is still mixed: positive ${positiveScore}/100, negative ${negativeScore}/100, net ${netScore}.`,
       'zh-CN': `新闻多空仍混合：正面 ${positiveScore}/100、负面 ${negativeScore}/100、净分 ${netScore}；重点看后续新闻转正还是转负。`,
       'zh-TW': `新聞多空仍混合：正面 ${positiveScore}/100、負面 ${negativeScore}/100、淨分 ${netScore}；重點看後續新聞轉正還是轉負。`
+    },
+    fundFlowSupport: {
+      en: `Today main fund flow is positive at ${amount}, ${ratio}% of turnover; liquidity is supportive.`,
+      'zh-CN': `当日主力资金净流入 ${amount}，占成交额 ${ratio}%，资金面有支撑。`,
+      'zh-TW': `當日主力資金淨流入 ${amount}，占成交額 ${ratio}%，資金面有支撐。`
+    },
+    fundFlowPressure: {
+      en: `Today main fund flow is negative at ${amount}, ${ratio}% of turnover; liquidity is pressuring the setup.`,
+      'zh-CN': `当日主力资金净流出 ${amount}，占成交额 ${ratio}%，资金面压制当前 setup。`,
+      'zh-TW': `當日主力資金淨流出 ${amount}，占成交額 ${ratio}%，資金面壓制目前 setup。`
+    },
+    fundFlowWatch: {
+      en: `Today main fund flow is ${amount}, ${ratio}% of turnover; flow direction is not decisive yet.`,
+      'zh-CN': `当日主力资金 ${amount}，占成交额 ${ratio}%，资金方向暂不明确。`,
+      'zh-TW': `當日主力資金 ${amount}，占成交額 ${ratio}%，資金方向暫不明確。`
+    },
+    newsHeatHotPositiveSummary: {
+      en: `News heat is ${heat}/100 with ${impact}/100 positive impact.`,
+      'zh-CN': `新闻热度 ${heat}/100，热度影响 ${impact}/100，市场关注偏正面。`,
+      'zh-TW': `新聞熱度 ${heat}/100，熱度影響 ${impact}/100，市場關注偏正面。`
+    },
+    newsHeatHotNegativeSummary: {
+      en: `News heat is ${heat}/100 with ${impact}/100 risk-weighted impact.`,
+      'zh-CN': `新闻热度 ${heat}/100，热度影响 ${impact}/100，市场关注偏负面。`,
+      'zh-TW': `新聞熱度 ${heat}/100，熱度影響 ${impact}/100，市場關注偏負面。`
+    },
+    newsHeatHotMixedSummary: {
+      en: `News heat is ${heat}/100, but the direction is mixed.`,
+      'zh-CN': `新闻热度 ${heat}/100，但多空方向仍然混合。`,
+      'zh-TW': `新聞熱度 ${heat}/100，但多空方向仍然混合。`
+    },
+    newsHeatColdSummary: {
+      en: `News heat is ${heat}/100; attention is limited.`,
+      'zh-CN': `新闻热度 ${heat}/100，题材关注度有限。`,
+      'zh-TW': `新聞熱度 ${heat}/100，題材關注度有限。`
+    },
+    newsHeatSupport: {
+      en: `News heat impact is ${impact}/100 and supports the final review.`,
+      'zh-CN': `新闻热度影响 ${impact}/100，对最终总评有加分。`,
+      'zh-TW': `新聞熱度影響 ${impact}/100，對最終總評有加分。`
+    },
+    newsHeatRisk: {
+      en: `News heat impact is ${impact}/100; attention is risk-weighted.`,
+      'zh-CN': `新闻热度影响 ${impact}/100，热门消息反而偏风险。`,
+      'zh-TW': `新聞熱度影響 ${impact}/100，熱門消息反而偏風險。`
+    },
+    newsHeatWatch: {
+      en: `News heat impact is ${impact}/100; direction still needs confirmation.`,
+      'zh-CN': `新闻热度影响 ${impact}/100，方向仍需要确认。`,
+      'zh-TW': `新聞熱度影響 ${impact}/100，方向仍需要確認。`
+    },
+    newsHeatFresh: {
+      en: `News freshness is ${score}/100; evidence is recent.`,
+      'zh-CN': `新闻时效 ${score}/100，信息足够新。`,
+      'zh-TW': `新聞時效 ${score}/100，資訊足夠新。`
+    },
+    newsHeatStale: {
+      en: `News freshness is ${score}/100; attention may already be stale.`,
+      'zh-CN': `新闻时效 ${score}/100，热度信息偏旧。`,
+      'zh-TW': `新聞時效 ${score}/100，熱度資訊偏舊。`
+    },
+    overallStrongBuySummary: {
+      en: `Final review ${p.score}/100: today buy, future rise, and profitable exit conditions are all aligned.`,
+      'zh-CN': `最终总评 ${p.score}/100：今日值得买、后续上涨、明日及以后盈利卖出条件都较完整。`,
+      'zh-TW': `最終總評 ${p.score}/100：今日值得買、後續上漲、明日及以後盈利賣出條件都較完整。`
+    },
+    overallBuySummary: {
+      en: `Final review ${p.score}/100: today's entry has value and later profit-taking is plausible.`,
+      'zh-CN': `最终总评 ${p.score}/100：今日有买入价值，后续也有盈利卖出空间。`,
+      'zh-TW': `最終總評 ${p.score}/100：今日有買入價值，後續也有盈利賣出空間。`
+    },
+    overallWatchSummary: {
+      en: `Final review ${p.score}/100: the setup is incomplete, so keep it on watch.`,
+      'zh-CN': `最终总评 ${p.score}/100：条件还不完整，先列入重点观察。`,
+      'zh-TW': `最終總評 ${p.score}/100：條件還不完整，先列入重點觀察。`
+    },
+    overallAvoidSummary: {
+      en: `Final review ${p.score}/100: today's new buying is not clean enough.`,
+      'zh-CN': `最终总评 ${p.score}/100：今日不适合新买，等待条件修复。`,
+      'zh-TW': `最終總評 ${p.score}/100：今日不適合新買，等待條件修復。`
+    },
+    overallSellSummary: {
+      en: `Final review ${p.score}/100: defense comes first; reduce or exit risk.`,
+      'zh-CN': `最终总评 ${p.score}/100：风险优先，偏向减仓或退出。`,
+      'zh-TW': `最終總評 ${p.score}/100：風險優先，偏向減倉或退出。`
+    },
+    overallTodayBuySupport: {
+      en: `Today-buy score is ${today}/100, so the current entry has support.`,
+      'zh-CN': `今日买入分 ${today}/100，当前买点有支撑。`,
+      'zh-TW': `今日買入分 ${today}/100，目前買點有支撐。`
+    },
+    overallTodayBuyWeak: {
+      en: `Today-buy score is ${today}/100, so the current entry is not clean.`,
+      'zh-CN': `今日买入分 ${today}/100，当前买入条件不足。`,
+      'zh-TW': `今日買入分 ${today}/100，目前買入條件不足。`
+    },
+    overallTodayBuyWatch: {
+      en: `Today-buy score is ${today}/100; wait for confirmation.`,
+      'zh-CN': `今日买入分 ${today}/100，需要继续确认。`,
+      'zh-TW': `今日買入分 ${today}/100，需要繼續確認。`
+    },
+    overallFutureRiseSupport: {
+      en: `Future-rise score is ${future}/100, supporting follow-through.`,
+      'zh-CN': `后续上涨分 ${future}/100，延续机会较好。`,
+      'zh-TW': `後續上漲分 ${future}/100，延續機會較好。`
+    },
+    overallFutureRiseWeak: {
+      en: `Future-rise score is ${future}/100; upside edge is weak.`,
+      'zh-CN': `后续上涨分 ${future}/100，后势优势不明确。`,
+      'zh-TW': `後續上漲分 ${future}/100，後勢優勢不明確。`
+    },
+    overallFutureRiseWatch: {
+      en: `Future-rise score is ${future}/100; direction still needs confirmation.`,
+      'zh-CN': `后续上涨分 ${future}/100，方向仍需确认。`,
+      'zh-TW': `後續上漲分 ${future}/100，方向仍需確認。`
+    },
+    overallProfitableExitSupport: {
+      en: `Profitable-exit score is ${exit}/100, so later profit-taking is plausible.`,
+      'zh-CN': `盈利卖出分 ${exit}/100，明日及以后更有机会卖出赚钱。`,
+      'zh-TW': `盈利賣出分 ${exit}/100，明日及以後更有機會賣出賺錢。`
+    },
+    overallProfitableExitWeak: {
+      en: `Profitable-exit score is ${exit}/100; later profit-taking is unclear.`,
+      'zh-CN': `盈利卖出分 ${exit}/100，明日及以后卖出赚钱空间不清楚。`,
+      'zh-TW': `盈利賣出分 ${exit}/100，明日及以後賣出賺錢空間不清楚。`
+    },
+    overallProfitableExitWatch: {
+      en: `Profitable-exit score is ${exit}/100; watch next price and volume confirmation.`,
+      'zh-CN': `盈利卖出分 ${exit}/100，要看后续量价能否延续。`,
+      'zh-TW': `盈利賣出分 ${exit}/100，要看後續量價能否延續。`
+    },
+    overallNewsHeatSupport: {
+      en: `News heat impact is ${impact}/100 and lifts the final review.`,
+      'zh-CN': `新闻热度影响 ${impact}/100，热度方向抬升最终总评。`,
+      'zh-TW': `新聞熱度影響 ${impact}/100，熱度方向抬升最終總評。`
+    },
+    overallNewsHeatRisk: {
+      en: `News heat impact is ${impact}/100 and drags the final review.`,
+      'zh-CN': `新闻热度影响 ${impact}/100，热度方向拖累最终总评。`,
+      'zh-TW': `新聞熱度影響 ${impact}/100，熱度方向拖累最終總評。`
+    },
+    overallNewsHeatWatch: {
+      en: `News heat impact is ${impact}/100 and is not decisive yet.`,
+      'zh-CN': `新闻热度影响 ${impact}/100，尚未形成明确加减分。`,
+      'zh-TW': `新聞熱度影響 ${impact}/100，尚未形成明確加減分。`
+    },
+    overallRiskTooHigh: {
+      en: `Downside or reversal risk is ${risk}/100, so the final review is downgraded.`,
+      'zh-CN': `下跌或反转风险 ${risk}/100，最终总评需要降级。`,
+      'zh-TW': `下跌或反轉風險 ${risk}/100，最終總評需要降級。`
+    },
+    trendBullishSummary: {
+      en: `Daily trend continuation is ${continuation}/100 with next-session reversal risk at ${risk}/100.`,
+      'zh-CN': `日线延续分 ${continuation}/100，次日反转风险 ${risk}/100，趋势仍有支撑。`,
+      'zh-TW': `日線延續分 ${continuation}/100，次日反轉風險 ${risk}/100，趨勢仍有支撐。`
+    },
+    trendConstructiveSummary: {
+      en: `Daily trend continuation is ${continuation}/100; the setup is constructive but needs confirmation.`,
+      'zh-CN': `日线延续分 ${continuation}/100，形态有条件，但仍需要确认。`,
+      'zh-TW': `日線延續分 ${continuation}/100，型態有條件，但仍需要確認。`
+    },
+    trendNeutralSummary: {
+      en: `Daily trend continuation is ${continuation}/100; direction is not decisive yet.`,
+      'zh-CN': `日线延续分 ${continuation}/100，方向暂不明确。`,
+      'zh-TW': `日線延續分 ${continuation}/100，方向暫不明確。`
+    },
+    trendRiskSummary: {
+      en: `Next-session reversal risk is ${risk}/100; today's edge may not carry forward.`,
+      'zh-CN': `次日反转风险 ${risk}/100，今天爬到的优势不一定能延续。`,
+      'zh-TW': `次日反轉風險 ${risk}/100，今天爬到的優勢不一定能延續。`
+    },
+    trendContinuationSupport: {
+      en: `Next-session continuation is ${continuation}/100 while reversal risk is ${risk}/100.`,
+      'zh-CN': `次日延续分 ${continuation}/100，反转风险 ${risk}/100，短线延续性较好。`,
+      'zh-TW': `次日延續分 ${continuation}/100，反轉風險 ${risk}/100，短線延續性較好。`
+    },
+    trendContinuationWeak: {
+      en: `Next-session continuation is only ${continuation}/100 and reversal risk is ${risk}/100; do not treat today's edge as durable.`,
+      'zh-CN': `次日延续分只有 ${continuation}/100，反转风险 ${risk}/100，不能把今天的优势当成明天仍有效。`,
+      'zh-TW': `次日延續分只有 ${continuation}/100，反轉風險 ${risk}/100，不能把今天的優勢當成明天仍有效。`
+    },
+    trendContinuationWatch: {
+      en: `Next-session continuation is ${continuation}/100; wait for the next price and volume confirmation.`,
+      'zh-CN': `次日延续分 ${continuation}/100，需要等下一交易日量价确认。`,
+      'zh-TW': `次日延續分 ${continuation}/100，需要等下一交易日量價確認。`
+    },
+    trendStructureSupport: {
+      en: `Moving-average structure scores ${score}/100 and supports the daily trend.`,
+      'zh-CN': `均线结构 ${score}/100，日线排列仍有支撑。`,
+      'zh-TW': `均線結構 ${score}/100，日線排列仍有支撐。`
+    },
+    trendStructureWeak: {
+      en: `Moving-average structure scores ${score}/100, so the daily trend is weak.`,
+      'zh-CN': `均线结构 ${score}/100，日线趋势排列偏弱。`,
+      'zh-TW': `均線結構 ${score}/100，日線趨勢排列偏弱。`
+    },
+    trendRsiHealthy: {
+      en: `RSI is ${rsi}, so momentum is not obviously overheated.`,
+      'zh-CN': `RSI 为 ${rsi}，动能暂未明显过热。`,
+      'zh-TW': `RSI 為 ${rsi}，動能暫未明顯過熱。`
+    },
+    trendOverextended: {
+      en: `RSI is ${rsi}; short-term overextension risk is rising.`,
+      'zh-CN': `RSI 为 ${rsi}，短线过热风险上升。`,
+      'zh-TW': `RSI 為 ${rsi}，短線過熱風險上升。`
+    },
+    trendMacdSupport: {
+      en: `MACD momentum scores ${score}/100 and supports follow-through.`,
+      'zh-CN': `MACD 动能 ${score}/100，支持后续延续。`,
+      'zh-TW': `MACD 動能 ${score}/100，支持後續延續。`
+    },
+    trendMacdPressure: {
+      en: `MACD momentum scores ${score}/100, showing short-term pressure.`,
+      'zh-CN': `MACD 动能 ${score}/100，短线有转弱压力。`,
+      'zh-TW': `MACD 動能 ${score}/100，短線有轉弱壓力。`
+    },
+    trendVolumeConfirm: {
+      en: `Volume confirmation scores ${score}/100, so price movement has participation.`,
+      'zh-CN': `量能确认 ${score}/100，价格变化有成交量配合。`,
+      'zh-TW': `量能確認 ${score}/100，價格變化有成交量配合。`
+    },
+    trendVolumeDivergence: {
+      en: `Volume confirmation scores ${score}/100; price and volume are not aligned enough.`,
+      'zh-CN': `量能确认 ${score}/100，价量配合不足。`,
+      'zh-TW': `量能確認 ${score}/100，價量配合不足。`
+    },
+    trendNearResistance: {
+      en: `Nearest resistance is about ${distance}% away; wait for a clean breakout.`,
+      'zh-CN': `距离近端压力约 ${distance}%，需要等待有效突破。`,
+      'zh-TW': `距離近端壓力約 ${distance}%，需要等待有效突破。`
+    },
+    trendNearSupport: {
+      en: `Nearest support is about ${distance}% away; watch whether it holds.`,
+      'zh-CN': `距离近端支撑约 ${distance}%，重点观察是否守住。`,
+      'zh-TW': `距離近端支撐約 ${distance}%，重點觀察是否守住。`
     },
     newsBullishSummary: {
       en: `News is net positive: positive strength ${positiveScore}/100 vs negative ${negativeScore}/100, net ${netScore}, from ${p.total} recent articles.`,
@@ -2129,6 +3709,9 @@ function financialMetricLabel(metric: FinancialMetric) {
       analystTargetUpside: '分析師目標價空間',
       dividendYield: '股息率',
       liquidityQuality: '流動性 / 規模代理',
+      fundFlowMain: '主力資金流',
+      fundFlowSuperLarge: '超大單資金流',
+      fundFlowLarge: '大單資金流',
       fiftyTwoWeekPosition: '52 週位置'
     };
     return labels[metric.key] ?? metric.key;
@@ -2145,7 +3728,79 @@ function financialMetricLabel(metric: FinancialMetric) {
     analystTargetUpside: { en: 'Analyst target upside', 'zh-CN': '分析师目标价空间', 'zh-TW': '分析師目標價空間', ja: 'アナリスト目標上値余地', ko: '애널리스트 목표가 상승 여력' },
     dividendYield: { en: 'Dividend yield', 'zh-CN': '股息率', 'zh-TW': '股息率', ja: '配当利回り', ko: '배당수익률' },
     liquidityQuality: { en: 'Liquidity/size proxy', 'zh-CN': '流动性/规模代理', 'zh-TW': '流動性/規模代理', ja: '流動性 / 規模代理', ko: '유동성 / 규모 대체 지표' },
+    fundFlowMain: { en: 'Main fund flow', 'zh-CN': '主力资金流', 'zh-TW': '主力資金流', ja: '主力資金フロー', ko: '주력 자금 흐름' },
+    fundFlowSuperLarge: { en: 'Super-large order flow', 'zh-CN': '超大单资金流', 'zh-TW': '超大單資金流', ja: '超大口注文フロー', ko: '초대형 주문 흐름' },
+    fundFlowLarge: { en: 'Large order flow', 'zh-CN': '大单资金流', 'zh-TW': '大單資金流', ja: '大口注文フロー', ko: '대형 주문 흐름' },
     fiftyTwoWeekPosition: { en: '52-week position', 'zh-CN': '52 周区间位置', 'zh-TW': '52 週區間位置', ja: '52週レンジ位置', ko: '52주 구간 위치' }
+  };
+  return labels[metric.key]?.[locale.value as StandardLocale] ?? labels[metric.key]?.en ?? metric.key;
+}
+
+function trendMetricLabel(metric: FinancialMetric) {
+  if (locale.value === 'nan-TW') {
+    const labels: Record<string, string> = {
+      trendContinuation: '隔日延續',
+      trendReversalRisk: '隔日反轉風險',
+      trendMaStructure: '均線結構',
+      trendShortReturns: '短中期漲跌',
+      trendRsi14: 'RSI 14',
+      trendMacd: 'MACD',
+      trendVolume: '量能確認',
+      trendSupportResistance: '支撐 / 壓力'
+    };
+    return labels[metric.key] ?? metric.key;
+  }
+  const labels: Record<string, LocalizedText> = {
+    trendContinuation: { en: 'Next-session continuation', 'zh-CN': '次日延续', 'zh-TW': '次日延續', ja: '翌日継続性', ko: '다음 세션 지속성' },
+    trendReversalRisk: { en: 'Next-session reversal risk', 'zh-CN': '次日反转风险', 'zh-TW': '次日反轉風險', ja: '翌日反転リスク', ko: '다음 세션 반전 리스크' },
+    trendMaStructure: { en: 'Moving-average structure', 'zh-CN': '均线结构', 'zh-TW': '均線結構', ja: '移動平均構造', ko: '이동평균 구조' },
+    trendShortReturns: { en: 'Short/medium returns', 'zh-CN': '短中期涨跌', 'zh-TW': '短中期漲跌', ja: '短中期リターン', ko: '단기 / 중기 수익률' },
+    trendRsi14: { en: 'RSI 14', 'zh-CN': 'RSI 14', 'zh-TW': 'RSI 14', ja: 'RSI 14', ko: 'RSI 14' },
+    trendMacd: { en: 'MACD', 'zh-CN': 'MACD', 'zh-TW': 'MACD', ja: 'MACD', ko: 'MACD' },
+    trendVolume: { en: 'Volume confirmation', 'zh-CN': '量能确认', 'zh-TW': '量能確認', ja: '出来高確認', ko: '거래량 확인' },
+    trendSupportResistance: { en: 'Support/resistance', 'zh-CN': '支撑/压力', 'zh-TW': '支撐/壓力', ja: 'サポート / レジスタンス', ko: '지지 / 저항' }
+  };
+  return labels[metric.key]?.[locale.value as StandardLocale] ?? labels[metric.key]?.en ?? metric.key;
+}
+
+function newsHeatMetricLabel(metric: FinancialMetric) {
+  if (locale.value === 'nan-TW') {
+    const labels: Record<string, string> = {
+      newsHeat: '新聞熱度',
+      newsHeatImpact: '熱度影響',
+      newsFreshness: '新聞時效',
+      newsSourceBreadth: '來源廣度',
+      newsEventIntensity: '事件強度'
+    };
+    return labels[metric.key] ?? metric.key;
+  }
+  const labels: Record<string, LocalizedText> = {
+    newsHeat: { en: 'News heat', 'zh-CN': '新闻热度', 'zh-TW': '新聞熱度', ja: 'ニュース注目度', ko: '뉴스 관심도' },
+    newsHeatImpact: { en: 'Heat impact', 'zh-CN': '热度影响', 'zh-TW': '熱度影響', ja: '注目度の影響', ko: '관심도 영향' },
+    newsFreshness: { en: 'Freshness', 'zh-CN': '时效性', 'zh-TW': '時效性', ja: '鮮度', ko: '신선도' },
+    newsSourceBreadth: { en: 'Source breadth', 'zh-CN': '来源广度', 'zh-TW': '來源廣度', ja: 'ソースの広がり', ko: '출처 다양성' },
+    newsEventIntensity: { en: 'Event intensity', 'zh-CN': '事件强度', 'zh-TW': '事件強度', ja: 'イベント強度', ko: '이벤트 강도' }
+  };
+  return labels[metric.key]?.[locale.value as StandardLocale] ?? labels[metric.key]?.en ?? metric.key;
+}
+
+function overallMetricLabel(metric: FinancialMetric) {
+  if (locale.value === 'nan-TW') {
+    const labels: Record<string, string> = {
+      overallTotal: '總評分',
+      overallTodayBuy: '今日買入',
+      overallFutureRise: '後續上漲',
+      overallProfitableExit: '盈利賣出',
+      overallNewsHeatImpact: '新聞熱度影響'
+    };
+    return labels[metric.key] ?? metric.key;
+  }
+  const labels: Record<string, LocalizedText> = {
+    overallTotal: { en: 'Final score', 'zh-CN': '最终总分', 'zh-TW': '最終總分', ja: '最終スコア', ko: '최종 점수' },
+    overallTodayBuy: { en: 'Worth buying today', 'zh-CN': '今日是否值得买', 'zh-TW': '今日是否值得買', ja: '今日買う価値', ko: '오늘 매수 가치' },
+    overallFutureRise: { en: 'Future rise potential', 'zh-CN': '后续上涨可能', 'zh-TW': '後續上漲可能', ja: '今後の上昇余地', ko: '향후 상승 가능성' },
+    overallProfitableExit: { en: 'Profitable exit later', 'zh-CN': '明日以后盈利卖出', 'zh-TW': '明日以後盈利賣出', ja: '後日の利益確定', ko: '이후 수익 매도' },
+    overallNewsHeatImpact: { en: 'News heat impact', 'zh-CN': '新闻热度影响', 'zh-TW': '新聞熱度影響', ja: 'ニュース注目度の影響', ko: '뉴스 관심도 영향' }
   };
   return labels[metric.key]?.[locale.value as StandardLocale] ?? labels[metric.key]?.en ?? metric.key;
 }
@@ -2339,6 +3994,7 @@ function handleDocumentClick(event: MouseEvent) {
 
 function handleDocumentKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    closeStockDetail();
     closeLanguageMenu();
   }
 }
@@ -2618,7 +4274,10 @@ watch(
     selectedStrategyId: selectedStrategyId.value,
     useCustom: useCustom.value,
     customWeights: { ...customWeights },
-    symbolText: symbolText.value
+    symbolText: symbolText.value,
+    manualHoldingText: manualHoldingText.value,
+    resultSortKey: resultSortKey.value,
+    resultSortDirection: resultSortDirection.value
   }),
   persistSettings,
   { deep: true }
@@ -2763,6 +4422,42 @@ onUnmounted(() => {
               </option>
             </select>
             <p class="strategy-copy">{{ strategyDescription(selectedStrategy) }}</p>
+            <div class="strategy-library-bar">
+              <button class="ghost compact" type="button" :disabled="refreshingStrategies || loading" @click="refreshOnlineStrategies">
+                {{ refreshingStrategies ? strategyUi.refreshingStrategies : strategyUi.refreshStrategies }}
+              </button>
+              <span>{{ strategySourceSummary }}</span>
+              <small v-if="strategyUpdatedLabel">{{ strategyUpdatedLabel }}</small>
+            </div>
+            <p v-if="selectedStrategy?.id === 'ai_smart_blend'" class="strategy-copy compact-copy">{{ strategyUi.aiBlendHint }}</p>
+            <p v-if="strategyRefreshError" class="strategy-refresh-error">{{ strategyRefreshError }}</p>
+
+            <div v-if="selectedDetailedWeightEntries.length" class="strategy-detail-box">
+              <div class="strategy-detail-heading">
+                <strong>{{ strategyUi.detailedWeights }}</strong>
+                <span>{{ selectedDetailedWeightEntries.length }}</span>
+              </div>
+              <div class="strategy-weight-grid">
+                <span v-for="entry in selectedDetailedWeightEntries" :key="entry.key">
+                  <b>{{ detailedWeightLabel(entry.key) }}</b>
+                  <small>{{ entry.value.toFixed(1) }}%</small>
+                </span>
+              </div>
+            </div>
+
+            <details v-if="selectedStrategySources.length" class="strategy-source-list">
+              <summary>
+                <strong>{{ strategyUi.sourceLibrary }}</strong>
+                <span>{{ selectedStrategySources.length }} {{ strategyUi.sources }}</span>
+              </summary>
+              <a v-for="source in selectedStrategySources" :key="source.id" :href="source.url" target="_blank" rel="noreferrer">
+                <span>{{ source.title }}</span>
+                <small>
+                  {{ source.available === true ? strategyUi.sourceAvailable : source.available === false ? strategyUi.sourceFailed : strategyUi.sourcePending }}
+                  <template v-if="source.matchedKeywords?.length"> · {{ strategyUi.matchedKeywords }} {{ source.matchedKeywords.length }}</template>
+                </small>
+              </a>
+            </details>
 
             <div class="weight-list">
               <label v-for="(_, key) in customWeights" :key="key">
@@ -2802,6 +4497,21 @@ onUnmounted(() => {
                   {{ clearPortfolioLabel() }}
                 </button>
               </div>
+              <details class="manual-holdings-entry">
+                <summary>
+                  <strong>{{ portfolioManualTitle() }}</strong>
+                  <span>{{ portfolioManualHint() }}</span>
+                </summary>
+                <textarea
+                  v-model="manualHoldingText"
+                  rows="5"
+                  spellcheck="false"
+                  :placeholder="portfolioManualPlaceholder()"
+                ></textarea>
+                <button class="ghost" type="button" :disabled="loading || importingPortfolio || !manualHoldingText.trim()" @click="applyManualHoldings">
+                  {{ portfolioManualApplyLabel() }}
+                </button>
+              </details>
               <div v-if="activePortfolio" class="portfolio-summary">
                 <span>{{ portfolioReadyLabel(activePortfolio) }}</span>
                 <strong>{{ moneyLabel(activePortfolio.totalMarketValue) }}</strong>
@@ -2897,6 +4607,17 @@ onUnmounted(() => {
               </button>
             </div>
           </div>
+          <label class="filter-field sort-field">
+            <span>{{ sortFieldLabel() }}</span>
+            <select v-model="resultSortKey">
+              <option v-for="option in resultSortOptions" :key="`sort-${option}`" :value="option">
+                {{ resultSortLabel(option) }}
+              </option>
+            </select>
+          </label>
+          <button class="ghost sort-direction" type="button" @click="resultSortDirection = resultSortDirection === 'desc' ? 'asc' : 'desc'">
+            {{ sortDirectionLabel() }}
+          </button>
           <strong class="filter-count">{{ resultCountLabel() }}</strong>
         </div>
 
@@ -2927,7 +4648,7 @@ onUnmounted(() => {
             <p v-for="issue in dataIssues" :key="issue.symbol">{{ issue.symbol }}: {{ issue.error }}</p>
           </article>
 
-          <article v-for="pick in filteredPicks" :key="pick.symbol" class="pick-card" :class="pick.verdict">
+          <article v-for="pick in filteredPicks" :key="pick.symbol" class="pick-card" :class="finalVerdictBucket(pick)">
             <div class="pick-heading">
               <div>
                 <span class="market-tag">{{ pick.market }}</span>
@@ -2935,20 +4656,75 @@ onUnmounted(() => {
                 <p>{{ sectorLabel(pick) }}</p>
               </div>
               <div class="score-pill">
-                <span>{{ t.score }}</span>
-                <strong>{{ pick.score }}</strong>
+                <span>{{ primaryScoreCaption(pick) }}</span>
+                <strong>{{ pick.overallAssessment?.totalScore ?? pick.score }}</strong>
               </div>
+            </div>
+            <div class="pick-toolbar">
+              <button class="ghost compact" type="button" @click="openStockDetail(pick, 'intraday')">
+                {{ strategyUi.openDetail }}
+              </button>
             </div>
 
             <div class="metric-row">
-              <span>{{ verdictLabel(pick.verdict) }}</span>
+              <span>{{ finalVerdictLabel(pick) }}</span>
               <span>{{ t.confidence }} {{ pick.confidence }}%</span>
               <span>{{ predictionScoreLabel('opportunity', pick) }}</span>
               <span>{{ predictionScoreLabel('setup', pick) }}</span>
               <span>{{ predictionScoreLabel('downside', pick) }}</span>
               <span>{{ predictionScoreLabel('pullback', pick) }}</span>
+              <span v-if="pick.trendAnalysis">{{ predictionScoreLabel('continuation', pick) }}</span>
+              <span v-if="pick.trendAnalysis">{{ predictionScoreLabel('reversal', pick) }}</span>
               <span v-if="pick.tPlan" class="t-score-chip" :class="pick.tPlan.suitability">{{ predictionScoreLabel('t', pick) }} · {{ tSuitabilityLabel(pick) }}</span>
+              <span v-if="pick.market === 'CN' || pick.fundFlow?.available" class="fund-flow-chip" :class="fundFlowTone(pick.fundFlow)">{{ fundFlowChipLabel(pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
+            </div>
+
+            <div class="integrated-report" :class="pick.overallAssessment?.suitability ?? pick.verdict">
+              <div class="integrated-report-heading">
+                <div>
+                  <strong>{{ t.finalReview }} · {{ reportSummaryTitle(pick) }}</strong>
+                  <p v-if="reportSummarySubtitle(pick)">{{ reportSummarySubtitle(pick) }}</p>
+                </div>
+                <span v-if="pick.overallAssessment">{{ pick.overallAssessment.totalScore }}/100</span>
+              </div>
+              <div class="report-metric-strip">
+                <div v-for="metric in reportMetricItems(pick)" :key="metric.key">
+                  <span>{{ metric.label }}</span>
+                  <b>{{ metric.value }}</b>
+                </div>
+              </div>
+              <div class="report-columns">
+                <div>
+                  <strong>{{ t.positiveReasons }}</strong>
+                  <ul>
+                    <li v-for="item in reportSupportItems(pick)" :key="item">{{ item }}</li>
+                  </ul>
+                </div>
+                <div>
+                  <strong>{{ t.negativeReasons }}</strong>
+                  <ul>
+                    <li v-for="item in reportRiskItems(pick)" :key="item">{{ item }}</li>
+                  </ul>
+                </div>
+                <div>
+                  <strong>{{ t.watchItems }}</strong>
+                  <ul>
+                    <li v-for="item in reportWatchItems(pick)" :key="item">{{ item }}</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="pick.market === 'CN' || pick.fundFlow?.available" class="research-panel fund-flow-panel" :class="fundFlowTone(pick.fundFlow)">
+              <strong>{{ factorLabel('fundFlow') }} · {{ pick.fundFlow?.available ? pointLabel(fundFlowDecisionPoint(pick.fundFlow, pick.currency)) : fundFlowUnavailableLabel(pick) }}</strong>
+              <div v-if="pick.fundFlow?.available" class="financial-grid fund-flow-grid">
+                <div v-for="metric in fundFlowRows(pick)" :key="metric.key">
+                  <span>{{ metric.label }}</span>
+                  <b>{{ metric.value }}</b>
+                  <small>{{ t.score }} {{ metric.score }} · {{ pick.fundFlow.source || 'Online' }}</small>
+                </div>
+              </div>
             </div>
 
             <div v-if="pick.holding && pick.holdingAnalysis" class="research-panel holding-panel" :class="pick.holdingAnalysis.action">
@@ -3006,8 +4782,26 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div class="reason-block">
-              <strong>{{ pick.decision ? pointLabel(pick.decision.summary) : t.reasonTitle }}</strong>
+            <div v-if="pick.trendAnalysis" class="research-panel trend-panel" :class="pick.trendAnalysis.regime">
+              <strong>{{ t.dailyTrend }} · {{ pointLabel(pick.trendAnalysis.summary) }}</strong>
+              <div class="financial-grid trend-grid">
+                <div v-for="metric in pick.trendAnalysis.metrics" :key="metric.key">
+                  <span>{{ trendMetricLabel(metric) }}</span>
+                  <b>{{ metric.value }}</b>
+                  <small>{{ t.score }} {{ Number(metric.score).toFixed(1) }}</small>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="pick.newsHeatAnalysis" class="research-panel heat-panel">
+              <strong>{{ t.newsHeat }} · {{ pointLabel(pick.newsHeatAnalysis.summary) }}</strong>
+              <div class="financial-grid heat-grid">
+                <div v-for="metric in pick.newsHeatAnalysis.metrics" :key="metric.key">
+                  <span>{{ newsHeatMetricLabel(metric) }}</span>
+                  <b>{{ metric.value }}</b>
+                  <small>{{ t.score }} {{ Number(metric.score).toFixed(1) }}</small>
+                </div>
+              </div>
             </div>
 
             <div v-if="pick.scoreBreakdown?.length" class="score-breakdown">
@@ -3016,49 +4810,6 @@ onUnmounted(() => {
                 <span>{{ factorLabel(item.factor) }}</span>
                 <b>{{ item.score }}</b>
                 <small>{{ t.weight }} {{ scoreWeightLabel(item) }} · {{ t.contribution }} {{ item.contribution }}</small>
-              </div>
-            </div>
-
-            <div class="reason-block">
-              <strong>{{ t.reasonTitle }}</strong>
-              <ul>
-                <li v-for="reason in reasonLabels(pick)" :key="reason">{{ reason }}</li>
-              </ul>
-            </div>
-
-            <div v-if="pick.decision" class="decision-grid">
-              <div>
-                <strong>{{ t.positiveReasons }}</strong>
-                <ul>
-                  <li v-for="item in pick.decision.positives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                </ul>
-              </div>
-              <div>
-                <strong>{{ t.negativeReasons }}</strong>
-                <ul>
-                  <li v-for="item in pick.decision.negatives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                </ul>
-              </div>
-              <div>
-                <strong>{{ t.watchItems }}</strong>
-                <ul>
-                  <li v-for="item in pick.decision.watchItems" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                </ul>
-              </div>
-            </div>
-
-            <div v-if="pick.actionPlan" class="research-panel action-panel">
-              <strong>{{ t.actionPlan }} · {{ pointLabel(pick.actionPlan.summary) }}</strong>
-              <div class="research-columns">
-                <ul>
-                  <li v-for="item in pick.actionPlan.steps" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                </ul>
-                <ul>
-                  <li v-for="item in pick.actionPlan.watchItems" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                </ul>
-                <ul>
-                  <li v-for="item in pick.actionPlan.riskControls" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                </ul>
               </div>
             </div>
 
@@ -3084,26 +4835,6 @@ onUnmounted(() => {
                   <span>{{ financialMetricLabel(metric) }}</span>
                   <b>{{ metric.value }}</b>
                   <small>{{ t.score }} {{ metric.score }}</small>
-                </div>
-              </div>
-              <div class="decision-grid compact">
-                <div>
-                  <strong>{{ t.positiveReasons }}</strong>
-                  <ul>
-                    <li v-for="item in pick.financialAnalysis.positives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                  </ul>
-                </div>
-                <div>
-                  <strong>{{ t.negativeReasons }}</strong>
-                  <ul>
-                    <li v-for="item in pick.financialAnalysis.negatives" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                  </ul>
-                </div>
-                <div>
-                  <strong>{{ t.watchItems }}</strong>
-                  <ul>
-                    <li v-for="item in pick.financialAnalysis.watchItems" :key="item.key + JSON.stringify(item.params)">{{ pointLabel(item) }}</li>
-                  </ul>
                 </div>
               </div>
             </div>
@@ -3196,6 +4927,98 @@ onUnmounted(() => {
         </div>
       </aside>
     </section>
+
+    <div v-if="detailPick" class="stock-detail-backdrop" role="dialog" aria-modal="true" :aria-label="strategyUi.stockDetail" @click.self="closeStockDetail">
+      <article class="stock-detail-panel">
+        <header class="stock-detail-header">
+          <div>
+            <span class="market-tag">{{ detailPick.market }}</span>
+            <h2>{{ detailPick.symbol }} · {{ detailPick.name }}</h2>
+            <p>{{ detailPick.currency }} {{ detailPick.price }} · {{ detailPick.change > 0 ? '+' : '' }}{{ detailPick.change }}%</p>
+          </div>
+          <button class="detail-close" type="button" :aria-label="strategyUi.closeDetail" @click="closeStockDetail">×</button>
+        </header>
+
+        <div class="chart-tabs" role="tablist">
+          <button type="button" :class="{ active: detailChartTab === 'intraday' }" @click="detailChartTab = 'intraday'">{{ strategyUi.intraday }}</button>
+          <button type="button" :class="{ active: detailChartTab === 'daily' }" @click="detailChartTab = 'daily'">{{ strategyUi.dailyK }}</button>
+        </div>
+
+        <div v-if="detailChartLoading" class="chart-state">{{ strategyUi.loadingChart }}</div>
+        <div v-else-if="detailChartError" class="chart-state error-state">
+          <strong>{{ strategyUi.chartUnavailable }}</strong>
+          <span>{{ detailChartError }}</span>
+        </div>
+        <div v-else-if="detailChart" class="chart-content">
+          <div class="chart-meta">
+            <span>{{ strategyUi.chartSource }} · {{ detailChart.source }}</span>
+            <span>{{ strategyUi.updated }} {{ new Date(detailChart.refreshedAt).toLocaleString() }}</span>
+            <strong>{{ chartChangeLabel(visibleChartPoints) }}</strong>
+          </div>
+
+          <div class="chart-shell">
+            <svg
+              ref="chartSvgRef"
+              viewBox="0 0 720 260"
+              role="img"
+              :aria-label="`${detailPick.symbol} ${detailChartTab}`"
+              @mousemove="updateChartPointer"
+              @mouseleave="clearChartPointer"
+              @touchstart.prevent="updateChartPointer"
+              @touchmove.prevent="updateChartPointer"
+            >
+              <line v-for="tick in [0, 1, 2, 3, 4]" :key="tick" x1="40" x2="680" :y1="40 + tick * 45" :y2="40 + tick * 45" class="chart-grid-line" />
+              <text x="682" y="44" class="chart-scale">{{ chartRange.max.toFixed(2) }}</text>
+              <text x="682" y="222" class="chart-scale">{{ chartRange.min.toFixed(2) }}</text>
+              <template v-if="detailChartTab === 'intraday'">
+                <path v-if="chartAreaPath" :d="chartAreaPath" class="chart-area" />
+                <path v-if="chartLinePath" :d="chartLinePath" class="chart-line" />
+              </template>
+              <template v-else>
+                <path v-if="chartMa20Path" :d="chartMa20Path" class="chart-ma ma20" />
+                <path v-if="chartMa10Path" :d="chartMa10Path" class="chart-ma ma10" />
+                <path v-if="chartMa5Path" :d="chartMa5Path" class="chart-ma ma5" />
+                <g v-for="candle in chartCandles" :key="`${candle.x}-${candle.yBody}`" class="chart-candle" :class="{ rising: candle.rising, falling: !candle.rising }">
+                  <line :x1="candle.x" :x2="candle.x" :y1="candle.yHigh" :y2="candle.yLow" />
+                  <rect :x="candle.x - candle.width / 2" :y="candle.yBody" :width="candle.width" :height="candle.bodyHeight" rx="1.5" />
+                </g>
+                <g v-for="(point, index) in visibleChartPoints" :key="`${point.time}-limit`">
+                  <circle
+                    v-if="point.isLimitUp"
+                    :cx="chartX(index, Math.max(1, visibleChartPoints.length - 1))"
+                    cy="28"
+                    r="4.5"
+                    class="limit-up-marker"
+                  />
+                </g>
+              </template>
+              <g v-if="activeChartPoint" class="chart-crosshair">
+                <line :x1="activeChartX" :x2="activeChartX" y1="28" y2="228" />
+                <line x1="40" x2="680" :y1="activeChartY" :y2="activeChartY" />
+                <circle :cx="activeChartX" :cy="activeChartY" r="4" />
+              </g>
+            </svg>
+            <div v-if="activeChartPoint" class="chart-tooltip" :style="chartTooltipStyle">
+              <strong>
+                {{ chartPointTimeLabel(activeChartPoint.point) }}
+                <template v-if="activeChartPoint.point.isLimitUp"> · {{ strategyUi.limitUp }}</template>
+              </strong>
+              <div>
+                <span v-for="row in chartTooltipRows(activeChartPoint.point)" :key="row[0]">
+                  <b>{{ row[0] }}</b>
+                  <em>{{ row[1] }}</em>
+                </span>
+              </div>
+            </div>
+            <div class="chart-axis">
+              <span>{{ chartTickLabel(visibleChartPoints[0]) }}</span>
+              <span>{{ chartTickLabel(visibleChartPoints[Math.floor(visibleChartPoints.length / 2)]) }}</span>
+              <span>{{ chartTickLabel(visibleChartPoints[visibleChartPoints.length - 1]) }}</span>
+            </div>
+          </div>
+        </div>
+      </article>
+    </div>
 
     <div v-if="yogurtSecretOpen" class="yogurt-secret-backdrop" role="dialog" aria-modal="true" aria-labelledby="yogurt-secret-title" @click.self="closeYogurtSecret">
       <article class="yogurt-secret-card">

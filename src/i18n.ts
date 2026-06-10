@@ -71,7 +71,10 @@ type MessageKey =
   | 'negativeReasons'
   | 'watchItems'
   | 'actionPlan'
+  | 'finalReview'
   | 'newsEvents'
+  | 'newsHeat'
+  | 'dailyTrend'
   | 'financialReview'
   | 'riskControls'
   | 'weight'
@@ -154,10 +157,13 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     reasonTitle: 'Decision factors',
     scoreDetail: '100-point score detail',
     positiveReasons: 'Supports investment',
-    negativeReasons: 'Exit / risk reasons',
+    negativeReasons: 'Risk / exit reasons',
     watchItems: 'What to watch',
     actionPlan: 'Suggested action',
+    finalReview: 'Final total review',
     newsEvents: 'News event analysis',
+    newsHeat: 'News heat',
+    dailyTrend: 'Daily trend check',
     financialReview: 'Financial report check',
     riskControls: 'Risk controls',
     weight: 'Weight',
@@ -239,10 +245,13 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     reasonTitle: '判断依据',
     scoreDetail: '100 分评分明细',
     positiveReasons: '支持投资的理由',
-    negativeReasons: '需要抛售/风险理由',
+    negativeReasons: '风险/减仓理由',
     watchItems: '重点观察什么',
     actionPlan: '建议操作',
+    finalReview: '最终总评',
     newsEvents: '新闻事件解析',
+    newsHeat: '新闻热度',
+    dailyTrend: '日线趋势检查',
     financialReview: '财报/基本面检查',
     riskControls: '风险控制',
     weight: '权重',
@@ -324,10 +333,13 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     reasonTitle: '判斷依據',
     scoreDetail: '100 分評分明細',
     positiveReasons: '支持投資的理由',
-    negativeReasons: '需要拋出/風險理由',
+    negativeReasons: '風險/減倉理由',
     watchItems: '重點觀察什麼',
     actionPlan: '建議操作',
+    finalReview: '最終總評',
     newsEvents: '新聞事件解析',
+    newsHeat: '新聞熱度',
+    dailyTrend: '日線趨勢檢查',
     financialReview: '財報/基本面檢查',
     riskControls: '風險控制',
     weight: '權重',
@@ -412,7 +424,10 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     negativeReasons: '退出 / 風險理由',
     watchItems: '愛觀察啥物',
     actionPlan: '建議做法',
+    finalReview: '最後總評',
     newsEvents: '新聞事件解析',
+    newsHeat: '新聞熱度',
+    dailyTrend: '日線趨勢檢查',
     financialReview: '財報 / 基本面檢查',
     riskControls: '風險控制',
     weight: '權重',
@@ -497,7 +512,10 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     negativeReasons: '売却 / リスク理由',
     watchItems: '注視ポイント',
     actionPlan: '提案アクション',
+    finalReview: '最終総合評価',
     newsEvents: 'ニュースイベント分析',
+    newsHeat: 'ニュース注目度',
+    dailyTrend: '日足トレンド確認',
     financialReview: '決算 / ファンダメンタル確認',
     riskControls: 'リスク管理',
     weight: '重み',
@@ -582,7 +600,10 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     negativeReasons: '매도 / 리스크 이유',
     watchItems: '관찰할 항목',
     actionPlan: '제안 행동',
+    finalReview: '최종 종합 평가',
     newsEvents: '뉴스 이벤트 분석',
+    newsHeat: '뉴스 관심도',
+    dailyTrend: '일봉 추세 점검',
     financialReview: '실적 / 펀더멘털 점검',
     riskControls: '리스크 관리',
     weight: '가중치',
@@ -611,6 +632,38 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     defensive: {
       name: 'Defensive Value',
       description: 'Favors lower drawdown, stronger cash flow, cheaper valuation, and stable signal quality.'
+    },
+    ai_smart_blend: {
+      name: 'AI Smart Blend',
+      description: 'Blends refreshed online strategies across buy-today quality, future rise, profitable exit, news heat, trend, and risk.'
+    },
+    today_breakout_volume: {
+      name: 'Today Breakout + Volume',
+      description: 'Focuses on whether the current price break has volume and enough same-day entry quality.'
+    },
+    next_session_continuation: {
+      name: 'Next-Session Continuation',
+      description: 'Prioritizes whether today\'s edge can continue tomorrow without immediate reversal risk.'
+    },
+    profitable_exit_t_trade: {
+      name: 'Profitable Exit / T Trade',
+      description: 'Optimizes for tradable range, liquidity, and whether a later high-sell window is realistic.'
+    },
+    news_heat_catalyst: {
+      name: 'News Heat Catalyst',
+      description: 'Looks for strong, fresh, broad news attention that still aligns with trend and exit quality.'
+    },
+    pullback_to_rising_average: {
+      name: 'Pullback to Rising Average',
+      description: 'Prefers controlled pullbacks near rising moving averages instead of chasing extended candles.'
+    },
+    rsi_macd_reversal: {
+      name: 'RSI + MACD Reversal',
+      description: 'Waits for RSI exhaustion to align with MACD confirmation before treating a turn as buyable.'
+    },
+    defensive_quality_value: {
+      name: 'Defensive Quality + Value',
+      description: 'Uses online technical confirmation only after valuation, quality, and risk are acceptable.'
     }
   },
   'zh-CN': {
@@ -625,6 +678,38 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     defensive: {
       name: '防守价值',
       description: '偏重低回撤、现金流、便宜估值和稳定信号质量。'
+    },
+    ai_smart_blend: {
+      name: 'AI 智慧综合策略',
+      description: '融合刷新后的网上策略，综合今日买入、未来上涨、盈利卖出、新闻热度、趋势和风险。'
+    },
+    today_breakout_volume: {
+      name: '今日突破 + 量能',
+      description: '重点判断当前突破是否有量能，以及当天是否具备足够买入质量。'
+    },
+    next_session_continuation: {
+      name: '次日延续策略',
+      description: '优先判断今天的优势明天能否延续，并避开隔日反转风险。'
+    },
+    profitable_exit_t_trade: {
+      name: '盈利卖出 / 做T',
+      description: '偏重可交易区间、流动性，以及之后能否出现高抛盈利窗口。'
+    },
+    news_heat_catalyst: {
+      name: '新闻热度催化',
+      description: '寻找新鲜、广泛、正向的新闻关注，同时要求趋势和退出质量配合。'
+    },
+    pullback_to_rising_average: {
+      name: '上升均线回踩',
+      description: '偏好靠近上升均线的可控回踩，而不是追逐过度拉升。'
+    },
+    rsi_macd_reversal: {
+      name: 'RSI + MACD 反转',
+      description: '等待 RSI 位置与 MACD 确认同时出现，再把拐点视作可买。'
+    },
+    defensive_quality_value: {
+      name: '防守质量 + 价值',
+      description: '估值、质量和风险先过关，再使用网上技术策略确认。'
     }
   },
   'zh-TW': {
@@ -639,6 +724,38 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     defensive: {
       name: '防守價值',
       description: '偏重低回撤、現金流、便宜估值和穩定訊號品質。'
+    },
+    ai_smart_blend: {
+      name: 'AI 智慧綜合策略',
+      description: '融合刷新後的網上策略，綜合今日買入、未來上漲、盈利賣出、新聞熱度、趨勢和風險。'
+    },
+    today_breakout_volume: {
+      name: '今日突破 + 量能',
+      description: '重點判斷當前突破是否有量能，以及當天是否具備足夠買入品質。'
+    },
+    next_session_continuation: {
+      name: '隔日延續策略',
+      description: '優先判斷今天的優勢明天能否延續，並避開隔日反轉風險。'
+    },
+    profitable_exit_t_trade: {
+      name: '盈利賣出 / 做T',
+      description: '偏重可交易區間、流動性，以及之後能否出現高拋盈利窗口。'
+    },
+    news_heat_catalyst: {
+      name: '新聞熱度催化',
+      description: '尋找新鮮、廣泛、正向的新聞關注，同時要求趨勢和退出品質配合。'
+    },
+    pullback_to_rising_average: {
+      name: '上升均線回踩',
+      description: '偏好靠近上升均線的可控回踩，而不是追逐過度拉升。'
+    },
+    rsi_macd_reversal: {
+      name: 'RSI + MACD 反轉',
+      description: '等待 RSI 位置與 MACD 確認同時出現，再把拐點視作可買。'
+    },
+    defensive_quality_value: {
+      name: '防守品質 + 價值',
+      description: '估值、品質和風險先過關，再使用網上技術策略確認。'
     }
   },
   'nan-TW': {
@@ -653,6 +770,38 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     defensive: {
       name: '防守價值',
       description: '較看重低回撤、現金流、便宜估值佮穩定訊號品質。'
+    },
+    ai_smart_blend: {
+      name: 'AI 智慧綜合策略',
+      description: '融合刷新後的網路策略，綜合今仔日買、後勢上漲、趁錢賣出、新聞熱度、趨勢佮風險。'
+    },
+    today_breakout_volume: {
+      name: '今仔日突破 + 量能',
+      description: '重點看這馬突破敢有量，佮今仔日敢有買入品質。'
+    },
+    next_session_continuation: {
+      name: '隔日延續策略',
+      description: '優先看今仔日的優勢明仔載敢會延續，避開隔日反轉風險。'
+    },
+    profitable_exit_t_trade: {
+      name: '盈利賣出 / 做T',
+      description: '偏重可交易區間、流動性，佮後擺敢有高賣趁錢窗口。'
+    },
+    news_heat_catalyst: {
+      name: '新聞熱度催化',
+      description: '揣新鮮、廣泛、正向的新聞關注，也愛趨勢佮賣出品質配合。'
+    },
+    pullback_to_rising_average: {
+      name: '上升均線回踩',
+      description: '較愛靠近上升均線的可控回踩，毋追過熱長紅。'
+    },
+    rsi_macd_reversal: {
+      name: 'RSI + MACD 反轉',
+      description: '等 RSI 位置佮 MACD 確認攏出現，才共拐點當作會買。'
+    },
+    defensive_quality_value: {
+      name: '防守品質 + 價值',
+      description: '估值、品質佮風險先過關，才用網路技術策略確認。'
     }
   },
   ja: {
@@ -667,6 +816,38 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     defensive: {
       name: 'ディフェンシブ・バリュー',
       description: '低いドローダウン、強いキャッシュフロー、割安な評価、安定したシグナルを重視します。'
+    },
+    ai_smart_blend: {
+      name: 'AI スマート統合',
+      description: '更新されたオンライン戦略を、当日買い、将来上昇、利益確定、ニュース熱量、トレンド、リスクで統合します。'
+    },
+    today_breakout_volume: {
+      name: '本日ブレイク + 出来高',
+      description: '現在のブレイクに出来高が伴い、当日エントリー品質が十分かを重視します。'
+    },
+    next_session_continuation: {
+      name: '翌日継続戦略',
+      description: '本日の優位性が翌日に続くか、直近反転リスクが低いかを優先します。'
+    },
+    profitable_exit_t_trade: {
+      name: '利益確定 / T取引',
+      description: '取引可能レンジ、流動性、後日の高値売却機会を重視します。'
+    },
+    news_heat_catalyst: {
+      name: 'ニュース熱量カタリスト',
+      description: '新しく広いニュース注目がトレンドと出口品質に合うかを見ます。'
+    },
+    pullback_to_rising_average: {
+      name: '上昇移動平均への押し目',
+      description: '過度な追い上げより、上昇移動平均近くの制御された押し目を好みます。'
+    },
+    rsi_macd_reversal: {
+      name: 'RSI + MACD 反転',
+      description: 'RSI の過熱/売られ過ぎと MACD 確認が揃ってから買い転換と見ます。'
+    },
+    defensive_quality_value: {
+      name: '防御品質 + バリュー',
+      description: 'バリュエーション、品質、リスクが許容範囲に入った後で技術確認を使います。'
     }
   },
   ko: {
@@ -681,6 +862,38 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     defensive: {
       name: '방어적 가치',
       description: '낮은 낙폭, 강한 현금흐름, 저렴한 밸류에이션, 안정적인 시그널을 중시합니다.'
+    },
+    ai_smart_blend: {
+      name: 'AI 스마트 종합 전략',
+      description: '새로 수집한 온라인 전략을 오늘 매수, 향후 상승, 수익 매도, 뉴스 열기, 추세, 리스크로 통합합니다.'
+    },
+    today_breakout_volume: {
+      name: '오늘 돌파 + 거래량',
+      description: '현재 돌파에 거래량이 붙었는지, 당일 진입 품질이 충분한지를 중시합니다.'
+    },
+    next_session_continuation: {
+      name: '다음 세션 지속 전략',
+      description: '오늘의 우위가 내일까지 이어질 수 있는지와 즉시 반전 리스크를 우선 평가합니다.'
+    },
+    profitable_exit_t_trade: {
+      name: '수익 매도 / T 매매',
+      description: '거래 가능한 범위, 유동성, 이후 고점 매도 가능성을 중시합니다.'
+    },
+    news_heat_catalyst: {
+      name: '뉴스 열기 촉매',
+      description: '신선하고 넓은 뉴스 관심이 추세와 매도 품질에 부합하는지 봅니다.'
+    },
+    pullback_to_rising_average: {
+      name: '상승 이동평균 눌림목',
+      description: '과열 추격보다 상승 이동평균 부근의 통제된 눌림목을 선호합니다.'
+    },
+    rsi_macd_reversal: {
+      name: 'RSI + MACD 반전',
+      description: 'RSI 위치와 MACD 확인이 함께 나올 때 반전을 매수 가능 신호로 봅니다.'
+    },
+    defensive_quality_value: {
+      name: '방어적 품질 + 가치',
+      description: '밸류에이션, 품질, 리스크가 먼저 적정해야 온라인 기술 전략을 확인에 사용합니다.'
     }
   }
 };

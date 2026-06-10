@@ -10,12 +10,36 @@ export interface StrategyWeights {
   quality: number;
 }
 
+export type DetailedStrategyWeights = Record<string, number>;
+
 export interface Strategy {
   id: string;
   name: string;
   description: string;
   weights: StrategyWeights;
   riskTolerance: number;
+  sourceStrategyIds?: string[];
+  detailedWeights?: DetailedStrategyWeights;
+}
+
+export interface StrategySource {
+  id: string;
+  title: string;
+  url: string;
+  families?: string[];
+  keywords?: string[];
+  available?: boolean | null;
+  matchedKeywords?: string[];
+  error?: string;
+}
+
+export interface StrategyLibrary {
+  refreshedAt: string;
+  sources: StrategySource[];
+  strategies: Strategy[];
+  runtimeStrategies?: Strategy[];
+  detailedWeightKeys: string[];
+  detailedWeightLabels: Record<string, string>;
 }
 
 export interface MarketOption {
@@ -45,6 +69,8 @@ export interface ReasonCode {
     | 'overheatedPriceAction'
     | 'pullbackRisk'
     | 'breakoutSetup'
+    | 'nextSessionSupport'
+    | 'nextSessionRisk'
     | 'clearsBuyThreshold'
     | 'notHighConviction'
     | 'rankedTopOpportunity';
@@ -86,6 +112,53 @@ export interface DecisionPoint {
     | 'qualitySupport'
     | 'weakQuality'
     | 'watchNewsFlow'
+    | 'fundFlowSupport'
+    | 'fundFlowPressure'
+    | 'fundFlowWatch'
+    | 'newsHeatHotPositiveSummary'
+    | 'newsHeatHotNegativeSummary'
+    | 'newsHeatHotMixedSummary'
+    | 'newsHeatColdSummary'
+    | 'newsHeatSupport'
+    | 'newsHeatRisk'
+    | 'newsHeatWatch'
+    | 'newsHeatFresh'
+    | 'newsHeatStale'
+    | 'overallStrongBuySummary'
+    | 'overallBuySummary'
+    | 'overallWatchSummary'
+    | 'overallAvoidSummary'
+    | 'overallSellSummary'
+    | 'overallTodayBuySupport'
+    | 'overallTodayBuyWeak'
+    | 'overallTodayBuyWatch'
+    | 'overallFutureRiseSupport'
+    | 'overallFutureRiseWeak'
+    | 'overallFutureRiseWatch'
+    | 'overallProfitableExitSupport'
+    | 'overallProfitableExitWeak'
+    | 'overallProfitableExitWatch'
+    | 'overallNewsHeatSupport'
+    | 'overallNewsHeatRisk'
+    | 'overallNewsHeatWatch'
+    | 'overallRiskTooHigh'
+    | 'trendBullishSummary'
+    | 'trendConstructiveSummary'
+    | 'trendNeutralSummary'
+    | 'trendRiskSummary'
+    | 'trendContinuationSupport'
+    | 'trendContinuationWeak'
+    | 'trendContinuationWatch'
+    | 'trendStructureSupport'
+    | 'trendStructureWeak'
+    | 'trendRsiHealthy'
+    | 'trendOverextended'
+    | 'trendMacdSupport'
+    | 'trendMacdPressure'
+    | 'trendVolumeConfirm'
+    | 'trendVolumeDivergence'
+    | 'trendNearResistance'
+    | 'trendNearSupport'
     | 'newsBullishSummary'
     | 'newsBearishSummary'
     | 'newsMixedSummary'
@@ -189,11 +262,83 @@ export interface FinancialAnalysis {
   watchItems: DecisionPoint[];
 }
 
+export interface NewsHeatAnalysis {
+  summary: DecisionPoint;
+  heatScore: number;
+  impactScore: number;
+  freshnessScore: number;
+  sourceCount: number;
+  eventIntensityScore: number;
+  metrics: FinancialMetric[];
+  positives: DecisionPoint[];
+  negatives: DecisionPoint[];
+  watchItems: DecisionPoint[];
+}
+
+export type TrendRegime = 'bullish' | 'constructive' | 'neutral' | 'fragile' | 'bearish' | 'overheated' | 'insufficient';
+
+export interface TrendAnalysis {
+  summary: DecisionPoint;
+  regime: TrendRegime;
+  continuationScore: number;
+  reversalRiskScore: number;
+  metrics: FinancialMetric[];
+  positives: DecisionPoint[];
+  negatives: DecisionPoint[];
+  watchItems: DecisionPoint[];
+  profile?: Record<string, string | number | null | boolean>;
+}
+
 export interface ActionPlan {
   summary: DecisionPoint;
   steps: DecisionPoint[];
   watchItems: DecisionPoint[];
   riskControls: DecisionPoint[];
+}
+
+export type OverallSuitability = 'strongBuy' | 'buy' | 'watch' | 'avoid' | 'sell';
+
+export interface OverallAssessment {
+  summary: DecisionPoint;
+  suitability: OverallSuitability;
+  totalScore: number;
+  components: {
+    todayBuyScore: number;
+    futureRiseScore: number;
+    profitableExitScore: number;
+    newsHeatImpactScore: number;
+  };
+  componentWeights?: Record<string, number>;
+  metrics: FinancialMetric[];
+  positives: DecisionPoint[];
+  negatives: DecisionPoint[];
+  watchItems: DecisionPoint[];
+}
+
+export interface StockChartPoint {
+  time: string;
+  open?: number | null;
+  high?: number | null;
+  low?: number | null;
+  close: number;
+  volume?: number | null;
+  ma5?: number | null;
+  ma10?: number | null;
+  ma20?: number | null;
+  limitUpPrice?: number | null;
+  isLimitUp?: boolean;
+}
+
+export interface StockChartResponse {
+  symbol: string;
+  name: string;
+  currency: string;
+  exchangeTimezoneName?: string;
+  regularMarketPrice?: number | null;
+  source: string;
+  refreshedAt: string;
+  intraday: StockChartPoint[];
+  daily: StockChartPoint[];
 }
 
 export type HoldingAction = 'add' | 'hold' | 'reduce' | 'exit';
@@ -274,6 +419,24 @@ export interface TTradePlan {
   riskControls: DecisionPoint[];
 }
 
+export interface FundFlowProfile {
+  available: boolean;
+  source?: string;
+  score: number;
+  positiveScore: number;
+  negativeScore: number;
+  mainNet?: number | null;
+  mainRatio?: number | null;
+  superLargeNet?: number | null;
+  superLargeRatio?: number | null;
+  largeNet?: number | null;
+  largeRatio?: number | null;
+  mediumNet?: number | null;
+  mediumRatio?: number | null;
+  smallNet?: number | null;
+  smallRatio?: number | null;
+}
+
 export interface Pick {
   symbol: string;
   name: string;
@@ -287,13 +450,23 @@ export interface Pick {
   downsideRiskScore?: number;
   breakoutSetupScore?: number;
   pullbackRiskScore?: number;
+  nextSessionContinuationScore?: number;
+  nextSessionReversalRiskScore?: number;
   tScore?: number;
   tPlan?: TTradePlan;
+  fundFlow?: FundFlowProfile | null;
   prediction?: {
     opportunityScore: number;
     downsideRiskScore: number;
     breakoutSetupScore?: number;
     pullbackRiskScore?: number;
+    nextSessionContinuationScore?: number;
+    nextSessionReversalRiskScore?: number;
+    overallScore?: number;
+    todayBuyScore?: number;
+    futureRiseScore?: number;
+    profitableExitScore?: number;
+    newsHeatImpactScore?: number;
     tScore?: number;
     edge: number;
   };
@@ -306,6 +479,9 @@ export interface Pick {
   scoreBreakdown?: ScoreComponent[];
   decision?: DecisionDetails;
   newsAnalysis?: NewsAnalysis;
+  newsHeatAnalysis?: NewsHeatAnalysis;
+  trendAnalysis?: TrendAnalysis;
+  overallAssessment?: OverallAssessment;
   financialAnalysis?: FinancialAnalysis;
   actionPlan?: ActionPlan;
   holding?: HoldingPosition;
@@ -364,6 +540,7 @@ export interface AnalysisResponse {
 export interface AppConfig {
   markets: MarketOption[];
   strategies: Strategy[];
+  strategyLibrary?: StrategyLibrary;
   defaultSymbols: Record<Market, string[]>;
   scanUniverseSize: Record<Market, number | string>;
 }
@@ -413,6 +590,212 @@ function hasContentType(response: Response, expected: string) {
   return response.headers.get('content-type')?.toLowerCase().includes(expected) ?? false;
 }
 
+const fallbackStrategyLibrary: StrategyLibrary = {
+  refreshedAt: new Date().toISOString(),
+  sources: [
+    {
+      id: 'fidelity-indicator-guide',
+      title: 'Fidelity Technical Indicator Guide',
+      url: 'https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/overview',
+      families: ['trend', 'momentum', 'volume', 'supportResistance', 'risk'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'fidelity-rsi',
+      title: 'Fidelity RSI guide',
+      url: 'https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/RSI',
+      families: ['rsi', 'momentum', 'reversal'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'fidelity-macd',
+      title: 'Fidelity MACD guide',
+      url: 'https://www.fidelity.com/viewpoints/active-investor/how-to-use-macd',
+      families: ['macd', 'momentum', 'trend'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'schwab-momentum-strength',
+      title: 'Schwab momentum strength indicators',
+      url: 'https://www.schwab.com/learn/story/3-strength-indicators-assessing-stock-momentum',
+      families: ['momentum', 'trend', 'rsi', 'macd'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'schwab-moving-averages',
+      title: 'Schwab moving averages',
+      url: 'https://www.schwab.com/learn/story/simple-vs-exponential-moving-averages',
+      families: ['ma', 'trend', 'supportResistance'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'schwab-vwap-volume',
+      title: 'Schwab VWAP and volume-weighted indicators',
+      url: 'https://www.schwab.com/learn/story/how-to-use-volume-weighted-indicators-trading',
+      families: ['volume', 'intraday', 'exit'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'schwab-bollinger-bands',
+      title: 'Schwab Bollinger Bands',
+      url: 'https://www.schwab.com/learn/story/bollinger-bands-what-they-are-and-how-to-use-them',
+      families: ['volatility', 'meanReversion', 'entryExit'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'investopedia-moving-average',
+      title: 'Investopedia moving averages',
+      url: 'https://www.investopedia.com/articles/active-trading/052014/how-use-moving-average-buy-stocks.asp',
+      families: ['ma', 'trend', 'supportResistance'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'investopedia-golden-cross',
+      title: 'Investopedia golden cross',
+      url: 'https://www.investopedia.com/terms/g/goldencross.asp',
+      families: ['ma', 'breakout', 'trend'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'investopedia-macd',
+      title: 'Investopedia MACD strategies',
+      url: 'https://www.investopedia.com/articles/forex/05/macddiverge.asp',
+      families: ['macd', 'momentum', 'divergence'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'investopedia-rsi-signals',
+      title: 'Investopedia RSI buy and sell signals',
+      url: 'https://www.investopedia.com/articles/active-trading/042114/overbought-or-oversold-use-relative-strength-index-find-out.asp',
+      families: ['rsi', 'meanReversion', 'macd'],
+      available: null,
+      matchedKeywords: []
+    },
+    {
+      id: 'fidelity-trading-central-methodology',
+      title: 'Trading Central technical views on Fidelity',
+      url: 'https://research2.fidelity.com/fidelity/research/reports/release2/Research/TradingCentral.asp',
+      families: ['intraday', 'shortTerm', 'mediumTerm', 'supportResistance'],
+      available: null,
+      matchedKeywords: []
+    }
+  ],
+  detailedWeightKeys: [
+    'todayBuy',
+    'futureRise',
+    'profitableExit',
+    'newsHeat',
+    'trendContinuation',
+    'maStructure',
+    'momentum',
+    'volumeConfirmation',
+    'rsiHealth',
+    'macdConfirmation',
+    'supportResistance',
+    'fundFlow',
+    'valuation',
+    'quality',
+    'riskControl',
+    'tTrade'
+  ],
+  detailedWeightLabels: {
+    todayBuy: 'Worth buying today',
+    futureRise: 'Future rise potential',
+    profitableExit: 'Profitable exit later',
+    newsHeat: 'News heat',
+    trendContinuation: 'Trend continuation',
+    maStructure: 'Moving-average structure',
+    momentum: 'Momentum',
+    volumeConfirmation: 'Volume confirmation',
+    rsiHealth: 'RSI health',
+    macdConfirmation: 'MACD confirmation',
+    supportResistance: 'Support / resistance',
+    fundFlow: 'Fund flow',
+    valuation: 'Valuation',
+    quality: 'Fundamental quality',
+    riskControl: 'Risk control',
+    tTrade: 'T / exit tradability'
+  },
+  strategies: [
+    {
+      id: 'ai_smart_blend',
+      name: 'AI Smart Blend',
+      description: 'Auto-blends the refreshed online strategy library across buy-today quality, future rise, profitable exit, news heat, trend, and risk.',
+      weights: { momentum: 34, value: 6, sentiment: 14, risk: 10, quality: 6 },
+      riskTolerance: 55,
+      sourceStrategyIds: [
+        'fidelity-indicator-guide',
+        'fidelity-rsi',
+        'fidelity-macd',
+        'schwab-momentum-strength',
+        'schwab-moving-averages',
+        'schwab-vwap-volume',
+        'schwab-bollinger-bands',
+        'investopedia-moving-average',
+        'investopedia-golden-cross',
+        'investopedia-macd',
+        'investopedia-rsi-signals',
+        'fidelity-trading-central-methodology'
+      ],
+      detailedWeights: {
+        todayBuy: 10.5,
+        futureRise: 11.4,
+        profitableExit: 8.8,
+        newsHeat: 7,
+        trendContinuation: 8.8,
+        maStructure: 6.1,
+        momentum: 7,
+        volumeConfirmation: 6.1,
+        rsiHealth: 4.4,
+        macdConfirmation: 5.3,
+        supportResistance: 4.4,
+        fundFlow: 3.5,
+        valuation: 2.6,
+        quality: 3.5,
+        riskControl: 6.1,
+        tTrade: 4.4
+      }
+    },
+    {
+      id: 'today_breakout_volume',
+      name: 'Today Breakout + Volume',
+      description: 'Focuses on whether the current price break has volume and enough same-day entry quality.',
+      weights: { momentum: 32, value: 5, sentiment: 14, risk: 9, quality: 3 },
+      riskTolerance: 55,
+      sourceStrategyIds: ['investopedia-golden-cross', 'schwab-vwap-volume', 'fidelity-indicator-guide'],
+      detailedWeights: { todayBuy: 14.1, futureRise: 7.8, profitableExit: 6.3, newsHeat: 4.7, trendContinuation: 6.3, maStructure: 5.5, momentum: 7.8, volumeConfirmation: 12.5, rsiHealth: 2.3, macdConfirmation: 3.9, supportResistance: 7, fundFlow: 3.9, valuation: 1.6, quality: 1.6, riskControl: 4.7, tTrade: 3.9 }
+    },
+    {
+      id: 'next_session_continuation',
+      name: 'Next-Session Continuation',
+      description: 'Prioritizes whether today\'s edge can continue tomorrow without immediate reversal risk.',
+      weights: { momentum: 42, value: 4, sentiment: 9, risk: 9, quality: 4 },
+      riskTolerance: 55,
+      sourceStrategyIds: ['schwab-momentum-strength', 'fidelity-macd', 'fidelity-rsi'],
+      detailedWeights: { todayBuy: 5.8, futureRise: 14.5, profitableExit: 8, newsHeat: 4.3, trendContinuation: 12.3, maStructure: 7.2, momentum: 8.7, volumeConfirmation: 5.1, rsiHealth: 5.8, macdConfirmation: 7.2, supportResistance: 3.6, fundFlow: 2.9, valuation: 1.4, quality: 2.9, riskControl: 5.8, tTrade: 2.9 }
+    },
+    {
+      id: 'news_heat_catalyst',
+      name: 'News Heat Catalyst',
+      description: 'Looks for strong, fresh, broad news attention that still aligns with trend and exit quality.',
+      weights: { momentum: 31, value: 4, sentiment: 25, risk: 7, quality: 3 },
+      riskTolerance: 55,
+      sourceStrategyIds: ['fidelity-indicator-guide', 'schwab-momentum-strength'],
+      detailedWeights: { todayBuy: 7.8, futureRise: 9.4, profitableExit: 5.5, newsHeat: 17.2, trendContinuation: 6.3, maStructure: 3.9, momentum: 6.3, volumeConfirmation: 5.5, rsiHealth: 3.1, macdConfirmation: 3.9, supportResistance: 3.1, fundFlow: 6.3, valuation: 1.6, quality: 2.3, riskControl: 5.5, tTrade: 3.1 }
+    }
+  ]
+};
+
 const fallbackConfig: AppConfig = {
   markets: [
     { id: 'CN', label: 'China A-shares', currency: 'CNY' },
@@ -423,29 +806,8 @@ const fallbackConfig: AppConfig = {
     { id: 'US', label: 'United States', currency: 'USD' },
     { id: 'TW', label: 'Taiwan', currency: 'TWD' }
   ],
-  strategies: [
-    {
-      id: 'balanced',
-      name: 'Balanced AI Core',
-      description: 'News-led strategy balancing market sentiment with trend, valuation, risk, and quality.',
-      weights: { momentum: 20, value: 15, sentiment: 40, risk: 10, quality: 15 },
-      riskTolerance: 55
-    },
-    {
-      id: 'growth',
-      name: 'Growth Momentum',
-      description: 'Favors accelerating revenue narratives, price momentum, and positive institutional coverage.',
-      weights: { momentum: 30, value: 8, sentiment: 38, risk: 8, quality: 16 },
-      riskTolerance: 68
-    },
-    {
-      id: 'defensive',
-      name: 'Defensive Value',
-      description: 'Favors lower drawdown, strong cash flow, cheaper valuation, and stable signal quality.',
-      weights: { momentum: 10, value: 24, sentiment: 30, risk: 22, quality: 14 },
-      riskTolerance: 38
-    }
-  ],
+  strategies: fallbackStrategyLibrary.strategies,
+  strategyLibrary: fallbackStrategyLibrary,
   defaultSymbols: {
     US: ['AAPL', 'MSFT', 'NVDA'],
     CN: ['600519.SS', '300750.SZ'],
@@ -476,7 +838,7 @@ function fallbackStrategy(payload: { strategyId?: string; customWeights?: Strate
       riskTolerance: 55
     };
   }
-  return fallbackConfig.strategies.find((strategy) => strategy.id === payload.strategyId) ?? fallbackConfig.strategies[0];
+  return fallbackConfig.strategies.find((strategy) => strategy.id === payload.strategyId) ?? fallbackConfig.strategies.find((strategy) => strategy.id === 'ai_smart_blend') ?? fallbackConfig.strategies[0];
 }
 
 function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; customWeights?: StrategyWeights }): AnalysisResponse {
@@ -929,10 +1291,100 @@ export async function fetchConfig(): Promise<AppConfig> {
     if (!response.ok) throw new Error('Failed to load config');
     if (!hasContentType(response, 'application/json')) throw new Error('Static preview fallback');
     return response.json();
-  } catch {
-    usingStaticFallback = true;
-    return fallbackConfig;
+  } catch (cause) {
+    if (staticDemoBuild) {
+      usingStaticFallback = true;
+      return fallbackConfig;
+    }
+    throw cause;
   }
+}
+
+export async function refreshStrategyLibrary(): Promise<StrategyLibrary> {
+  if (staticDemoBuild || usingStaticFallback) {
+    return { ...fallbackStrategyLibrary, refreshedAt: new Date().toISOString(), runtimeStrategies: fallbackConfig.strategies };
+  }
+  try {
+    const response = await fetch('/api/strategies/refresh');
+    if (!response.ok) throw new Error('Failed to refresh strategy library');
+    if (!hasContentType(response, 'application/json')) throw new Error('Static preview fallback');
+    return response.json();
+  } catch (cause) {
+    if (staticDemoBuild) {
+      usingStaticFallback = true;
+      return { ...fallbackStrategyLibrary, refreshedAt: new Date().toISOString(), runtimeStrategies: fallbackConfig.strategies };
+    }
+    throw cause;
+  }
+}
+
+function fallbackStockChart(symbol: string): StockChartResponse {
+  const normalized = symbol.toUpperCase();
+  const now = Date.now();
+  const base = normalized.includes('2330') ? 865 : normalized.includes('NVDA') ? 122 : 100;
+  const intraday: StockChartPoint[] = Array.from({ length: 42 }, (_, index) => {
+    const wave = Math.sin(index / 4) * 1.2 + index * 0.08;
+    const close = Number((base + wave).toFixed(2));
+    return {
+      time: new Date(now - (41 - index) * 5 * 60 * 1000).toISOString(),
+      open: Number((close - 0.2).toFixed(2)),
+      high: Number((close + 0.8).toFixed(2)),
+      low: Number((close - 0.9).toFixed(2)),
+      close,
+      volume: 120000 + index * 2600
+    };
+  });
+  const daily: StockChartPoint[] = Array.from({ length: 90 }, (_, index) => {
+    const trend = index * 0.22;
+    const wave = Math.sin(index / 6) * 4.5;
+    const close = Number((base * 0.86 + trend + wave).toFixed(2));
+    return {
+      time: new Date(now - (89 - index) * 24 * 60 * 60 * 1000).toISOString(),
+      open: Number((close - 1.1).toFixed(2)),
+      high: Number((close + 2.6).toFixed(2)),
+      low: Number((close - 2.3).toFixed(2)),
+      close,
+      volume: 420000 + index * 3800
+    };
+  });
+  daily.forEach((point, index) => {
+    const average = (windowSize: number) => {
+      if (index + 1 < windowSize) return null;
+      const values = daily.slice(index + 1 - windowSize, index + 1).map((item) => item.close);
+      return Number((values.reduce((sum, value) => sum + value, 0) / windowSize).toFixed(2));
+    };
+    point.ma5 = average(5);
+    point.ma10 = average(10);
+    point.ma20 = average(20);
+    if (index > 0 && index % 29 === 0) {
+      point.limitUpPrice = Number((daily[index - 1].close * 1.1).toFixed(2));
+      point.isLimitUp = true;
+      point.high = point.limitUpPrice;
+      point.close = point.limitUpPrice;
+    }
+  });
+  return {
+    symbol: normalized,
+    name: normalized,
+    currency: normalized.endsWith('.TW') ? 'TWD' : 'USD',
+    source: 'Static demo chart',
+    refreshedAt: new Date().toISOString(),
+    intraday,
+    daily
+  };
+}
+
+export async function fetchStockChart(symbol: string): Promise<StockChartResponse> {
+  if (staticDemoBuild || usingStaticFallback) {
+    return fallbackStockChart(symbol);
+  }
+  const response = await fetch(`/api/stocks/${encodeURIComponent(symbol)}/chart`);
+  if (!response.ok) {
+    const payload = hasContentType(response, 'application/json') ? await response.json().catch(() => ({})) : {};
+    throw new Error(payload.error || 'Failed to load stock chart');
+  }
+  if (!hasContentType(response, 'application/json')) throw new Error('Failed to load stock chart');
+  return response.json();
 }
 
 export async function analyzeStocks(payload: {
@@ -940,6 +1392,7 @@ export async function analyzeStocks(payload: {
   symbols?: string[];
   strategyId?: string;
   customWeights?: StrategyWeights;
+  refreshStrategies?: boolean;
   refresh?: boolean;
   portfolio?: PortfolioImportResponse | PortfolioAnalysis;
 }): Promise<AnalysisResponse> {
@@ -955,9 +1408,12 @@ export async function analyzeStocks(payload: {
     if (!response.ok) throw new Error('Failed to analyze stocks');
     if (!hasContentType(response, 'application/json')) throw new Error('Static preview fallback');
     return response.json();
-  } catch {
-    usingStaticFallback = true;
-    return fallbackAnalysis(payload);
+  } catch (cause) {
+    if (staticDemoBuild) {
+      usingStaticFallback = true;
+      return fallbackAnalysis(payload);
+    }
+    throw cause;
   }
 }
 
@@ -967,6 +1423,7 @@ export async function analyzeStocksStream(
     symbols?: string[];
     strategyId?: string;
     customWeights?: StrategyWeights;
+    refreshStrategies?: boolean;
     refresh?: boolean;
     portfolio?: PortfolioImportResponse | PortfolioAnalysis;
   },
@@ -1004,6 +1461,7 @@ export async function analyzeStocksStream(
     if (!hasContentType(response, 'application/x-ndjson')) throw new Error('Static preview fallback');
   } catch (cause) {
     if (cause instanceof Error && cause.name === 'AbortError') throw cause;
+    if (!staticDemoBuild) throw cause;
     usingStaticFallback = true;
     ensureNotAborted();
     const result = fallbackAnalysis(payload);

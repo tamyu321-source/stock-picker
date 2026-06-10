@@ -7,8 +7,8 @@ from unittest.mock import patch
 from backend.app import create_app
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
 from backend.portfolio import normalize_a_share_symbol, parse_portfolio_export
-from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _parse_eastmoney_datetime, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
-from backend.services import _breakout_setup_score, _financial_analysis, _friendly_data_error, _metric_availability, _metrics, _news_analysis, _score_breakdown, _sentiment_score, _verdict
+from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _eastmoney_cn_fund_flow, _parse_eastmoney_datetime, _sina_cn_fund_flow, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
+from backend.services import _breakout_setup_score, _financial_analysis, _friendly_data_error, _fund_flow_profile, _metric_availability, _metrics, _news_analysis, _news_heat_analysis, _pullback_risk_score, _score_breakdown, _sentiment_score, _verdict
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _manual_symbol_candidates, _symbols_from_code_mentions
 
 
@@ -30,15 +30,18 @@ class FakeMarketProvider:
 class LowRiskFakeMarketProvider(FakeMarketProvider):
     def fetch(self, symbol):
         snapshot = super().fetch(symbol)
+        closes = [92 + index * 0.08 + [0.0, 0.18, -0.06, 0.10, -0.12][index % 5] for index in range(130)]
+        previous = closes[-2]
+        price = closes[-1]
         return MarketSnapshot(
             symbol=snapshot.symbol,
             name=snapshot.name,
             market=snapshot.market,
             sector=snapshot.sector,
-            price=snapshot.price,
-            change=snapshot.change,
+            price=round(price, 3),
+            change=round((price / previous - 1) * 100, 2) if previous else 0,
             currency=snapshot.currency,
-            closes=[100 + (index % 3) * 0.05 for index in range(130)],
+            closes=closes,
             info={**snapshot.info, "beta": 1.0},
         )
 
@@ -116,7 +119,15 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(len(payload["markets"]), 7)
-        self.assertGreaterEqual(len(payload["strategies"]), 3)
+        self.assertGreaterEqual(len(payload["strategies"]), 8)
+        self.assertIn("strategyLibrary", payload)
+        self.assertGreaterEqual(len(payload["strategyLibrary"]["sources"]), 12)
+        self.assertIn("todayBuy", payload["strategyLibrary"]["detailedWeightKeys"])
+        strategy_ids = {strategy["id"] for strategy in payload["strategies"]}
+        self.assertIn("ai_smart_blend", strategy_ids)
+        self.assertNotIn("balanced", strategy_ids)
+        self.assertNotIn("growth", strategy_ids)
+        self.assertNotIn("defensive", strategy_ids)
         self.assertIn("defaultSymbols", payload)
         self.assertIn("scanUniverseSize", payload)
         self.assertIn("2330.TW", payload["defaultSymbols"]["TW"])
@@ -125,6 +136,74 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scanUniverseSize"]["TW"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["JP"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["KR"], "dynamic")
+
+    def test_refined_strategy_affects_final_assessment_weights(self):
+        response = self.client.post(
+            "/api/analyze",
+            json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "news_heat_catalyst"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["strategy"]["id"], "news_heat_catalyst")
+        self.assertIn("detailedWeights", payload["strategy"])
+        pick = payload["picks"][0]
+        self.assertIn("componentWeights", pick["overallAssessment"])
+        self.assertGreater(pick["overallAssessment"]["componentWeights"]["newsHeatImpactScore"], 12)
+
+    def test_stock_chart_endpoint_returns_intraday_and_daily_series(self):
+        class FakeChartResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def chart_payload(interval):
+            timestamps = [1_720_000_000, 1_720_000_300, 1_720_000_600] if interval == "5m" else [1_719_820_800, 1_719_907_200, 1_719_993_600]
+            return {
+                "chart": {
+                    "result": [
+                        {
+                            "timestamp": timestamps,
+                            "meta": {"shortName": "Test Corp", "currency": "USD", "regularMarketPrice": 102.0},
+                            "indicators": {
+                                "quote": [
+                                    {
+                                        "open": [100, 101, 102],
+                                        "high": [101, 102, 103],
+                                        "low": [99, 100, 101],
+                                        "close": [100.5, 101.5, 102.5],
+                                        "volume": [1000, 1200, 1400],
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    "error": None,
+                }
+            }
+
+        def fake_urlopen(request, timeout=6):
+            url = getattr(request, "full_url", str(request))
+            return FakeChartResponse(chart_payload("5m" if "interval=5m" in url else "1d"))
+
+        with patch("backend.charts.urlopen", side_effect=fake_urlopen):
+            response = self.client.get("/api/stocks/TEST/chart")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["symbol"], "TEST")
+        self.assertEqual(payload["name"], "Test Corp")
+        self.assertEqual(len(payload["intraday"]), 3)
+        self.assertEqual(len(payload["daily"]), 3)
+        self.assertEqual(payload["daily"][-1]["close"], 102.5)
 
     def test_health_reports_cache_stats_for_default_app(self):
         response = create_app().test_client().get("/api/health")
@@ -196,6 +275,57 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(pick["holding"]["quantity"], 100)
         self.assertIn(pick["holdingAnalysis"]["action"], {"add", "hold", "reduce", "exit"})
         self.assertTrue(pick["holdingAnalysis"]["notes"])
+
+    def test_manual_holdings_use_live_price_for_pnl_and_position_weight(self):
+        class ChinaMarketProvider:
+            def fetch(self, symbol):
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="\u5b81\u5fb7\u65f6\u4ee3",
+                    market="CN",
+                    sector="Industrials",
+                    price=220.0,
+                    change=1.6,
+                    currency="CNY",
+                    closes=[180 + index * 0.4 for index in range(130)],
+                    info={"trailingPE": 20, "returnOnEquity": 0.17, "profitMargins": 0.16, "debtToEquity": 30},
+                )
+
+        class PortfolioUniverseProvider:
+            def resolve_manual_inputs(self, inputs, markets, limit=25):
+                return [DiscoveredSymbol(str(symbol).upper(), "\u5b81\u5fb7\u65f6\u4ee3", infer_market(str(symbol).upper()), "test-manual-portfolio") for symbol in inputs], []
+
+        portfolio = {
+            "sourceName": "Manual holdings",
+            "sourceType": "manual-holdings",
+            "positions": [
+                {
+                    "symbol": "300750.SZ",
+                    "code": "300750",
+                    "name": "\u5b81\u5fb7\u65f6\u4ee3",
+                    "market": "CN",
+                    "quantity": 100,
+                    "availableQuantity": 80,
+                    "costPrice": 200.0,
+                }
+            ],
+        }
+        client = create_app(ChinaMarketProvider(), self.news_crawler, PortfolioUniverseProvider()).test_client()
+        response = client.post(
+            "/api/analyze",
+            json={"markets": ["CN"], "symbols": ["300750.SZ"], "strategyId": "balanced", "portfolio": portfolio},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        pick = payload["picks"][0]
+        self.assertEqual(pick["holding"]["lastPrice"], 220.0)
+        self.assertEqual(pick["holding"]["frozenQuantity"], 20)
+        self.assertEqual(pick["holding"]["marketValue"], 22000.0)
+        self.assertEqual(pick["holding"]["unrealizedPnl"], 2000.0)
+        self.assertAlmostEqual(pick["holding"]["unrealizedPnlPct"], 10.0)
+        self.assertEqual(pick["holdingAnalysis"]["positionWeightPct"], 100.0)
+        self.assertEqual(payload["portfolio"]["totalMarketValue"], 22000.0)
 
     def test_ttl_cache_expires_entries(self):
         now = [100.0]
@@ -437,19 +567,17 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertFalse(is_recent_article(old_article, datetime(2026, 5, 26, tzinfo=timezone.utc)))
 
-    def test_fallback_search_keeps_broad_china_universe_without_yahoo(self):
+    def test_fallback_search_does_not_use_local_china_candidates_offline(self):
         class OfflineUniverse(MarketUniverseProvider):
-            def _json(self, url, insecure=False):
+            def _json(self, url, insecure=False, **kwargs):
                 raise OSError("offline")
 
         symbols = OfflineUniverse()._discover_fallback_search("CN", 18)
-        self.assertGreaterEqual(len(symbols), 10)
-        self.assertIn("600519.SS", {item.symbol for item in symbols})
-        self.assertIn("\u8d35\u5dde\u8305\u53f0", {item.name for item in symbols})
+        self.assertEqual(symbols, [])
 
     def test_china_market_discovery_includes_gainers_and_volume_ratio(self):
         class FakeEastmoneyUniverse(MarketUniverseProvider):
-            def _json(self, url, insecure=False):
+            def _json(self, url, insecure=False, **kwargs):
                 if "fid=f3" in url:
                     return {"data": {"diff": [{"f12": "688108", "f14": "Top Gainer"}, {"f12": "300486", "f14": "Runner"}]}}
                 if "fid=f10" in url:
@@ -467,22 +595,67 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("600519.SS", by_symbol)
         self.assertEqual(by_symbol["688108.SS"], "eastmoney-cn-gainers-risk-review")
 
-    def test_fallback_search_uses_default_taiwan_symbols(self):
-        symbols = MarketUniverseProvider()._discover_fallback_search("TW", 5)
-        self.assertEqual([item.symbol for item in symbols], ["2330.TW", "2317.TW"])
-        self.assertTrue(all(item.source == "curated-liquid-fallback" for item in symbols))
+    def test_china_market_discovery_paginates_online_universe(self):
+        class FakeEastmoneyUniverse(MarketUniverseProvider):
+            def _json(self, url, insecure=False, **kwargs):
+                if "fid=f10" not in url:
+                    return {"data": {"diff": []}}
+                page = 1
+                if "pn=2" in url:
+                    page = 2
+                elif "pn=3" in url:
+                    page = 3
+                start = 600000 + (page - 1) * 80
+                return {
+                    "data": {
+                        "diff": [
+                            {"f12": str(start + index), "f14": f"Online {start + index}"}
+                            for index in range(80)
+                        ]
+                    }
+                }
 
-    def test_fallback_search_has_japan_and_korea_liquid_symbols(self):
+        symbols = FakeEastmoneyUniverse()._discover_eastmoney_cn(120)
+
+        self.assertEqual(len(symbols), 120)
+        self.assertTrue(all(item.source == "eastmoney-cn-volume-ratio" for item in symbols[:120]))
+        self.assertNotIn("curated", {item.source for item in symbols})
+
+    def test_sina_china_discovery_paginates_online_universe(self):
+        case = self
+
+        class FakeSinaUniverse(MarketUniverseProvider):
+            def _json(self, url, insecure=False, **kwargs):
+                case.assertIn("sina.com.cn", url)
+                page = 1
+                if "page=2" in url:
+                    page = 2
+                start = 300000 + (page - 1) * 80
+                return [
+                    {"code": str(start + index), "symbol": f"sz{start + index}", "name": f"Online {start + index}"}
+                    for index in range(80)
+                ]
+
+        symbols = FakeSinaUniverse()._discover_sina_cn(120)
+
+        self.assertEqual(len(symbols), 120)
+        self.assertEqual(symbols[0].symbol, "300000.SZ")
+        self.assertEqual(symbols[-1].symbol, "300119.SZ")
+        self.assertTrue(all(item.source == "sina-cn-turnover" for item in symbols))
+
+    def test_fallback_search_does_not_use_default_taiwan_symbols(self):
+        symbols = MarketUniverseProvider()._discover_fallback_search("TW", 5)
+        self.assertEqual(symbols, [])
+
+    def test_fallback_search_does_not_use_local_japan_and_korea_candidates_offline(self):
         class OfflineUniverse(MarketUniverseProvider):
-            def _json(self, url, insecure=False):
+            def _json(self, url, insecure=False, **kwargs):
                 raise OSError("offline")
 
         japan = OfflineUniverse()._discover_fallback_search("JP", 5)
         korea = OfflineUniverse()._discover_fallback_search("KR", 5)
-        self.assertIn("7203.T", [item.symbol for item in japan])
-        self.assertIn("005930.KS", [item.symbol for item in korea])
-        self.assertTrue(all(item.market == "JP" for item in japan))
-        self.assertTrue(all(item.market == "KR" for item in korea))
+        self.assertEqual(japan, [])
+        self.assertEqual(korea, [])
 
     def test_manual_japan_and_korea_symbols_resolve(self):
         self.assertEqual(_manual_symbol_candidates("7203.T", {"JP"}), ["7203.T"])
@@ -548,15 +721,15 @@ class ApiTestCase(unittest.TestCase):
                 raise OSError("offline")
 
         symbols, errors = OfflineUniverse().discover(["TW"], 5)
-        self.assertEqual([item.symbol for item in symbols], ["2330.TW", "2317.TW"])
-        self.assertEqual({item.source for item in symbols}, {"curated-liquid-fallback"})
+        self.assertEqual(symbols, [])
         self.assertIn("local-news", {error["source"] for error in errors})
         self.assertIn("google-news", {error["source"] for error in errors})
         self.assertIn("market-universe", {error["source"] for error in errors})
+        self.assertIn("fallback-search", {error["source"] for error in errors})
 
     def test_sgx_discovery_ignores_unnamed_codes_and_uses_curated_names(self):
         class FakeSgxUniverse(MarketUniverseProvider):
-            def _json(self, url, insecure=False):
+            def _json(self, url, insecure=False, **kwargs):
                 return {
                     "data": {
                         "prices": [
@@ -698,6 +871,25 @@ class ApiTestCase(unittest.TestCase):
         self.assertLess(negative_profile["netScore"], 0)
         self.assertEqual(negative_profile["summary"]["key"], "newsBearishSummary")
         self.assertTrue(all("score" in event and "evidence" in event for event in positive_profile["events"]))
+
+    def test_news_heat_scores_attention_and_direction(self):
+        now = datetime.now(timezone.utc)
+        positive_articles = [
+            Article("Eastmoney", "Company wins large order with institutional buying", "Revenue growth and analyst upgrade", "https://example.com/a", now, 0.8, 0.9, 1.0),
+            Article("Reuters", "Company raises guidance after strong demand", "Target price raised", "https://example.com/b", now - timedelta(hours=2), 0.7, 0.9, 1.0),
+        ]
+        negative_articles = [
+            Article("Eastmoney", "Company profit warning with institutional selling", "Weak demand and target price cut", "https://example.com/c", now, -0.8, 0.9, 1.0),
+            Article("Reuters", "Company faces regulatory probe after demand falls", "Downgrade follows weak demand", "https://example.com/d", now - timedelta(hours=2), -0.7, 0.9, 1.0),
+        ]
+
+        positive_heat = _news_heat_analysis(positive_articles, _news_analysis(positive_articles))
+        negative_heat = _news_heat_analysis(negative_articles, _news_analysis(negative_articles))
+
+        self.assertGreaterEqual(positive_heat["heatScore"], 50)
+        self.assertGreater(positive_heat["impactScore"], negative_heat["impactScore"])
+        self.assertEqual(positive_heat["summary"]["key"], "newsHeatHotPositiveSummary")
+        self.assertEqual(negative_heat["summary"]["key"], "newsHeatHotNegativeSummary")
 
     def test_high_volatility_alone_does_not_force_sell_verdict(self):
         self.assertEqual(_verdict(61.2, 29.2), "watch")
@@ -1210,6 +1402,65 @@ class ApiTestCase(unittest.TestCase):
 
         self.assertLess(_breakout_setup_score(snapshot, _news_analysis([])), 50)
 
+    def test_next_session_risk_downgrades_current_edge_to_watch(self):
+        class FadingTrendProvider(FakeMarketProvider):
+            def fetch(self, symbol):
+                closes = [100 + index * 0.2 for index in range(120)] + [126, 128, 131, 134, 137, 140, 144, 148, 152, 164]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Fading Edge Corp",
+                    market="TW",
+                    sector="Technology",
+                    price=164,
+                    change=7.9,
+                    currency="TWD",
+                    closes=closes,
+                    info={
+                        "trailingPE": 18,
+                        "priceToBook": 2.2,
+                        "beta": 1.0,
+                        "returnOnEquity": 0.28,
+                        "profitMargins": 0.24,
+                        "revenueGrowth": 0.20,
+                        "earningsGrowth": 0.20,
+                        "debtToEquity": 20,
+                        "regularMarketVolume": 30_000_000,
+                        "marketCap": 30_000_000_000,
+                        "volumeSurge20": 0.8,
+                        "amountSurge20": 0.8,
+                        "turnoverRate": 0.05,
+                    },
+                )
+
+        class PositiveNewsCrawler:
+            def fetch(self, symbol, name):
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} wins order and receives analyst upgrade",
+                        summary="Revenue growth, institutional buying, and strong demand support the current move",
+                        link=f"https://example.com/{symbol}",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.9,
+                        credibility=0.95,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(FadingTrendProvider(), PositiveNewsCrawler(), FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["9901.TW"], "strategyId": "balanced"})
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+
+        self.assertGreaterEqual(pick["score"], 90)
+        self.assertGreaterEqual(pick["opportunityScore"], 70)
+        self.assertEqual(pick["verdict"], "watch")
+        self.assertGreaterEqual(pick["nextSessionReversalRiskScore"], 68)
+        self.assertNotIn(pick["overallAssessment"]["suitability"], {"strongBuy", "buy"})
+        self.assertEqual(pick["trendAnalysis"]["regime"], "overheated")
+        self.assertIn("nextSessionRisk", {reason["key"] for reason in pick["reasonCodes"]})
+        self.assertIn("trendReversalRisk", {metric["key"] for metric in pick["trendAnalysis"]["metrics"]})
+
     def test_t_trade_plan_identifies_liquid_volatile_candidate(self):
         class TTradeProvider(FakeMarketProvider):
             def fetch(self, symbol):
@@ -1418,6 +1669,8 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("scoreBreakdown", pick)
         self.assertIn("opportunityScore", pick)
         self.assertIn("downsideRiskScore", pick)
+        self.assertIn("nextSessionContinuationScore", pick)
+        self.assertIn("nextSessionReversalRiskScore", pick)
         self.assertIn("tScore", pick)
         self.assertIn("tPlan", pick)
         self.assertIn(pick["tPlan"]["suitability"], {"candidate", "watch", "avoid"})
@@ -1426,6 +1679,7 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("stopLoss", pick["tPlan"])
         self.assertAlmostEqual(pick["prediction"]["edge"], pick["opportunityScore"] - pick["downsideRiskScore"], delta=0.1)
         self.assertAlmostEqual(pick["prediction"]["tScore"], pick["tScore"], delta=0.1)
+        self.assertAlmostEqual(pick["prediction"]["nextSessionContinuationScore"], pick["nextSessionContinuationScore"], delta=0.1)
         self.assertEqual({item["factor"] for item in pick["scoreBreakdown"]}, {"sentiment", "momentum", "value", "risk", "quality"})
         self.assertAlmostEqual(sum(item["contribution"] for item in pick["scoreBreakdown"]), pick["score"], delta=0.5)
         self.assertIn("decision", pick)
@@ -1434,6 +1688,15 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("newsAnalysis", pick)
         self.assertEqual(pick["newsAnalysis"]["positiveCount"], 1)
         self.assertGreater(pick["newsAnalysis"]["positiveScore"], 0)
+        self.assertIn("newsHeatAnalysis", pick)
+        self.assertIn("newsHeat", {metric["key"] for metric in pick["newsHeatAnalysis"]["metrics"]})
+        self.assertIn("overallAssessment", pick)
+        self.assertIn("overallTodayBuy", {metric["key"] for metric in pick["overallAssessment"]["metrics"]})
+        self.assertIn(pick["overallAssessment"]["suitability"], {"strongBuy", "buy", "watch", "avoid", "sell"})
+        self.assertAlmostEqual(pick["prediction"]["overallScore"], pick["overallAssessment"]["totalScore"], delta=0.1)
+        self.assertIn("trendAnalysis", pick)
+        self.assertIn("trendContinuation", {metric["key"] for metric in pick["trendAnalysis"]["metrics"]})
+        self.assertIn(pick["trendAnalysis"]["regime"], {"bullish", "constructive", "neutral", "fragile", "bearish", "overheated", "insufficient"})
         self.assertIn("positiveScore", pick["decision"]["positives"][0]["params"])
         self.assertEqual(pick["newsAnalysis"]["events"][0]["key"], "earningsPositive")
         self.assertIn("financialAnalysis", pick)
@@ -1513,6 +1776,169 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(snapshot.name, "测试A股")
         self.assertGreater(len(snapshot.closes), 20)
         self.assertAlmostEqual(snapshot.info["trailingPE"], 18)
+
+    def test_eastmoney_fund_flow_parses_intraday_capital_flow(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "data": {
+                            "diff": [
+                                {
+                                    "f62": 87_515_554,
+                                    "f184": 6.2,
+                                    "f66": 42_000_000,
+                                    "f69": 3.1,
+                                    "f72": 45_515_554,
+                                    "f75": 3.1,
+                                    "f78": -21_000_000,
+                                    "f81": -1.5,
+                                    "f84": -66_515_554,
+                                    "f87": -4.7,
+                                }
+                            ]
+                        }
+                    }
+                ).encode("utf-8")
+
+        with patch("backend.providers.urlopen", return_value=FakeResponse()):
+            flow = _eastmoney_cn_fund_flow("300750.SZ")
+
+        self.assertEqual(flow["fundFlowSource"], "Eastmoney")
+        self.assertEqual(flow["fundFlowMainNet"], 87_515_554)
+        self.assertEqual(flow["fundFlowMainRatio"], 6.2)
+        self.assertEqual(flow["fundFlowSuperLargeRatio"], 3.1)
+        self.assertEqual(flow["fundFlowSmallRatio"], -4.7)
+
+    def test_sina_fund_flow_parses_online_capital_flow(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    [
+                        {
+                            "opendate": "2026-06-10",
+                            "netamount": "394283846.5900",
+                            "ratioamount": "0.0818154",
+                            "r0_net": "437468832.1200",
+                            "r0_ratio": "0.09077645",
+                            "r1_net": "-30361953.6700",
+                            "r2_net": "-12597959.8600",
+                            "r3_net": "-225072.0000",
+                        }
+                    ]
+                ).encode("utf-8")
+
+        with patch("backend.providers.urlopen", return_value=FakeResponse()):
+            flow = _sina_cn_fund_flow("002129.SZ")
+
+        self.assertEqual(flow["fundFlowSource"], "Sina")
+        self.assertEqual(flow["fundFlowMainNet"], 437468832.12)
+        self.assertAlmostEqual(flow["fundFlowMainRatio"], 9.077645)
+        self.assertEqual(flow["fundFlowLargeNet"], -30361953.67)
+        self.assertEqual(flow["fundFlowMediumNet"], -12597959.86)
+        self.assertEqual(flow["fundFlowSmallNet"], -225072.0)
+
+    def test_eastmoney_fundamentals_still_fetches_fund_flow_when_quote_payload_fails(self):
+        from backend.providers import _eastmoney_cn_fundamentals
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout=10):
+            url = request.full_url
+            if "ulist.np/get" in url:
+                return FakeResponse({"data": {"diff": [{"f62": -50_000_000, "f184": -8.5, "f66": -20_000_000, "f69": -3.4}]}})
+            return FakeResponse({"data": None})
+
+        with patch("backend.providers.urlopen", fake_urlopen):
+            fundamentals = _eastmoney_cn_fundamentals("300750.SZ")
+
+        self.assertEqual(fundamentals["fundFlowMainNet"], -50_000_000)
+        self.assertEqual(fundamentals["fundFlowMainRatio"], -8.5)
+
+    def test_fund_flow_changes_scoring_and_financial_evidence(self):
+        base_info = {
+            "trailingPE": 18,
+            "priceToBook": 2.2,
+            "regularMarketVolume": 5_000_000,
+            "turnoverValue": 1_000_000_000,
+            "marketCap": 50_000_000_000,
+        }
+        positive_snapshot = MarketSnapshot(
+            symbol="300750.SZ",
+            name="CATL",
+            market="CN",
+            sector="Industrials",
+            price=100,
+            change=2.2,
+            currency="CNY",
+            closes=[80 + index * 0.2 for index in range(130)],
+            info={
+                **base_info,
+                "fundFlowSource": "Eastmoney",
+                "fundFlowMainNet": 90_000_000,
+                "fundFlowMainRatio": 6.5,
+                "fundFlowSuperLargeNet": 40_000_000,
+                "fundFlowSuperLargeRatio": 3.0,
+                "fundFlowLargeNet": 50_000_000,
+                "fundFlowLargeRatio": 3.5,
+                "fundFlowSmallNet": -70_000_000,
+                "fundFlowSmallRatio": -5.0,
+            },
+        )
+        negative_snapshot = MarketSnapshot(
+            **{
+                **positive_snapshot.__dict__,
+                "info": {
+                    **base_info,
+                    "fundFlowSource": "Eastmoney",
+                    "fundFlowMainNet": -90_000_000,
+                    "fundFlowMainRatio": -6.5,
+                    "fundFlowSuperLargeNet": -40_000_000,
+                    "fundFlowSuperLargeRatio": -3.0,
+                    "fundFlowLargeNet": -50_000_000,
+                    "fundFlowLargeRatio": -3.5,
+                    "fundFlowSmallNet": 70_000_000,
+                    "fundFlowSmallRatio": 5.0,
+                },
+            }
+        )
+        news = _news_analysis([])
+        positive_metrics = _metrics(positive_snapshot, [])
+        negative_metrics = _metrics(negative_snapshot, [])
+        positive_financials = _financial_analysis(positive_snapshot)
+        negative_financials = _financial_analysis(negative_snapshot)
+
+        self.assertGreater(positive_metrics["sentiment"], negative_metrics["sentiment"])
+        self.assertGreater(positive_metrics["momentum"], negative_metrics["momentum"])
+        self.assertLess(_pullback_risk_score(positive_snapshot, news), _pullback_risk_score(negative_snapshot, news))
+        self.assertGreater(_breakout_setup_score(positive_snapshot, news), _breakout_setup_score(negative_snapshot, news))
+        self.assertIn("fundFlowMain", {metric["key"] for metric in positive_financials["metrics"]})
+        self.assertIn("fundFlowSupport", {item["key"] for item in positive_financials["positives"]})
+        self.assertIn("fundFlowPressure", {item["key"] for item in negative_financials["negatives"]})
+        self.assertTrue(_fund_flow_profile(positive_snapshot.info)["available"])
 
     def test_yahoo_http_retries_alternate_hosts_for_market_snapshot(self):
         calls = []

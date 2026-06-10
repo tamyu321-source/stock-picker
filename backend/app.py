@@ -1,9 +1,12 @@
 from flask import Flask, Response, jsonify, request, stream_with_context
 
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler
+from backend.charts import fetch_stock_chart
+from backend.data import STRATEGIES
 from backend.portfolio import parse_portfolio_export
 from backend.providers import RssNewsCrawler, YFinanceMarketDataProvider
 from backend.services import analyze, get_config, stream_analyze
+from backend.strategy_library import all_runtime_strategies, get_strategy_catalog
 
 
 def create_app(market_provider=None, news_crawler=None, universe_provider=None) -> Flask:
@@ -23,6 +26,18 @@ def create_app(market_provider=None, news_crawler=None, universe_provider=None) 
     @app.get("/api/config")
     def config():
         return jsonify(get_config())
+
+    @app.get("/api/strategies/refresh")
+    def strategy_refresh():
+        catalog = get_strategy_catalog(refresh=True)
+        return jsonify({**catalog, "runtimeStrategies": all_runtime_strategies(STRATEGIES, refresh=False)})
+
+    @app.get("/api/stocks/<path:symbol>/chart")
+    def stock_chart(symbol: str):
+        try:
+            return jsonify(fetch_stock_chart(symbol))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 404
 
     @app.post("/api/analyze")
     def analyze_endpoint():

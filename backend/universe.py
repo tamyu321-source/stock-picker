@@ -581,43 +581,39 @@ class MarketUniverseProvider:
         if market == "US":
             return self._discover_us(limit)
         if market == "CN":
-            return self._discover_eastmoney_cn(limit)
+            return self._discover_cn_online(limit)
         if market == "HK":
             return self._discover_eastmoney_hk(limit)
         if market == "TW":
             return self._discover_twse(limit)
         if market in {"JP", "KR"}:
-            return self._discover_curated_market(market, limit)
+            return self._discover_fallback_search(market, limit)
         if market == "SG":
             return self._discover_sgx(limit)
         return []
 
-    def _discover_curated_market(self, market: str, limit: int) -> list[DiscoveredSymbol]:
-        symbols = [*CURATED_FALLBACK_SYMBOLS.get(market, []), *DEFAULT_SYMBOLS.get(market, [])]
-        seen = set()
-        output = []
-        for symbol in symbols:
-            if symbol in seen or infer_market(symbol) != market or not is_common_equity_symbol(symbol, market):
+    def _discover_cn_online(self, limit: int) -> list[DiscoveredSymbol]:
+        output: list[DiscoveredSymbol] = []
+        for discover in [self._discover_sina_cn, self._discover_eastmoney_cn]:
+            try:
+                output = _merge_unique_symbols(output, discover(limit))
+            except Exception:
                 continue
-            output.append(
-                DiscoveredSymbol(
-                    symbol=symbol,
-                    name=local_company_name(symbol, symbol),
-                    market=market,
-                    source="curated-liquid-universe",
-                )
-            )
-            seen.add(symbol)
             if len(output) >= limit:
                 break
-        return output
+        return output[:limit]
 
     def _discover_fallback_search(self, market: str, limit: int) -> list[DiscoveredSymbol]:
         output: list[DiscoveredSymbol] = []
+        if market == "CN":
+            try:
+                output = _merge_unique_symbols(output, self._discover_cn_online(limit))
+            except Exception:
+                output = []
         for term in FALLBACK_SEARCH_TERMS.get(market, []):
             try:
                 url = f"https://query1.finance.yahoo.com/v1/finance/search?q={quote_plus(term)}&quotesCount=8&newsCount=0"
-                payload = self._json(url)
+                payload = self._json(url, timeout=6, attempts=2)
             except Exception:
                 continue
             for quote in payload.get("quotes", []):
@@ -632,11 +628,6 @@ class MarketUniverseProvider:
                 output.append(DiscoveredSymbol(symbol=symbol, name=name, market=market, source=f"yahoo-search-fallback:{term}"))
             if len(output) >= limit:
                 break
-        fallback_symbols = [*CURATED_FALLBACK_SYMBOLS.get(market, []), *DEFAULT_SYMBOLS.get(market, [])]
-        for symbol in fallback_symbols:
-            if len(output) >= limit:
-                break
-            output.append(DiscoveredSymbol(symbol=symbol, name=local_company_name(symbol, symbol), market=market, source="curated-liquid-fallback"))
         seen = set()
         deduped = []
         for item in output:
@@ -668,28 +659,88 @@ class MarketUniverseProvider:
         ]
         output: list[DiscoveredSymbol] = []
         for sort_field, source in sources:
-            output = _merge_unique_symbols(output, self._discover_eastmoney_cn_sorted(sort_field, source, max(limit, 18)))
+            try:
+                output = _merge_unique_symbols(output, self._discover_eastmoney_cn_sorted(sort_field, source, max(limit, 18)))
+            except Exception:
+                continue
             if len(output) >= limit:
                 break
         return output[:limit]
 
+    def _discover_sina_cn(self, limit: int) -> list[DiscoveredSymbol]:
+        output: list[DiscoveredSymbol] = []
+        page_size = min(80, max(30, limit))
+        max_pages = max(1, min(5, (limit * 2 + page_size - 1) // page_size))
+        for sort_field, source in [("amount", "sina-cn-turnover"), ("turnoverratio", "sina-cn-turnover-ratio")]:
+            for page in range(1, max_pages + 1):
+                url = (
+                    "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                    "Market_Center.getHQNodeData?page={page}&num={page_size}&sort={sort_field}"
+                    "&asc=0&node=hs_a&symbol=&_s_r_a=page"
+                ).format(page=page, page_size=page_size, sort_field=sort_field)
+                try:
+                    rows = self._json(url, timeout=8, attempts=2)
+                except Exception:
+                    if output:
+                        break
+                    raise
+                if not isinstance(rows, list) or not rows:
+                    break
+                for row in rows:
+                    code = str(row.get("code") or "").strip()
+                    if not code.isdigit():
+                        symbol_text = str(row.get("symbol") or "").lower()
+                        code = re.sub(r"^(?:sh|sz)", "", symbol_text)
+                    if not code.isdigit():
+                        continue
+                    symbol = f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
+                    if not is_common_equity_symbol(symbol, "CN"):
+                        continue
+                    output.append(
+                        DiscoveredSymbol(
+                            symbol=symbol,
+                            name=str(row.get("name") or code),
+                            market="CN",
+                            source=source,
+                        )
+                    )
+                    if len(output) >= limit:
+                        break
+                if len(output) >= limit:
+                    break
+            if len(output) >= limit:
+                break
+        return _dedupe_discovered(output)[:limit]
+
     def _discover_eastmoney_cn_sorted(self, sort_field: str, source: str, limit: int) -> list[DiscoveredSymbol]:
-        url = (
-            "https://push2.eastmoney.com/api/qt/clist/get"
-            "?pn=1&pz={limit}&po=1&np=1&fltt=2&invt=2&fid={sort_field}"
-            "&fs=m:1+t:2,m:0+t:6,m:0+t:80&fields=f12,f14,f3,f6,f10"
-        ).format(limit=limit * 3, sort_field=sort_field)
-        rows = self._json(url).get("data", {}).get("diff", [])
         output = []
-        for row in rows:
-            code = str(row.get("f12") or "")
-            if not code.isdigit():
-                continue
-            suffix = ".SS" if code.startswith("6") else ".SZ"
-            symbol = f"{code}{suffix}"
-            if not is_common_equity_symbol(symbol, "CN"):
-                continue
-            output.append(DiscoveredSymbol(symbol=symbol, name=str(row.get("f14") or code), market="CN", source=source))
+        page_size = min(80, max(30, limit))
+        max_pages = max(1, min(5, (limit * 2 + page_size - 1) // page_size))
+        for page in range(1, max_pages + 1):
+            url = (
+                "https://push2.eastmoney.com/api/qt/clist/get"
+                "?pn={page}&pz={page_size}&po=1&np=1&fltt=2&invt=2&fid={sort_field}"
+                "&fs=m:1+t:2,m:0+t:6,m:0+t:80&fields=f12,f14,f3,f6,f10"
+            ).format(page=page, page_size=page_size, sort_field=sort_field)
+            try:
+                rows = self._json(url, timeout=6, attempts=2).get("data", {}).get("diff", [])
+            except Exception:
+                if output:
+                    break
+                raise
+            if not rows:
+                break
+            for row in rows:
+                code = str(row.get("f12") or "")
+                if not code.isdigit():
+                    continue
+                suffix = ".SS" if code.startswith("6") else ".SZ"
+                symbol = f"{code}{suffix}"
+                if not is_common_equity_symbol(symbol, "CN"):
+                    continue
+                output.append(DiscoveredSymbol(symbol=symbol, name=str(row.get("f14") or code), market="CN", source=source))
+                if len(output) >= limit:
+                    break
             if len(output) >= limit:
                 break
         return output[:limit]
@@ -753,10 +804,6 @@ class MarketUniverseProvider:
             )
             for row in stocks[:limit]
         ]
-        for symbol in CURATED_FALLBACK_SYMBOLS["SG"]:
-            if len(output) >= limit:
-                break
-            output.append(DiscoveredSymbol(symbol=symbol, name=local_company_name(symbol, symbol), market="SG", source="curated-liquid-fallback"))
         seen = set()
         deduped = []
         for item in output:
@@ -765,7 +812,7 @@ class MarketUniverseProvider:
                 seen.add(item.symbol)
         return deduped[:limit]
 
-    def _json(self, url: str, insecure: bool = False) -> dict | list:
+    def _json(self, url: str, insecure: bool = False, timeout: int = 12, attempts: int = 3) -> dict | list:
         headers = {
             "User-Agent": self.user_agent,
             "Accept": "application/json,text/plain,*/*",
@@ -773,10 +820,10 @@ class MarketUniverseProvider:
         }
         context = ssl._create_unverified_context() if insecure else None
         last_error = None
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 request = Request(url, headers=headers)
-                with urlopen(request, timeout=12, context=context) as response:
+                with urlopen(request, timeout=timeout, context=context) as response:
                     return json.loads(response.read().decode("utf-8-sig"))
             except Exception as exc:
                 last_error = exc
