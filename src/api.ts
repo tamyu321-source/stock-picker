@@ -714,8 +714,62 @@ export interface AnalysisResponse {
     failed: number;
     discoveryErrors: Array<{ market: string; source?: string; query?: string; error: string }>;
     marketProfiles?: Record<Market | string, MarketProfile>;
+    universe?: ScanUniverse;
   };
 }
+
+export interface ScanSourceBreakdown {
+  source: string;
+  label: string;
+  role: string;
+  count: number;
+  markets: Record<string, number>;
+}
+
+export interface ScanUniverse {
+  mode: 'market-wide-scan' | 'portfolio-holdings' | 'manual-symbols' | string;
+  scope: 'market-wide-candidate-pool' | 'user-supplied-symbols' | string;
+  candidatePoolSize: number;
+  deepAnalysisCount: number;
+  displayedCount: number;
+  failedCount: number;
+  requestedMarkets: Array<Market | string>;
+  marketCounts: Record<string, number>;
+  sourceBreakdown: ScanSourceBreakdown[];
+  fallbackActive: boolean;
+  fullMarketSourceActive: boolean;
+  discoveryLimitPerMarket?: number | null;
+  displayLimit?: number | null;
+}
+
+export interface AuthUser {
+  id: string;
+  label: string;
+  enabled?: boolean;
+  keyFingerprint?: string;
+  notes?: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  lastLoginAt?: string | null;
+  stateUpdatedAt?: string | null;
+}
+
+export interface AuthSession {
+  token: string;
+  user: AuthUser;
+  role: 'user' | 'admin' | string;
+  expiresAt: number;
+}
+
+export interface UserState {
+  settings?: Record<string, unknown>;
+  savedScans?: unknown[];
+  portfolio?: unknown;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AdminUser extends AuthUser {}
 
 export interface AppConfig {
   markets: MarketOption[];
@@ -759,17 +813,62 @@ export type AnalysisStreamEvent =
       scan: AnalysisScan;
     };
 
-const configuredApiKey = import.meta.env.VITE_API_KEY ?? '19940710';
+const AUTH_SESSION_STORAGE_KEY = 'open-stock-picker.auth-session.v1';
 let usingStaticFallback = false;
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const staticDemoBuild = import.meta.env.PROD && import.meta.env.BASE_URL === '/stock-picker/' && !configuredApiBaseUrl;
+let authSession: AuthSession | null = readStoredAuthSession();
 
 function apiUrl(path: string) {
   return configuredApiBaseUrl ? `${configuredApiBaseUrl}${path}` : path;
 }
 
 function apiHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
-  return configuredApiKey ? { ...extraHeaders, 'X-Stock-Picker-Key': configuredApiKey } : extraHeaders;
+  return authSession?.token ? { ...extraHeaders, Authorization: `Bearer ${authSession.token}` } : extraHeaders;
+}
+
+async function errorMessage(response: Response, fallback: string) {
+  try {
+    const payload = await response.json();
+    if (payload?.error) return String(payload.error);
+  } catch {
+    // Ignore non-JSON errors.
+  }
+  return fallback;
+}
+
+function readStoredAuthSession(): AuthSession | null {
+  try {
+    const raw = localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw) as AuthSession;
+    if (!session?.token || !session?.user?.id || Number(session.expiresAt || 0) * 1000 <= Date.now()) {
+      localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+      return null;
+    }
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+export function getAuthSession(): AuthSession | null {
+  authSession = authSession ?? readStoredAuthSession();
+  return authSession;
+}
+
+export function setAuthSession(session: AuthSession | null) {
+  authSession = session;
+  try {
+    if (session) localStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
+    else localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+export function clearAuthSession() {
+  setAuthSession(null);
 }
 
 export function currentDataMode(): 'demo' | 'live' {
@@ -778,6 +877,97 @@ export function currentDataMode(): 'demo' | 'live' {
 
 function hasContentType(response: Response, expected: string) {
   return response.headers.get('content-type')?.toLowerCase().includes(expected) ?? false;
+}
+
+export async function loginWithAccessKey(key: string): Promise<AuthSession> {
+  const response = await fetch(apiUrl('/api/auth/login'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key })
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Invalid access key'));
+  const session = await response.json() as AuthSession;
+  setAuthSession(session);
+  return session;
+}
+
+export async function loginAdmin(username: string, password: string): Promise<AuthSession> {
+  const response = await fetch(apiUrl('/api/admin/login'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Invalid administrator credentials'));
+  const session = await response.json() as AuthSession;
+  setAuthSession(session);
+  return session;
+}
+
+export async function fetchCurrentSession(): Promise<AuthSession | null> {
+  if (!authSession?.token) return null;
+  const response = await fetch(apiUrl('/api/auth/me'), { headers: apiHeaders() });
+  if (!response.ok) {
+    clearAuthSession();
+    return null;
+  }
+  const payload = await response.json();
+  if (!payload?.authenticated) {
+    clearAuthSession();
+    return null;
+  }
+  return authSession;
+}
+
+export async function fetchUserState(): Promise<UserState> {
+  const response = await fetch(apiUrl('/api/user/state'), { headers: apiHeaders() });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Failed to load user state'));
+  return response.json();
+}
+
+export async function saveUserState(state: UserState): Promise<UserState> {
+  const response = await fetch(apiUrl('/api/user/state'), {
+    method: 'PUT',
+    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(state)
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Failed to save user state'));
+  return response.json();
+}
+
+export async function fetchAdminUsers(): Promise<AdminUser[]> {
+  const response = await fetch(apiUrl('/api/admin/users'), { headers: apiHeaders() });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Failed to load users'));
+  const payload = await response.json();
+  return Array.isArray(payload.users) ? payload.users : [];
+}
+
+export async function createAdminUser(payload: { accessKey: string; label?: string; notes?: string; enabled?: boolean }): Promise<AdminUser> {
+  const response = await fetch(apiUrl('/api/admin/users'), {
+    method: 'POST',
+    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Failed to create user'));
+  return (await response.json()).user as AdminUser;
+}
+
+export async function updateAdminUser(userId: string, payload: { accessKey?: string; label?: string; notes?: string; enabled?: boolean }): Promise<AdminUser> {
+  const response = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(userId)}`), {
+    method: 'PATCH',
+    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Failed to update user'));
+  return (await response.json()).user as AdminUser;
+}
+
+export async function resetAdminUserState(userId: string): Promise<UserState> {
+  const response = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(userId)}/reset-state`), {
+    method: 'POST',
+    headers: apiHeaders()
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, 'Failed to reset user state'));
+  return (await response.json()).state as UserState;
 }
 
 const fallbackStrategyLibrary: StrategyLibrary = {
@@ -1544,7 +1734,31 @@ function fallbackAnalysis(payload: { markets: Market[]; strategyId?: string; cus
     succeeded: picks.length,
     displayed: picks.length,
     failed: 0,
-    discoveryErrors: []
+    discoveryErrors: [],
+    marketProfiles: fallbackMarketProfiles,
+    universe: {
+      mode: 'market-wide-scan',
+      scope: 'market-wide-candidate-pool',
+      candidatePoolSize: markets.length * 96,
+      deepAnalysisCount: picks.length,
+      displayedCount: picks.length,
+      failedCount: 0,
+      requestedMarkets: markets,
+      marketCounts: Object.fromEntries(markets.map((market) => [market, picks.filter((pick) => pick.market === market).length])),
+      sourceBreakdown: [
+        {
+          source: 'static-github-pages-demo',
+          label: 'Static demo candidate pool',
+          role: 'provider',
+          count: picks.length,
+          markets: Object.fromEntries(markets.map((market) => [market, picks.filter((pick) => pick.market === market).length]))
+        }
+      ],
+      fallbackActive: false,
+      fullMarketSourceActive: false,
+      discoveryLimitPerMarket: 96,
+      displayLimit: 48
+    }
   };
   return {
     generatedAt: new Date().toISOString(),

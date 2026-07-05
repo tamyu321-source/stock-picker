@@ -43,14 +43,33 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
 
       - name: Deploy API to Cloud Run
+        env:
+          CLOUD_RUN_API_ACCESS_KEYS: ${{ vars.CLOUD_RUN_API_ACCESS_KEYS || '19940710' }}
+          STOCK_PICKER_ADMIN_USERNAME: ${{ vars.STOCK_PICKER_ADMIN_USERNAME || 'admin' }}
+          STOCK_PICKER_DATA_BUCKET: ${{ vars.STOCK_PICKER_DATA_BUCKET }}
+          STOCK_PICKER_ADMIN_PASSWORD_HASH: ${{ secrets.STOCK_PICKER_ADMIN_PASSWORD_HASH }}
+          STOCK_PICKER_AUTH_SESSION_SECRET: ${{ secrets.STOCK_PICKER_AUTH_SESSION_SECRET }}
         run: |
+          if [ -z "$STOCK_PICKER_ADMIN_PASSWORD_HASH" ] || [ -z "$STOCK_PICKER_AUTH_SESSION_SECRET" ]; then
+            echo "::error::Set STOCK_PICKER_ADMIN_PASSWORD_HASH and STOCK_PICKER_AUTH_SESSION_SECRET repository secrets before deploying Cloud Run."
+            exit 1
+          fi
+          AUTH_STORE_PATH="/tmp/stock-picker-auth-store.json"
+          MAX_INSTANCES="2"
+          VOLUME_ARGS=()
+          if [ -n "$STOCK_PICKER_DATA_BUCKET" ]; then
+            AUTH_STORE_PATH="/data/auth-store.json"
+            MAX_INSTANCES="1"
+            VOLUME_ARGS+=(--add-volume "mount-path=/data,type=cloud-storage,bucket=$STOCK_PICKER_DATA_BUCKET,readonly=false")
+          fi
           gcloud run deploy "$SERVICE" \
             --project "$PROJECT_ID" \
             --source . \
             --region "$REGION" \
             --allow-unauthenticated \
-            --max-instances 2 \
-            --set-env-vars "ALLOWED_ORIGINS=https://tamyu321-source.github.io,API_ACCESS_KEYS=${{ vars.CLOUD_RUN_API_ACCESS_KEYS }}"
+            --max-instances "$MAX_INSTANCES" \
+            --set-env-vars "ALLOWED_ORIGINS=https://tamyu321-source.github.io,API_ACCESS_KEYS=$CLOUD_RUN_API_ACCESS_KEYS,ADMIN_USERNAME=$STOCK_PICKER_ADMIN_USERNAME,ADMIN_PASSWORD_HASH=$STOCK_PICKER_ADMIN_PASSWORD_HASH,AUTH_SESSION_SECRET=$STOCK_PICKER_AUTH_SESSION_SECRET,AUTH_STORE_PATH=$AUTH_STORE_PATH" \
+            "${VOLUME_ARGS[@]}"
 
       - name: Show service URL
         run: |

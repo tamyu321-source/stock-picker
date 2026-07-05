@@ -85,12 +85,21 @@ printf 'GCP_SERVICE_ACCOUNT=%s\n' "$SA_EMAIL"
 Run this after the repo changes are pushed or after the source is available in Cloud Shell.
 
 ```bash
+ADMIN_PASSWORD_HASH="pbkdf2_sha256$..." # Generate with: python -m backend.auth_store hash-password "your-admin-password"
+AUTH_SESSION_SECRET="$(openssl rand -base64 48)"
+DATA_BUCKET="${PROJECT_ID}-stock-picker-data"
+
+gcloud storage buckets create "gs://${DATA_BUCKET}" \
+  --location "$REGION" \
+  --uniform-bucket-level-access || true
+
 gcloud run deploy stock-picker-api \
   --source . \
   --region asia-east1 \
   --allow-unauthenticated \
   --max-instances 2 \
-  --set-env-vars ALLOWED_ORIGINS=https://tamyu321-source.github.io,API_ACCESS_KEYS=19940710
+  --set-env-vars "ALLOWED_ORIGINS=https://tamyu321-source.github.io,API_ACCESS_KEYS=19940710,ADMIN_USERNAME=admin,ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH},AUTH_SESSION_SECRET=${AUTH_SESSION_SECRET},AUTH_STORE_PATH=/data/auth-store.json" \
+  --add-volume "mount-path=/data,type=cloud-storage,bucket=${DATA_BUCKET},readonly=false"
 ```
 
 ## Get and test the API URL
@@ -102,5 +111,11 @@ API_URL="$(gcloud run services describe stock-picker-api \
 
 echo "$API_URL"
 
-curl -H "X-Stock-Picker-Key: 19940710" "$API_URL/api/health"
+curl "$API_URL/api/health"
+```
+
+Set GitHub Pages with only the API URL. Do not set `VITE_API_KEY`.
+
+```bash
+gh variable set VITE_API_BASE_URL --body "$API_URL"
 ```

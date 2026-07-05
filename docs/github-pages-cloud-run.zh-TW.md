@@ -119,19 +119,19 @@ Settings -> Secrets and variables -> Actions -> Variables -> New repository vari
 
 ```text
 VITE_API_BASE_URL = https://你的-cloud-run-url.a.run.app
-VITE_API_KEY = 19940710
+STOCK_PICKER_ADMIN_USERNAME = admin
 ```
 
 注意：
 
 - `VITE_API_BASE_URL` 最後不要加 `/`。
-- `VITE_API_KEY` 會被打包到 GitHub Pages 前端，所以它只是共享門禁，不是真正私密密鑰。
+- 不要再設定 `VITE_API_KEY`；新版登入由 Cloud Run 後端驗證 key，請看 `docs/auth-user-management.zh-TW.md`。
 
 如果你有 GitHub CLI，也可以用：
 
 ```bash
 gh variable set VITE_API_BASE_URL --body "$API_URL"
-gh variable set VITE_API_KEY --body "19940710"
+gh variable set STOCK_PICKER_ADMIN_USERNAME --body "admin"
 ```
 
 ## 6. 部署 GitHub Pages

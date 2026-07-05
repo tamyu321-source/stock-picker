@@ -34,7 +34,6 @@ jobs:
       - name: Build static site
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
-          VITE_API_KEY: ${{ vars.VITE_API_KEY || '19940710' }}
         run: npm run build
 
       - name: Upload GitHub Pages artifact

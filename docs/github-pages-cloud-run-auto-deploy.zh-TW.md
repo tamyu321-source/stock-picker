@@ -128,7 +128,8 @@ Settings -> Secrets and variables -> Actions -> Variables -> New repository vari
 GCP_WORKLOAD_IDENTITY_PROVIDER = projects/.../locations/global/workloadIdentityPools/github-actions/providers/github
 GCP_SERVICE_ACCOUNT = github-cloud-run-deployer@stock-picker-prod.iam.gserviceaccount.com
 CLOUD_RUN_API_ACCESS_KEYS = 19940710
-VITE_API_KEY = 19940710
+STOCK_PICKER_ADMIN_USERNAME = admin
+STOCK_PICKER_DATA_BUCKET = stock-picker-prod-stock-picker-data
 ```
 
 如果你在 Cloud Shell 已安裝並登入 GitHub CLI，也可以用：
@@ -137,8 +138,10 @@ VITE_API_KEY = 19940710
 gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --body "$WIF_PROVIDER"
 gh variable set GCP_SERVICE_ACCOUNT --body "$SA_EMAIL"
 gh variable set CLOUD_RUN_API_ACCESS_KEYS --body "19940710"
-gh variable set VITE_API_KEY --body "19940710"
+gh variable set STOCK_PICKER_ADMIN_USERNAME --body "admin"
 ```
+
+管理員密碼 hash、session secret，以及正式持久化資料用的 `STOCK_PICKER_DATA_BUCKET`，請依照 `docs/auth-user-management.zh-TW.md` 設定。不要再設定 `VITE_API_KEY`，前端不應打包使用者 key。
 
 ## 8. 第一次部署 Cloud Run
 
@@ -158,9 +161,13 @@ Cloud Run workflow 會使用：
 
 ```text
 --allow-unauthenticated
---max-instances=2
+--max-instances=2 或設定 STOCK_PICKER_DATA_BUCKET 時自動使用 1
 ALLOWED_ORIGINS=https://tamyu321-source.github.io
 API_ACCESS_KEYS=19940710
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD_HASH=<GitHub Secret>
+AUTH_SESSION_SECRET=<GitHub Secret>
+AUTH_STORE_PATH=/tmp/stock-picker-auth-store.json 或 /data/auth-store.json
 ```
 
 ## 9. 取得 Cloud Run URL
@@ -176,7 +183,7 @@ echo "$API_URL"
 測試 API：
 
 ```bash
-curl -H "X-Stock-Picker-Key: 19940710" "$API_URL/api/health"
+curl "$API_URL/api/health"
 ```
 
 ## 10. 讓 GitHub Pages 指向 Cloud Run

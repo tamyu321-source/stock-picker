@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from unittest.mock import patch
 os.environ["API_ACCESS_KEYS"] = ""
 
 from backend.app import create_app
+from backend.auth_store import hash_secret
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
 from backend.portfolio import normalize_a_share_symbol, parse_portfolio_export
 from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _eastmoney_cn_fund_flow, _parse_eastmoney_datetime, _sina_cn_fund_flow, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
@@ -168,14 +170,94 @@ class ApiTestCase(unittest.TestCase):
         self.assertLess(china_shares["google-news"], base_shares["google-news"])
 
     def test_api_key_is_required_when_configured(self):
-        with patch.dict(os.environ, {"API_ACCESS_KEYS": "19940710"}):
-            client = create_app(FakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(os.environ, {"API_ACCESS_KEYS": "19940710", "AUTH_STORE_PATH": os.path.join(temporary, "users.json"), "AUTH_SESSION_SECRET": "unit-test-secret"}):
+                client = create_app(FakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
 
-        missing_key_response = client.get("/api/health")
-        self.assertEqual(missing_key_response.status_code, 401)
+            health_response = client.get("/api/health")
+            self.assertEqual(health_response.status_code, 200)
+            self.assertTrue(health_response.get_json()["auth"]["enabled"])
 
-        valid_key_response = client.get("/api/health", headers={"X-Stock-Picker-Key": "19940710"})
-        self.assertEqual(valid_key_response.status_code, 200)
+            missing_session_response = client.get("/api/config")
+            self.assertEqual(missing_session_response.status_code, 401)
+
+            bad_login_response = client.post("/api/auth/login", json={"key": "bad"})
+            self.assertEqual(bad_login_response.status_code, 401)
+
+            login_response = client.post("/api/auth/login", json={"key": "19940710"})
+            self.assertEqual(login_response.status_code, 200)
+            token = login_response.get_json()["token"]
+            valid_session_response = client.get("/api/config", headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(valid_session_response.status_code, 200)
+
+    def test_user_state_is_isolated_by_login_key(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(os.environ, {"API_ACCESS_KEYS": "19940710,24681357", "AUTH_STORE_PATH": os.path.join(temporary, "users.json"), "AUTH_SESSION_SECRET": "unit-test-secret"}):
+                client = create_app(FakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+
+            first_token = client.post("/api/auth/login", json={"key": "19940710"}).get_json()["token"]
+            second_token = client.post("/api/auth/login", json={"key": "24681357"}).get_json()["token"]
+
+            first_state = {
+                "settings": {"locale": "zh-TW", "symbolText": "2330.TW"},
+                "savedScans": [{"id": "scan-1", "title": "Taiwan scan"}],
+                "portfolio": {"symbols": ["2330.TW"], "recognizedCount": 1},
+            }
+            update_response = client.put("/api/user/state", json=first_state, headers={"Authorization": f"Bearer {first_token}"})
+            self.assertEqual(update_response.status_code, 200)
+            self.assertEqual(update_response.get_json()["settings"]["symbolText"], "2330.TW")
+
+            first_read = client.get("/api/user/state", headers={"Authorization": f"Bearer {first_token}"}).get_json()
+            second_read = client.get("/api/user/state", headers={"Authorization": f"Bearer {second_token}"}).get_json()
+            self.assertEqual(first_read["settings"]["locale"], "zh-TW")
+            self.assertEqual(second_read["settings"], {})
+            self.assertEqual(second_read["savedScans"], [])
+
+    def test_admin_can_manage_user_keys_and_reset_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            admin_hash = hash_secret("admin-pass", salt="unit-test-salt")
+            with patch.dict(
+                os.environ,
+                {
+                    "API_ACCESS_KEYS": "19940710",
+                    "AUTH_STORE_PATH": os.path.join(temporary, "users.json"),
+                    "AUTH_SESSION_SECRET": "unit-test-secret",
+                    "ADMIN_USERNAME": "root",
+                    "ADMIN_PASSWORD_HASH": admin_hash,
+                },
+            ):
+                client = create_app(FakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+
+            forbidden_response = client.get("/api/admin/users")
+            self.assertEqual(forbidden_response.status_code, 401)
+
+            admin_login = client.post("/api/admin/login", json={"username": "root", "password": "admin-pass"})
+            self.assertEqual(admin_login.status_code, 200)
+            admin_token = admin_login.get_json()["token"]
+
+            create_response = client.post(
+                "/api/admin/users",
+                json={"accessKey": "new-user-key", "label": "Research user", "notes": "TW desk"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            self.assertEqual(create_response.status_code, 201)
+            user = create_response.get_json()["user"]
+            self.assertEqual(user["label"], "Research user")
+
+            user_login = client.post("/api/auth/login", json={"key": "new-user-key"})
+            self.assertEqual(user_login.status_code, 200)
+            user_token = user_login.get_json()["token"]
+            client.put("/api/user/state", json={"settings": {"locale": "zh-CN"}}, headers={"Authorization": f"Bearer {user_token}"})
+
+            reset_response = client.post(f"/api/admin/users/{user['id']}/reset-state", headers={"Authorization": f"Bearer {admin_token}"})
+            self.assertEqual(reset_response.status_code, 200)
+            self.assertEqual(reset_response.get_json()["state"]["settings"], {})
+
+            disable_response = client.patch(f"/api/admin/users/{user['id']}", json={"enabled": False}, headers={"Authorization": f"Bearer {admin_token}"})
+            self.assertEqual(disable_response.status_code, 200)
+            self.assertFalse(disable_response.get_json()["user"]["enabled"])
+            disabled_login = client.post("/api/auth/login", json={"key": "new-user-key"})
+            self.assertEqual(disabled_login.status_code, 401)
 
     def test_refined_strategy_affects_final_assessment_weights(self):
         response = self.client.post(
@@ -1280,6 +1362,13 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(len(payload["picks"]), 20)
         self.assertEqual(payload["scan"]["displayed"], 20)
         self.assertEqual(payload["scan"]["succeeded"], 20)
+        self.assertIn("universe", payload["scan"])
+        self.assertEqual(payload["scan"]["universe"]["mode"], "market-wide-scan")
+        self.assertEqual(payload["scan"]["universe"]["candidatePoolSize"], 20)
+        self.assertEqual(payload["scan"]["universe"]["deepAnalysisCount"], 20)
+        self.assertEqual(payload["scan"]["universe"]["marketCounts"]["TW"], 20)
+        self.assertFalse(payload["scan"]["universe"]["fallbackActive"])
+        self.assertEqual(payload["scan"]["universe"]["sourceBreakdown"][0]["source"], "test-neutral")
         self.assertNotIn("buy", {pick["verdict"] for pick in payload["picks"]})
 
     def test_auto_scan_sector_analysis_uses_full_evaluated_universe(self):
@@ -1327,6 +1416,8 @@ class ApiTestCase(unittest.TestCase):
 
         self.assertLess(len(payload["picks"]), payload["scan"]["succeeded"])
         self.assertEqual(payload["scan"]["displayed"], len(payload["picks"]))
+        self.assertEqual(payload["scan"]["universe"]["candidatePoolSize"], payload["scan"]["requested"])
+        self.assertEqual(payload["scan"]["universe"]["deepAnalysisCount"], payload["scan"]["succeeded"])
         self.assertEqual(sector["count"], payload["scan"]["succeeded"])
         self.assertIn("averageTScore", sector)
         self.assertIn("averageDownsideRiskScore", sector)
@@ -1922,6 +2013,37 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("etfLiquidity", metric_keys)
         self.assertEqual(_manual_symbol_candidates("510300", {"CN"}), ["510300.SS"])
         self.assertTrue(is_common_equity_symbol("510300.SS", "CN"))
+
+    def test_known_etf_symbol_overrides_default_stock_snapshot_type(self):
+        class KnownEtfWithDefaultTypeProvider:
+            def fetch(self, symbol):
+                closes = [4.2 + index * 0.01 for index in range(130)]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="CSI 300 ETF",
+                    market="CN",
+                    sector="ETF / Fund",
+                    price=round(closes[-1], 3),
+                    change=0.5,
+                    currency="CNY",
+                    closes=closes,
+                    info={
+                        "quoteType": "EQUITY",
+                        "shortName": "CSI 300 ETF",
+                        "regularMarketVolume": 80_000_000,
+                        "marketCap": 120_000_000_000,
+                        "totalAssets": 120_000_000_000,
+                    },
+                )
+
+        client = create_app(KnownEtfWithDefaultTypeProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["CN"], "symbols": ["510300.SS"], "strategyId": "balanced"})
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        self.assertEqual(pick["instrumentType"], "etf")
+        self.assertEqual(pick["decisionEngine"]["instrumentType"], "etf")
+        self.assertIn("etfTrend", {metric["key"] for metric in pick["financialAnalysis"]["metrics"]})
 
     def test_response_contains_sector_analysis(self):
         response = self.client.post("/api/analyze", json={"markets": ["US"], "symbols": ["AAPL", "MSFT"], "strategyId": "balanced"})

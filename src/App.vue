@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, currentDataMode, fetchConfig, fetchStockChart, importPortfolioFile, refreshStrategyLibrary, type AnalysisScan, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type MarketProfile, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights } from './api';
+import { analyzeStocksStream, clearAuthSession, createAdminUser, currentDataMode, fetchAdminUsers, fetchConfig, fetchCurrentSession, fetchStockChart, fetchUserState, getAuthSession, importPortfolioFile, loginAdmin, loginWithAccessKey, refreshStrategyLibrary, resetAdminUserState, saveUserState, setAuthSession, updateAdminUser, type AdminUser, type AnalysisScan, type AnalysisStreamEvent, type AppConfig, type AuthSession, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type MarketProfile, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights, type UserState } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -9,6 +9,8 @@ type LocalizedText = Partial<Record<StandardLocale, string>> & { en: string };
 type YogurtSoundCue = 'appear' | 'tap';
 type ResultMarketFilter = 'all' | Market;
 type ResultVerdictFilter = 'all' | Pick['verdict'] | 't';
+type InvestmentTask = 'discover' | 'portfolio' | 'etf' | 'shortTerm';
+type WorkbenchBucket = 'all' | 'buy' | 'hold' | 'risk' | 'etf' | 'holdings';
 type ResultSortKey =
   | 'recommended'
   | 'overall'
@@ -61,6 +63,8 @@ const symbolText = ref('');
 const picks = ref<Pick[]>([]);
 const sectors = ref<SectorAnalysis[]>([]);
 const activeView = ref<'stocks' | 'sectors'>('stocks');
+const activeInvestmentTask = ref<InvestmentTask>('discover');
+const activeWorkbenchBucket = ref<WorkbenchBucket>('all');
 const resultMarketFilter = ref<ResultMarketFilter>('all');
 const resultVerdictFilter = ref<ResultVerdictFilter>('all');
 const resultSortKey = ref<ResultSortKey>('recommended');
@@ -105,6 +109,8 @@ const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
 const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 't', 'watch', 'sell'];
 const resultSortOptions: ResultSortKey[] = ['recommended', 'decision', 'overall', 'score', 'todayBuy', 'futureRise', 'profitableExit', 'newsHeat', 'continuation', 'riskLow', 'tScore', 'change', 'confidence'];
+const investmentTasks: InvestmentTask[] = ['discover', 'portfolio', 'etf', 'shortTerm'];
+const workbenchBuckets: WorkbenchBucket[] = ['all', 'buy', 'hold', 'risk', 'etf', 'holdings'];
 const languageOptions: Array<{ id: Locale; label: string; shortLabel: string; flagClass: string }> = [
   { id: 'en', label: 'English', shortLabel: 'EN', flagClass: 'flag-uk' },
   { id: 'zh-CN', label: '简体中文', shortLabel: '简', flagClass: 'flag-cn' },
@@ -113,6 +119,24 @@ const languageOptions: Array<{ id: Locale; label: string; shortLabel: string; fl
   { id: 'ja', label: '日本語', shortLabel: '日', flagClass: 'flag-jp' },
   { id: 'ko', label: '한국어', shortLabel: '한', flagClass: 'flag-kr' }
 ];
+const authSession = ref<AuthSession | null>(getAuthSession());
+const authMode = ref<'user' | 'admin'>('user');
+const accessKeyInput = ref('');
+const adminUsernameInput = ref('');
+const adminPasswordInput = ref('');
+const authLoading = ref(false);
+const authError = ref('');
+const userStateReady = ref(false);
+const userStateSaving = ref(false);
+const userStateError = ref('');
+const adminUsers = ref<AdminUser[]>([]);
+const adminLoading = ref(false);
+const adminError = ref('');
+const newUserKey = ref('');
+const newUserLabel = ref('');
+const newUserNotes = ref('');
+const newUserEnabled = ref(true);
+let userStateSyncTimer: number | undefined;
 
 const strategyLibraryText: Record<Locale, {
   refreshStrategies: string;
@@ -723,6 +747,7 @@ const chartCandles = computed(() => {
 });
 const marketOptions = computed(() => config.value?.markets ?? []);
 const marketProfiles = computed<Partial<Record<Market, MarketProfile>>>(() => config.value?.marketProfiles ?? {});
+const scanUniverse = computed(() => scanInfo.value?.universe ?? null);
 const preferredMarketsLabel = computed(() => {
   const preferred = selectedMarkets.value
     .filter((market) => marketProfiles.value[market]?.preferred || marketProfiles.value[market]?.localPriority)
@@ -732,6 +757,7 @@ const preferredMarketsLabel = computed(() => {
   return preferred.slice(0, 2).join(' · ');
 });
 const filteredPicks = computed(() => picks.value.filter((pick) => {
+  if (!pickMatchesWorkbenchBucket(pick, activeWorkbenchBucket.value)) return false;
   const marketMatches = resultMarketFilter.value === 'all' || pick.market === resultMarketFilter.value;
   const verdictMatches = resultVerdictFilter.value === 'all'
     || (resultVerdictFilter.value === 't' ? pick.tPlan?.suitability === 'candidate' : finalVerdictBucket(pick) === resultVerdictFilter.value);
@@ -739,13 +765,24 @@ const filteredPicks = computed(() => picks.value.filter((pick) => {
 }).map((pick, index) => ({ pick, index }))
   .sort((left, right) => compareSortedPicks(left, right))
   .map((item) => item.pick));
+const decisionBucketItems = computed(() => workbenchBuckets.map((bucket) => ({
+  bucket,
+  label: workbenchBucketLabel(bucket),
+  count: picks.value.filter((pick) => pickMatchesWorkbenchBucket(pick, bucket)).length,
+  tone: bucket === 'buy' ? 'buy' : bucket === 'risk' ? 'sell' : bucket === 'etf' ? 'etf' : bucket === 'holdings' ? 'holding' : 'watch'
+})));
+const topHoldingPicks = computed(() => picks.value.filter((pick) => pick.holding && pick.holdingAnalysis).slice(0, 4));
+const topEtfPicks = computed(() => picks.value.filter((pick) => pick.instrumentType === 'etf').slice(0, 4));
 const flattenedSignals = computed(() => filteredPicks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
-const resultFiltersActive = computed(() => resultMarketFilter.value !== 'all' || resultVerdictFilter.value !== 'all' || resultSortKey.value !== 'recommended' || resultSortDirection.value !== 'desc');
+const resultFiltersActive = computed(() => activeWorkbenchBucket.value !== 'all' || resultMarketFilter.value !== 'all' || resultVerdictFilter.value !== 'all' || resultSortKey.value !== 'recommended' || resultSortDirection.value !== 'desc');
 const isDemoDataMode = computed(() => dataMode.value === 'demo');
 const dataModeLabel = computed(() => (isDemoDataMode.value ? t.value.demoPreview : t.value.liveBackend));
 const dataModeDescription = computed(() => (isDemoDataMode.value ? t.value.demoPreviewDetail : t.value.liveBackendDetail));
 const canSaveScan = computed(() => picks.value.length > 0 && !loading.value);
 const activePortfolio = computed(() => analysisPortfolio.value ?? importedPortfolio.value);
+const isUserSession = computed(() => authSession.value?.role === 'user');
+const isAdminSession = computed(() => authSession.value?.role === 'admin');
+const authUserLabel = computed(() => authSession.value?.user.label || authSession.value?.user.id || '');
 const portfolioSymbols = computed(() => importedPortfolio.value?.symbols ?? []);
 const yogurtSecretLocalized = computed(() => locale.value === 'zh-TW' || locale.value === 'nan-TW');
 const yogurtSecretTriggerLabel = computed(() => (locale.value === 'nan-TW' ? '活菌雷達' : '菌群雷達'));
@@ -854,8 +891,20 @@ function normalizeWeight(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.min(40, Math.max(0, value)) : null;
 }
 
-function persistSettings() {
-  const settings: PersistedSettings = {
+function authUserId() {
+  return authSession.value?.role === 'user' ? authSession.value.user.id : 'guest';
+}
+
+function userSettingsStorageKey() {
+  return `${SETTINGS_STORAGE_KEY}.${authUserId()}`;
+}
+
+function userSavedScansStorageKey() {
+  return `${SAVED_SCANS_STORAGE_KEY}.${authUserId()}`;
+}
+
+function currentPersistedSettings(): PersistedSettings {
+  return {
     locale: locale.value,
     selectedMarkets: selectedMarkets.value,
     selectedStrategyId: selectedStrategyId.value,
@@ -866,11 +915,62 @@ function persistSettings() {
     resultSortKey: resultSortKey.value,
     resultSortDirection: resultSortDirection.value
   };
+}
+
+function applyPersistedSettings(settings: PersistedSettings | Record<string, unknown> | undefined) {
+  if (!settings || typeof settings !== 'object') return;
+  const persisted = settings as PersistedSettings;
+  if (isLocale(persisted.locale)) {
+    locale.value = persisted.locale;
+  }
+  if (Array.isArray(persisted.selectedMarkets)) {
+    selectedMarkets.value = persisted.selectedMarkets.filter(isMarket);
+  }
+  if (typeof persisted.selectedStrategyId === 'string' && persisted.selectedStrategyId) {
+    selectedStrategyId.value = persisted.selectedStrategyId;
+  }
+  if (typeof persisted.useCustom === 'boolean') {
+    useCustom.value = persisted.useCustom;
+  }
+  if (persisted.customWeights && typeof persisted.customWeights === 'object') {
+    weightKeys.forEach((key) => {
+      const value = normalizeWeight(persisted.customWeights?.[key]);
+      if (value !== null) {
+        customWeights[key] = value;
+      }
+    });
+  }
+  if (typeof persisted.symbolText === 'string') {
+    symbolText.value = persisted.symbolText;
+  }
+  if (typeof persisted.manualHoldingText === 'string') {
+    manualHoldingText.value = persisted.manualHoldingText;
+  }
+  if (isResultSortKey(persisted.resultSortKey)) {
+    resultSortKey.value = persisted.resultSortKey;
+  }
+  if (isSortDirection(persisted.resultSortDirection)) {
+    resultSortDirection.value = persisted.resultSortDirection;
+  }
+}
+
+function currentUserState(): UserState {
+  return {
+    settings: currentPersistedSettings() as Record<string, unknown>,
+    savedScans: cloneJson(savedScans.value),
+    portfolio: activePortfolio.value ? cloneJson(activePortfolio.value) : null
+  };
+}
+
+function persistSettings() {
+  if (!authSession.value || authSession.value.role !== 'user' || !userStateReady.value) return;
+  const settings = currentPersistedSettings();
   try {
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    localStorage.setItem(userSettingsStorageKey(), JSON.stringify(settings));
   } catch {
     // Ignore storage failures so the scanner remains usable in private or restricted contexts.
   }
+  scheduleUserStateSync();
 }
 
 function refreshDataMode() {
@@ -879,45 +979,12 @@ function refreshDataMode() {
 
 function restoreSettings() {
   try {
-    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    const raw = localStorage.getItem(userSettingsStorageKey()) ?? localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return;
-
-    const settings = JSON.parse(raw) as PersistedSettings;
-    if (isLocale(settings.locale)) {
-      locale.value = settings.locale;
-    }
-    if (Array.isArray(settings.selectedMarkets)) {
-      selectedMarkets.value = settings.selectedMarkets.filter(isMarket);
-    }
-    if (typeof settings.selectedStrategyId === 'string' && settings.selectedStrategyId) {
-      selectedStrategyId.value = settings.selectedStrategyId;
-    }
-    if (typeof settings.useCustom === 'boolean') {
-      useCustom.value = settings.useCustom;
-    }
-    if (settings.customWeights && typeof settings.customWeights === 'object') {
-      weightKeys.forEach((key) => {
-        const value = normalizeWeight(settings.customWeights?.[key]);
-        if (value !== null) {
-          customWeights[key] = value;
-        }
-      });
-    }
-    if (typeof settings.symbolText === 'string') {
-      symbolText.value = settings.symbolText;
-    }
-    if (typeof settings.manualHoldingText === 'string') {
-      manualHoldingText.value = settings.manualHoldingText;
-    }
-    if (isResultSortKey(settings.resultSortKey)) {
-      resultSortKey.value = settings.resultSortKey;
-    }
-    if (isSortDirection(settings.resultSortDirection)) {
-      resultSortDirection.value = settings.resultSortDirection;
-    }
+    applyPersistedSettings(JSON.parse(raw) as PersistedSettings);
   } catch {
     try {
-      localStorage.removeItem(SETTINGS_STORAGE_KEY);
+      localStorage.removeItem(userSettingsStorageKey());
     } catch {
       // Ignore storage failures so the scanner remains usable in private or restricted contexts.
     }
@@ -930,7 +997,7 @@ function cloneJson<T>(value: T): T {
 
 function restoreSavedScans() {
   try {
-    const raw = localStorage.getItem(SAVED_SCANS_STORAGE_KEY);
+    const raw = localStorage.getItem(userSavedScansStorageKey()) ?? localStorage.getItem(SAVED_SCANS_STORAGE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return;
@@ -939,7 +1006,7 @@ function restoreSavedScans() {
       .slice(0, SAVED_SCAN_LIMIT);
   } catch {
     try {
-      localStorage.removeItem(SAVED_SCANS_STORAGE_KEY);
+      localStorage.removeItem(userSavedScansStorageKey());
     } catch {
       // Ignore storage failures so export and scanning still work.
     }
@@ -947,10 +1014,78 @@ function restoreSavedScans() {
 }
 
 function persistSavedScans() {
+  if (!authSession.value || authSession.value.role !== 'user' || !userStateReady.value) return;
   try {
-    localStorage.setItem(SAVED_SCANS_STORAGE_KEY, JSON.stringify(savedScans.value.slice(0, SAVED_SCAN_LIMIT)));
+    localStorage.setItem(userSavedScansStorageKey(), JSON.stringify(savedScans.value.slice(0, SAVED_SCAN_LIMIT)));
   } catch {
     // Ignore storage failures so export and scanning still work.
+  }
+  scheduleUserStateSync();
+}
+
+function applySavedScans(value: unknown) {
+  if (!Array.isArray(value)) return false;
+  savedScans.value = value
+    .filter((item): item is SavedScan => item && typeof item.id === 'string' && Array.isArray((item as SavedScan).picks))
+    .slice(0, SAVED_SCAN_LIMIT);
+  return true;
+}
+
+function applyUserState(state: UserState) {
+  userStateReady.value = false;
+  if (state.settings && Object.keys(state.settings).length) {
+    applyPersistedSettings(state.settings);
+  } else {
+    restoreSettings();
+  }
+  if (!applySavedScans(state.savedScans)) {
+    restoreSavedScans();
+  }
+  if (state.portfolio && typeof state.portfolio === 'object') {
+    const portfolio = cloneJson(state.portfolio as PortfolioImportResponse | PortfolioAnalysis);
+    if ('matchedCount' in portfolio) {
+      analysisPortfolio.value = portfolio as PortfolioAnalysis;
+      importedPortfolio.value = null;
+    } else {
+      importedPortfolio.value = portfolio as PortfolioImportResponse;
+      analysisPortfolio.value = null;
+    }
+  }
+  userStateReady.value = true;
+  persistSettings();
+  persistSavedScans();
+}
+
+async function loadUserState() {
+  userStateError.value = '';
+  try {
+    applyUserState(await fetchUserState());
+  } catch (cause) {
+    userStateError.value = cause instanceof Error ? cause.message : 'Failed to load user state';
+    userStateReady.value = true;
+    restoreSettings();
+    restoreSavedScans();
+  }
+}
+
+function scheduleUserStateSync() {
+  if (!authSession.value || authSession.value.role !== 'user' || !userStateReady.value) return;
+  if (userStateSyncTimer) window.clearTimeout(userStateSyncTimer);
+  userStateSyncTimer = window.setTimeout(() => {
+    void persistUserStateNow();
+  }, 700);
+}
+
+async function persistUserStateNow() {
+  if (!authSession.value || authSession.value.role !== 'user' || !userStateReady.value) return;
+  userStateSaving.value = true;
+  userStateError.value = '';
+  try {
+    await saveUserState(currentUserState());
+  } catch (cause) {
+    userStateError.value = cause instanceof Error ? cause.message : 'Failed to save user state';
+  } finally {
+    userStateSaving.value = false;
   }
 }
 
@@ -1006,6 +1141,170 @@ async function refreshOnlineStrategies() {
     refreshingStrategies.value = false;
     refreshDataMode();
   }
+}
+
+async function bootUserApp() {
+  userStateReady.value = false;
+  config.value = await fetchConfig();
+  refreshDataMode();
+  normalizeStrategySelection();
+  await loadUserState();
+}
+
+async function resumeAuthSession() {
+  const session = getAuthSession();
+  if (!session) return;
+  authSession.value = session;
+  try {
+    const valid = await fetchCurrentSession();
+    if (!valid) {
+      logout();
+      return;
+    }
+    if (session.role === 'admin') {
+      await loadAdminUsers();
+    } else {
+      await bootUserApp();
+    }
+  } catch {
+    logout();
+  }
+}
+
+async function submitAccessLogin() {
+  if (authLoading.value) return;
+  authLoading.value = true;
+  authError.value = '';
+  try {
+    authSession.value = await loginWithAccessKey(accessKeyInput.value.trim());
+    accessKeyInput.value = '';
+    await bootUserApp();
+  } catch (cause) {
+    authError.value = cause instanceof Error ? cause.message : loginErrorLabel();
+  } finally {
+    authLoading.value = false;
+  }
+}
+
+async function submitAdminLogin() {
+  if (authLoading.value) return;
+  authLoading.value = true;
+  authError.value = '';
+  try {
+    authSession.value = await loginAdmin(adminUsernameInput.value.trim(), adminPasswordInput.value);
+    adminPasswordInput.value = '';
+    await loadAdminUsers();
+  } catch (cause) {
+    authError.value = cause instanceof Error ? cause.message : adminLoginErrorLabel();
+  } finally {
+    authLoading.value = false;
+  }
+}
+
+function logout() {
+  if (userStateSyncTimer) window.clearTimeout(userStateSyncTimer);
+  clearAuthSession();
+  setAuthSession(null);
+  authSession.value = null;
+  config.value = null;
+  userStateReady.value = false;
+  userStateError.value = '';
+  savedScans.value = [];
+  importedPortfolio.value = null;
+  analysisPortfolio.value = null;
+  picks.value = [];
+  sectors.value = [];
+  scanInfo.value = null;
+  generatedAt.value = '';
+}
+
+async function loadAdminUsers() {
+  adminLoading.value = true;
+  adminError.value = '';
+  try {
+    adminUsers.value = await fetchAdminUsers();
+  } catch (cause) {
+    adminError.value = cause instanceof Error ? cause.message : adminLoadErrorLabel();
+  } finally {
+    adminLoading.value = false;
+  }
+}
+
+async function submitNewUser() {
+  if (adminLoading.value) return;
+  adminLoading.value = true;
+  adminError.value = '';
+  try {
+    await createAdminUser({
+      accessKey: newUserKey.value.trim(),
+      label: newUserLabel.value.trim(),
+      notes: newUserNotes.value.trim(),
+      enabled: newUserEnabled.value
+    });
+    newUserKey.value = '';
+    newUserLabel.value = '';
+    newUserNotes.value = '';
+    newUserEnabled.value = true;
+    await loadAdminUsers();
+  } catch (cause) {
+    adminError.value = cause instanceof Error ? cause.message : adminSaveErrorLabel();
+  } finally {
+    adminLoading.value = false;
+  }
+}
+
+async function saveAdminUser(user: AdminUser) {
+  adminError.value = '';
+  try {
+    const updated = await updateAdminUser(user.id, {
+      label: user.label,
+      notes: user.notes,
+      enabled: Boolean(user.enabled)
+    });
+    adminUsers.value = adminUsers.value.map((item) => (item.id === updated.id ? updated : item));
+  } catch (cause) {
+    adminError.value = cause instanceof Error ? cause.message : adminSaveErrorLabel();
+  }
+}
+
+async function resetAdminUser(user: AdminUser) {
+  adminError.value = '';
+  try {
+    await resetAdminUserState(user.id);
+    await loadAdminUsers();
+  } catch (cause) {
+    adminError.value = cause instanceof Error ? cause.message : adminSaveErrorLabel();
+  }
+}
+
+function authHeading() {
+  return localeText({ en: 'Sign in', 'zh-CN': '登入', 'zh-TW': '登入', ja: 'ログイン', ko: '로그인' });
+}
+
+function authSubheading() {
+  return localeText({
+    en: 'Enter your access key before using market scans, holdings, or saved research.',
+    'zh-CN': '输入正确 key 后，才可以使用扫描、持仓和保存的研究资料。',
+    'zh-TW': '輸入正確 key 後，才可以使用掃描、持倉和保存的研究資料。',
+    ja: 'アクセスキーを入力してからスキャン、保有、保存済み研究を利用します。',
+    ko: '액세스 키를 입력해야 스캔, 보유, 저장된 리서치를 사용할 수 있습니다.'
+  });
+}
+
+function loginErrorLabel() {
+  return localeText({ en: 'Invalid access key.', 'zh-CN': 'key 不正确或已停用。', 'zh-TW': 'key 不正確或已停用。', ja: 'キーが無効です。', ko: '키가 올바르지 않습니다.' });
+}
+
+function adminLoginErrorLabel() {
+  return localeText({ en: 'Invalid administrator credentials.', 'zh-CN': '管理员账号或密码不正确。', 'zh-TW': '管理員帳號或密碼不正確。', ja: '管理者認証に失敗しました。', ko: '관리자 인증에 실패했습니다.' });
+}
+
+function adminLoadErrorLabel() {
+  return localeText({ en: 'Failed to load users.', 'zh-CN': '无法载入用户。', 'zh-TW': '無法載入使用者。', ja: 'ユーザーを読み込めません。', ko: '사용자를 불러오지 못했습니다.' });
+}
+
+function adminSaveErrorLabel() {
+  return localeText({ en: 'Failed to save user.', 'zh-CN': '无法保存用户。', 'zh-TW': '無法保存使用者。', ja: 'ユーザーを保存できません。', ko: '사용자를 저장하지 못했습니다.' });
 }
 
 function chartX(index: number, total: number) {
@@ -1142,6 +1441,52 @@ function marketLabel(market: Market) {
   return marketLabels[locale.value][market] ?? market;
 }
 
+function selectInvestmentTask(task: InvestmentTask) {
+  activeInvestmentTask.value = task;
+  if (task === 'portfolio') activeWorkbenchBucket.value = 'holdings';
+  if (task === 'etf') activeWorkbenchBucket.value = 'etf';
+  if (task === 'shortTerm') {
+    activeWorkbenchBucket.value = 'all';
+    resultVerdictFilter.value = 't';
+    resultSortKey.value = 'tScore';
+  }
+  if (task === 'discover') {
+    activeWorkbenchBucket.value = 'buy';
+    if (resultVerdictFilter.value === 't') resultVerdictFilter.value = 'all';
+    resultSortKey.value = 'decision';
+  }
+}
+
+function controlPanelTitle() {
+  return localeText({
+    en: 'Investment task',
+    'zh-CN': '投资任务',
+    'zh-TW': '投資任務',
+    ja: '投資タスク',
+    ko: '투자 작업'
+  });
+}
+
+function investmentTaskLabel(task: InvestmentTask) {
+  const labels: Record<InvestmentTask, LocalizedText> = {
+    discover: { en: 'Find buys', 'zh-CN': '寻找可买', 'zh-TW': '尋找可買', ja: '買い候補', ko: '매수 후보' },
+    portfolio: { en: 'Review holdings', 'zh-CN': '检查持仓', 'zh-TW': '檢查持倉', ja: '保有点検', ko: '보유 점검' },
+    etf: { en: 'ETF screen', 'zh-CN': 'ETF 筛选', 'zh-TW': 'ETF 篩選', ja: 'ETF選別', ko: 'ETF 선별' },
+    shortTerm: { en: 'T / next day', 'zh-CN': '做T/次日', 'zh-TW': '做T/隔日', ja: 'T/翌日', ko: 'T/다음날' }
+  };
+  return localeText(labels[task]);
+}
+
+function investmentTaskHint(task: InvestmentTask) {
+  const labels: Record<InvestmentTask, LocalizedText> = {
+    discover: { en: 'Market-wide candidates', 'zh-CN': '全市场候选池', 'zh-TW': '全市場候選池', ja: '市場全体候補', ko: '시장 전체 후보' },
+    portfolio: { en: 'Cost and sizing', 'zh-CN': '成本与仓位', 'zh-TW': '成本與倉位', ja: 'コストと配分', ko: '원가와 비중' },
+    etf: { en: 'Core or tactical', 'zh-CN': '核心或战术', 'zh-TW': '核心或戰術', ja: 'コア/戦術', ko: '핵심/전술' },
+    shortTerm: { en: 'Liquidity and exit', 'zh-CN': '流动性与卖点', 'zh-TW': '流動性與賣點', ja: '流動性と出口', ko: '유동성과 청산' }
+  };
+  return localeText(labels[task]);
+}
+
 function profileForMarket(market: Market) {
   return marketProfiles.value[market] ?? scanInfo.value?.marketProfiles?.[market];
 }
@@ -1160,8 +1505,17 @@ function marketCoverageLabel(market: Market) {
   const profile = profileForMarket(market);
   if (!profile) return marketCoverageTierLabel('basic');
   const score = Number(profile.sourceReliabilityScore ?? 0);
-  const suffix = Number.isFinite(score) && score > 0 ? ` ${score.toFixed(0)}` : '';
+  const suffix = Number.isFinite(score) && score > 0 ? ` · ${marketReliabilityLabel(score)}` : '';
   return `${marketCoverageTierLabel(profile.coverageTier)}${suffix}`;
+}
+
+function marketReliabilityLabel(score: number) {
+  const value = score.toFixed(0);
+  if (locale.value === 'en') return `source ${value}`;
+  if (locale.value === 'zh-CN') return `资料源 ${value}`;
+  if (locale.value === 'ja') return `情報源 ${value}`;
+  if (locale.value === 'ko') return `데이터원 ${value}`;
+  return `資料源 ${value}`;
 }
 
 function marketSupportTitle() {
@@ -1179,6 +1533,127 @@ function marketSourceStackLabel(pick: Pick) {
   const sources = support?.sources?.filter(Boolean).slice(0, 2);
   if (sources?.length) return sources.join(' / ');
   return marketCoverageTierLabel(support?.coverageTier ?? profileForMarket(pick.market)?.coverageTier);
+}
+
+function taskInputTitle() {
+  if (activeInvestmentTask.value === 'portfolio') return portfolioImportTitle();
+  if (activeInvestmentTask.value === 'etf') {
+    return localeText({ en: 'ETF and holdings', 'zh-CN': 'ETF 与持仓', 'zh-TW': 'ETF 與持倉', ja: 'ETFと保有', ko: 'ETF와 보유' });
+  }
+  return localeText({ en: 'Universe and holdings', 'zh-CN': '股票池与持仓', 'zh-TW': '股票池與持倉', ja: 'ユニバースと保有', ko: '유니버스와 보유' });
+}
+
+function pickMatchesWorkbenchBucket(pick: Pick, bucket: WorkbenchBucket) {
+  if (bucket === 'all') return true;
+  if (bucket === 'etf') return pick.instrumentType === 'etf';
+  if (bucket === 'holdings') return Boolean(pick.holding && pick.holdingAnalysis);
+  const action = pick.decisionEngine?.action;
+  if (bucket === 'buy') return finalVerdictBucket(pick) === 'buy' || action === 'accumulate';
+  if (bucket === 'risk') return finalVerdictBucket(pick) === 'sell' || action === 'reduce' || action === 'exit';
+  if (bucket === 'hold') return finalVerdictBucket(pick) === 'watch' && action !== 'reduce' && action !== 'exit';
+  return true;
+}
+
+function workbenchBucketLabel(bucket: WorkbenchBucket) {
+  const labels: Record<WorkbenchBucket, LocalizedText> = {
+    all: { en: 'All', 'zh-CN': '全部', 'zh-TW': '全部', ja: 'すべて', ko: '전체' },
+    buy: { en: 'Worth buying', 'zh-CN': '值得买入', 'zh-TW': '值得買入', ja: '買い候補', ko: '매수 가치' },
+    hold: { en: 'Hold / watch', 'zh-CN': '持有观察', 'zh-TW': '持有觀察', ja: '保有/監視', ko: '보유/관찰' },
+    risk: { en: 'Reduce / exit', 'zh-CN': '减仓/退出', 'zh-TW': '減倉/退出', ja: '縮小/退出', ko: '축소/청산' },
+    etf: { en: 'ETF', 'zh-CN': 'ETF', 'zh-TW': 'ETF', ja: 'ETF', ko: 'ETF' },
+    holdings: { en: 'Holdings', 'zh-CN': '已持仓', 'zh-TW': '已持倉', ja: '保有中', ko: '보유' }
+  };
+  return localeText(labels[bucket]);
+}
+
+function workbenchBucketHint(bucket: WorkbenchBucket) {
+  const labels: Record<WorkbenchBucket, LocalizedText> = {
+    all: { en: 'Full result set', 'zh-CN': '完整结果', 'zh-TW': '完整結果', ja: '全結果', ko: '전체 결과' },
+    buy: { en: 'Action is accumulate or buy', 'zh-CN': '买入/分批买入', 'zh-TW': '買入/分批買入', ja: '買い/積み増し', ko: '매수/분할 매수' },
+    hold: { en: 'No urgent action', 'zh-CN': '无需急动', 'zh-TW': '無需急動', ja: '急ぎなし', ko: '긴급 조치 없음' },
+    risk: { en: 'Reduce or exit signal', 'zh-CN': '减仓/退出信号', 'zh-TW': '減倉/退出訊號', ja: '縮小/撤退', ko: '축소/청산 신호' },
+    etf: { en: 'ETF only', 'zh-CN': '只看 ETF', 'zh-TW': '只看 ETF', ja: 'ETFのみ', ko: 'ETF만' },
+    holdings: { en: 'With cost and size', 'zh-CN': '含成本仓位', 'zh-TW': '含成本倉位', ja: 'コスト/数量あり', ko: '원가/수량 포함' }
+  };
+  return localeText(labels[bucket]);
+}
+
+function decisionWorkbenchTitle() {
+  return localeText({
+    en: 'Decision workbench',
+    'zh-CN': '决策工作台',
+    'zh-TW': '決策工作台',
+    ja: '判断ワークベンチ',
+    ko: '의사결정 워크벤치'
+  });
+}
+
+function workbenchSubtitle() {
+  const universe = scanUniverse.value;
+  if (!universe) {
+    if (locale.value === 'en') return 'Run a scan to split candidates by decision, ETF, and holdings.';
+    if (locale.value === 'zh-CN') return '开始扫描后会按决策、ETF、持仓分流。';
+    if (locale.value === 'ja') return 'スキャン後、判断・ETF・保有で分流します。';
+    if (locale.value === 'ko') return '스캔 후 의사결정, ETF, 보유로 분류합니다.';
+    return '開始掃描後會按決策、ETF、持倉分流。';
+  }
+  return `${scanUniverseModeLabel(universe.mode)} · ${universe.candidatePoolSize} ${scanUniverseMetricLabel('candidatePoolSize')} · ${universe.deepAnalysisCount} ${scanUniverseMetricLabel('deepAnalysisCount')}`;
+}
+
+function sourceRoleLabel(role: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    'market-wide': { en: 'market-wide', 'zh-CN': '全市场', 'zh-TW': '全市場', ja: '市場全体', ko: '시장 전체' },
+    fallback: { en: 'fallback', 'zh-CN': 'fallback', 'zh-TW': 'fallback', ja: 'fallback', ko: 'fallback' },
+    requested: { en: 'requested', 'zh-CN': '指定', 'zh-TW': '指定', ja: '指定', ko: '지정' },
+    portfolio: { en: 'portfolio', 'zh-CN': '持仓', 'zh-TW': '持倉', ja: '保有', ko: '보유' },
+    local: { en: 'local', 'zh-CN': '本地', 'zh-TW': '本地', ja: 'ローカル', ko: '로컬' }
+  };
+  return localeText(labels[role || 'requested'] ?? labels.requested);
+}
+
+function scanUniverseModeLabel(mode: string | undefined) {
+  if (mode === 'portfolio-holdings') {
+    return localeText({ en: 'Holdings review', 'zh-CN': '持仓检查', 'zh-TW': '持倉檢查', ja: '保有点検', ko: '보유 점검' });
+  }
+  if (mode === 'manual-symbols') {
+    return localeText({ en: 'Manual symbols', 'zh-CN': '指定股票', 'zh-TW': '指定股票', ja: '指定銘柄', ko: '지정 종목' });
+  }
+  return localeText({ en: 'Market-wide candidate pool', 'zh-CN': '全市场候选池', 'zh-TW': '全市場候選池', ja: '市場全体候補', ko: '시장 전체 후보' });
+}
+
+function scanUniverseMetricLabel(metric: string) {
+  const labels: Record<string, LocalizedText> = {
+    candidatePoolSize: { en: 'candidates', 'zh-CN': '候选', 'zh-TW': '候選', ja: '候補', ko: '후보' },
+    deepAnalysisCount: { en: 'deep analyzed', 'zh-CN': '深度分析', 'zh-TW': '深度分析', ja: '深掘り分析', ko: '심층 분석' },
+    displayedCount: { en: 'shown', 'zh-CN': '显示', 'zh-TW': '顯示', ja: '表示', ko: '표시' },
+    sourceBreakdown: { en: 'sources', 'zh-CN': '来源', 'zh-TW': '來源', ja: '情報源', ko: '출처' }
+  };
+  return localeText(labels[metric] ?? labels.candidatePoolSize);
+}
+
+function scanUniverseSourcePreview() {
+  const sources = scanUniverse.value?.sourceBreakdown ?? [];
+  if (!sources.length) return '-';
+  return sources.slice(0, 2).map((source) => `${source.label} ${source.count}`).join(' · ');
+}
+
+function scanUniverseFallbackLabel() {
+  const active = Boolean(scanUniverse.value?.fallbackActive);
+  if (active) {
+    return localeText({ en: 'Fallback used', 'zh-CN': '已使用 fallback', 'zh-TW': '已使用 fallback', ja: 'fallback使用', ko: 'fallback 사용' });
+  }
+  return localeText({ en: 'No fallback', 'zh-CN': '未用 fallback', 'zh-TW': '未用 fallback', ja: 'fallbackなし', ko: 'fallback 없음' });
+}
+
+function fullMarketAssuranceLabel() {
+  const universe = scanUniverse.value;
+  if (!universe) {
+    return localeText({ en: 'Awaiting scan evidence', 'zh-CN': '等待扫描证据', 'zh-TW': '等待掃描證據', ja: 'スキャン根拠待ち', ko: '스캔 근거 대기' });
+  }
+  if (universe.fullMarketSourceActive) {
+    return localeText({ en: 'Market-wide source active', 'zh-CN': '全市场来源已启用', 'zh-TW': '全市場來源已啟用', ja: '市場全体情報源が有効', ko: '시장 전체 출처 활성' });
+  }
+  return scanUniverseModeLabel(universe.mode);
 }
 
 function verdictLabel(verdict: Pick['verdict']) {
@@ -1898,6 +2373,7 @@ async function applyManualHoldings() {
     resultMarketFilter.value = 'all';
     resultVerdictFilter.value = 'all';
     activeView.value = 'stocks';
+    scheduleUserStateSync();
     await nextTick();
     await runAnalysis();
   } catch (cause) {
@@ -1930,6 +2406,7 @@ async function onPortfolioFileSelected(event: Event) {
     resultMarketFilter.value = 'all';
     resultVerdictFilter.value = 'all';
     activeView.value = 'stocks';
+    scheduleUserStateSync();
     await nextTick();
     await runAnalysis();
   } catch (cause) {
@@ -1949,6 +2426,7 @@ function clearImportedPortfolio() {
   if (symbolText.value === importedSymbols) {
     symbolText.value = '';
   }
+  scheduleUserStateSync();
 }
 
 function savedScanTitle(scan: SavedScan) {
@@ -2182,6 +2660,73 @@ function financialReviewTitle(pick: Pick) {
     });
   }
   return t.value.financialReview;
+}
+
+function decisionToplineLabel() {
+  return localeText({
+    en: 'Current decision',
+    'zh-CN': '当前决策',
+    'zh-TW': '當前決策',
+    ja: '現在の判断',
+    ko: '현재 의사결정'
+  });
+}
+
+function decisionSnapshotItems(pick: Pick) {
+  if (pick.decisionEngine) {
+    const dangerGates = pick.decisionEngine.gates.filter((gate) => gate.severity === 'danger').length;
+    const warningGates = pick.decisionEngine.gates.filter((gate) => gate.severity === 'warning').length;
+    const gateValue = dangerGates || warningGates
+      ? `${dangerGates ? `${dangerGates}D` : ''}${dangerGates && warningGates ? ' / ' : ''}${warningGates ? `${warningGates}W` : ''}`
+      : localeText({ en: 'Clear', 'zh-CN': '通过', 'zh-TW': '通過', ja: '通過', ko: '통과' });
+    return [
+      { key: 'buy', label: decisionActionLabel('accumulate'), value: `${formatEngineScore(pick.decisionEngine.buyScore)}/100`, tone: 'buy' },
+      { key: 'sell', label: decisionActionLabel('reduce'), value: `${formatEngineScore(pick.decisionEngine.sellScore)}/100`, tone: pick.decisionEngine.sellScore >= 68 ? 'sell' : 'watch' },
+      { key: 'data', label: dataQualityLabel(pick.decisionEngine.dataQuality.level), value: `${formatEngineScore(pick.decisionEngine.dataQuality.score)}/100`, tone: pick.decisionEngine.dataQuality.level },
+      { key: 'gate', label: t.value.riskControls, value: gateValue, tone: dangerGates ? 'sell' : warningGates ? 'watch' : 'buy' }
+    ];
+  }
+  return reportMetricItems(pick).slice(0, 4).map((metric) => ({
+    key: metric.key,
+    label: metric.label,
+    value: metric.value,
+    tone: Number(metric.score ?? 0) >= 70 ? 'buy' : Number(metric.score ?? 0) < 45 ? 'sell' : 'watch'
+  }));
+}
+
+function etfPanelTitle(pick: Pick) {
+  const regime = pick.decisionEngine?.regime.name;
+  if (regime === 'defensive_etf_core') return decisionRegimeLabel(regime);
+  if (regime === 'sector_etf_tactical') return decisionRegimeLabel(regime);
+  return localeText({
+    en: 'ETF profile',
+    'zh-CN': 'ETF 档案',
+    'zh-TW': 'ETF 檔案',
+    ja: 'ETFプロファイル',
+    ko: 'ETF 프로필'
+  });
+}
+
+function etfProfileRows(pick: Pick) {
+  const etfMetrics = pick.financialAnalysis?.metrics
+    ?.filter((metric) => String(metric.key).toLowerCase().includes('etf'))
+    .slice(0, 6)
+    .map((metric) => ({
+      key: metric.key,
+      label: financialMetricLabel(metric),
+      value: metric.value,
+      score: metric.score
+    })) ?? [];
+  if (etfMetrics.length) return etfMetrics;
+  const rows = [];
+  if (pick.decisionEngine) {
+    rows.push({ key: 'decisionRank', label: resultSortLabel('decision'), value: `${formatEngineScore(pick.decisionEngine.rankScore)}/100`, score: pick.decisionEngine.rankScore });
+    rows.push({ key: 'riskReward', label: t.value.riskControls, value: `${formatEngineScore(pick.decisionEngine.riskRewardScore)}/100`, score: pick.decisionEngine.riskRewardScore });
+  }
+  if (pick.tPlan) rows.push({ key: 'liquidity', label: strategyMetricLabel('liquidityScore'), value: `${Number(pick.tPlan.components.liquidityScore).toFixed(1)}/100`, score: pick.tPlan.components.liquidityScore });
+  if (pick.trendAnalysis) rows.push({ key: 'trend', label: strategyMetricLabel('nextSessionContinuationScore'), value: `${Number(pick.trendAnalysis.continuationScore).toFixed(1)}/100`, score: pick.trendAnalysis.continuationScore });
+  if (pick.downsideRiskScore !== undefined) rows.push({ key: 'downside', label: strategyMetricLabel('downsideRiskInverse'), value: `${Number(100 - pick.downsideRiskScore).toFixed(1)}/100`, score: 100 - pick.downsideRiskScore });
+  return rows.slice(0, 6);
 }
 
 function holdingPlanTitle() {
@@ -4784,6 +5329,7 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
   analysisPortfolio.value = event.portfolio ?? null;
   generatedAt.value = new Date(event.generatedAt).toLocaleString();
   loadingStepIndex.value = analysisSteps.value.length - 1;
+  scheduleUserStateSync();
 }
 
 async function runAnalysis() {
@@ -4839,22 +5385,124 @@ watch(
 onMounted(async () => {
   document.addEventListener('click', handleDocumentClick);
   document.addEventListener('keydown', handleDocumentKeydown);
-  restoreSettings();
-  restoreSavedScans();
-  config.value = await fetchConfig();
   refreshDataMode();
-  normalizeStrategySelection();
+  await resumeAuthSession();
 });
 
 onUnmounted(() => {
   document.removeEventListener('click', handleDocumentClick);
   document.removeEventListener('keydown', handleDocumentKeydown);
   stopAppTimers();
+  if (userStateSyncTimer) window.clearTimeout(userStateSyncTimer);
 });
 </script>
 
 <template>
-  <main class="shell">
+  <main v-if="!authSession" class="auth-shell">
+    <section class="auth-card">
+      <div class="auth-brand">
+        <p>{{ t.openSource }}</p>
+        <h1>{{ t.appName }}</h1>
+        <span>{{ authSubheading() }}</span>
+      </div>
+
+      <div class="auth-mode-tabs" role="tablist">
+        <button type="button" :class="{ active: authMode === 'user' }" @click="authMode = 'user'">Key</button>
+        <button type="button" :class="{ active: authMode === 'admin' }" @click="authMode = 'admin'">Admin</button>
+      </div>
+
+      <form v-if="authMode === 'user'" class="auth-form" @submit.prevent="submitAccessLogin">
+        <label>
+          <span>{{ authHeading() }}</span>
+          <input v-model="accessKeyInput" type="password" autocomplete="current-password" placeholder="19940710" />
+        </label>
+        <button class="primary-action" type="submit" :disabled="authLoading || !accessKeyInput.trim()">
+          <span v-if="authLoading" class="spinner" aria-hidden="true"></span>
+          {{ authLoading ? t.loading : authHeading() }}
+        </button>
+      </form>
+
+      <form v-else class="auth-form" @submit.prevent="submitAdminLogin">
+        <label>
+          <span>Admin username</span>
+          <input v-model="adminUsernameInput" type="text" autocomplete="username" />
+        </label>
+        <label>
+          <span>Admin password</span>
+          <input v-model="adminPasswordInput" type="password" autocomplete="current-password" />
+        </label>
+        <button class="primary-action" type="submit" :disabled="authLoading || !adminUsernameInput.trim() || !adminPasswordInput">
+          <span v-if="authLoading" class="spinner" aria-hidden="true"></span>
+          {{ authLoading ? t.loading : 'Admin login' }}
+        </button>
+      </form>
+
+      <p v-if="authError" class="auth-error">{{ authError }}</p>
+      <p class="auth-footnote">GitHub Pages 不會內建管理員密碼；key 與管理員驗證都在 Cloud Run 後端完成。</p>
+    </section>
+  </main>
+
+  <main v-else-if="isAdminSession" class="auth-shell admin-shell">
+    <section class="admin-panel">
+      <header class="admin-header">
+        <div>
+          <p>{{ t.openSource }}</p>
+          <h1>使用者管理</h1>
+          <span>{{ authUserLabel }}</span>
+        </div>
+        <button class="ghost" type="button" @click="logout">Logout</button>
+      </header>
+
+      <form class="admin-create-form" @submit.prevent="submitNewUser">
+        <label>
+          <span>New user key</span>
+          <input v-model="newUserKey" type="password" autocomplete="new-password" placeholder="例如 19940710 或新 key" />
+        </label>
+        <label>
+          <span>Label</span>
+          <input v-model="newUserLabel" type="text" placeholder="使用者名稱/備註" />
+        </label>
+        <label>
+          <span>Notes</span>
+          <input v-model="newUserNotes" type="text" placeholder="例如 TW desk / family account" />
+        </label>
+        <label class="admin-check">
+          <input v-model="newUserEnabled" type="checkbox" />
+          <span>Enabled</span>
+        </label>
+        <button class="primary-action" type="submit" :disabled="adminLoading || !newUserKey.trim()">新增使用者</button>
+      </form>
+
+      <p v-if="adminError" class="auth-error">{{ adminError }}</p>
+
+      <div class="admin-user-list">
+        <article v-for="user in adminUsers" :key="user.id" class="admin-user-card" :class="{ disabled: !user.enabled }">
+          <div>
+            <strong>{{ user.id }}</strong>
+            <span>key {{ user.keyFingerprint || '-' }} · last {{ user.lastLoginAt || '-' }}</span>
+          </div>
+          <label>
+            <span>Label</span>
+            <input v-model="user.label" type="text" />
+          </label>
+          <label>
+            <span>Notes</span>
+            <input v-model="user.notes" type="text" />
+          </label>
+          <label class="admin-check">
+            <input v-model="user.enabled" type="checkbox" />
+            <span>Enabled</span>
+          </label>
+          <div class="admin-actions">
+            <button class="ghost" type="button" @click="saveAdminUser(user)">保存</button>
+            <button class="ghost danger" type="button" @click="resetAdminUser(user)">重置資料</button>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <main v-else class="shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">{{ t.openSource }}</p>
@@ -4889,6 +5537,11 @@ onUnmounted(() => {
             <strong aria-hidden="true">{{ option.shortLabel }}</strong>
           </button>
         </div>
+      </div>
+
+      <div class="session-chip">
+        <span>{{ authUserLabel }}</span>
+        <button type="button" @click="logout">Logout</button>
       </div>
     </header>
 
@@ -4946,91 +5599,51 @@ onUnmounted(() => {
     <section class="workspace">
       <aside class="control-panel">
         <div class="control-scroll">
-          <div class="panel-section">
-            <h2>{{ t.marketCoverage }}</h2>
-            <div class="market-grid">
+          <div class="panel-section task-panel">
+            <h2>{{ controlPanelTitle() }}</h2>
+            <div class="task-grid">
               <button
-                v-for="market in marketOptions"
-                :key="market.id"
-                :class="{ active: selectedMarkets.includes(market.id) }"
-                @click="toggleMarket(market.id)"
+                v-for="task in investmentTasks"
+                :key="task"
+                type="button"
+                :class="{ active: activeInvestmentTask === task }"
+                @click="selectInvestmentTask(task)"
               >
-                <strong>{{ market.id }}</strong>
-                <span>{{ marketLabel(market.id) }}</span>
-                <small>{{ marketCoverageLabel(market.id) }}</small>
+                <strong>{{ investmentTaskLabel(task) }}</strong>
+                <span>{{ investmentTaskHint(task) }}</span>
               </button>
             </div>
           </div>
 
           <div class="panel-section">
             <div class="section-row">
-              <h2>{{ t.strategy }}</h2>
-              <label class="switch">
-                <input v-model="useCustom" type="checkbox" />
-                <span>{{ t.customWeights }}</span>
-              </label>
-            </div>
-
-            <select v-model="selectedStrategyId" :disabled="useCustom">
-              <option v-for="strategy in strategies" :key="strategy.id" :value="strategy.id">
-                {{ strategyName(strategy) }}
-              </option>
-            </select>
-            <p class="strategy-copy">{{ strategyDescription(selectedStrategy) }}</p>
-            <div class="strategy-library-bar">
-              <button class="ghost compact" type="button" :disabled="refreshingStrategies || loading" @click="refreshOnlineStrategies">
-                {{ refreshingStrategies ? strategyUi.refreshingStrategies : strategyUi.refreshStrategies }}
-              </button>
-              <span>{{ strategySourceSummary }}</span>
-              <small v-if="strategyUpdatedLabel">{{ strategyUpdatedLabel }}</small>
-            </div>
-            <p v-if="selectedStrategy?.id === 'ai_smart_blend'" class="strategy-copy compact-copy">{{ strategyUi.aiBlendHint }}</p>
-            <p v-if="strategyRefreshError" class="strategy-refresh-error">{{ strategyRefreshError }}</p>
-
-            <div v-if="selectedDetailedWeightEntries.length" class="strategy-detail-box">
-              <div class="strategy-detail-heading">
-                <strong>{{ strategyUi.detailedWeights }}</strong>
-                <span>{{ selectedDetailedWeightEntries.length }}</span>
-              </div>
-              <div class="strategy-weight-grid">
-                <span v-for="entry in selectedDetailedWeightEntries" :key="entry.key">
-                  <b>{{ detailedWeightLabel(entry.key) }}</b>
-                  <small>{{ entry.value.toFixed(1) }}%</small>
-                </span>
-              </div>
-            </div>
-
-            <details v-if="selectedStrategySources.length" class="strategy-source-list">
-              <summary>
-                <strong>{{ strategyUi.sourceLibrary }}</strong>
-                <span>{{ selectedStrategySources.length }} {{ strategyUi.sources }}</span>
-              </summary>
-              <a v-for="source in selectedStrategySources" :key="source.id" :href="source.url" target="_blank" rel="noreferrer">
-                <span>{{ source.title }}</span>
-                <small>
-                  {{ source.available === true ? strategyUi.sourceAvailable : source.usable === true ? strategyUi.sourceFallback : source.available === false ? strategyUi.sourceFailed : strategyUi.sourcePending }}
-                  <template v-if="source.matchedKeywords?.length"> · {{ strategyUi.matchedKeywords }} {{ source.matchedKeywords.length }}</template>
-                </small>
-              </a>
-            </details>
-
-            <div class="weight-list">
-              <label v-for="(_, key) in customWeights" :key="key">
-                <span>{{ t[key] }}</span>
-                <input v-model.number="customWeights[key]" :disabled="!useCustom" type="range" min="0" max="40" />
-                <strong>{{ customWeights[key] }}</strong>
-              </label>
-            </div>
-          </div>
-
-          <div class="panel-section">
-            <div class="section-row">
-              <h2>{{ t.symbols }}</h2>
+              <h2>{{ taskInputTitle() }}</h2>
               <span class="mode-pill">{{ scanLabel }}</span>
             </div>
             <div class="scan-purpose">
               <strong>{{ t.symbolsBlank }}</strong>
               <span>{{ t.scanPurpose }}</span>
+            </div>
+            <div class="scan-universe-card">
+              <div>
+                <span>{{ scanUniverseModeLabel(scanUniverse?.mode) }}</span>
+                <strong>{{ fullMarketAssuranceLabel() }}</strong>
+              </div>
+              <div class="scan-universe-grid">
+                <span>
+                  <b>{{ scanUniverse?.candidatePoolSize ?? 0 }}</b>
+                  {{ scanUniverseMetricLabel('candidatePoolSize') }}
+                </span>
+                <span>
+                  <b>{{ scanUniverse?.deepAnalysisCount ?? 0 }}</b>
+                  {{ scanUniverseMetricLabel('deepAnalysisCount') }}
+                </span>
+                <span>
+                  <b>{{ scanUniverse?.displayedCount ?? picks.length }}</b>
+                  {{ scanUniverseMetricLabel('displayedCount') }}
+                </span>
+              </div>
+              <small>{{ scanUniverseSourcePreview() }} · {{ scanUniverseFallbackLabel() }}</small>
             </div>
             <div class="portfolio-import">
               <div>
@@ -5085,6 +5698,93 @@ onUnmounted(() => {
               <p class="strategy-copy">{{ t.symbolsHint }}</p>
             </details>
           </div>
+
+          <div class="panel-section compact-market-section">
+            <div class="section-row">
+              <h2>{{ t.marketCoverage }}</h2>
+              <span class="mode-pill">{{ preferredMarketsLabel }}</span>
+            </div>
+            <div class="market-grid compact">
+              <button
+                v-for="market in marketOptions"
+                :key="market.id"
+                :title="marketCoverageLabel(market.id)"
+                :class="{ active: selectedMarkets.includes(market.id) }"
+                @click="toggleMarket(market.id)"
+              >
+                <strong>{{ market.id }}</strong>
+                <span>{{ marketLabel(market.id) }}</span>
+                <small>{{ marketCoverageLabel(market.id) }}</small>
+              </button>
+            </div>
+          </div>
+
+          <details class="panel-section advanced-panel">
+            <summary>
+              <strong>{{ t.strategy }}</strong>
+              <span>{{ selectedStrategy ? strategyName(selectedStrategy) : selectedStrategyId }}</span>
+            </summary>
+            <div class="advanced-body">
+              <div class="section-row">
+                <h2>{{ t.strategy }}</h2>
+                <label class="switch">
+                  <input v-model="useCustom" type="checkbox" />
+                  <span>{{ t.customWeights }}</span>
+                </label>
+              </div>
+
+              <select v-model="selectedStrategyId" :disabled="useCustom">
+                <option v-for="strategy in strategies" :key="strategy.id" :value="strategy.id">
+                  {{ strategyName(strategy) }}
+                </option>
+              </select>
+              <p class="strategy-copy">{{ strategyDescription(selectedStrategy) }}</p>
+              <div class="strategy-library-bar">
+                <button class="ghost compact" type="button" :disabled="refreshingStrategies || loading" @click="refreshOnlineStrategies">
+                  {{ refreshingStrategies ? strategyUi.refreshingStrategies : strategyUi.refreshStrategies }}
+                </button>
+                <span>{{ strategySourceSummary }}</span>
+                <small v-if="strategyUpdatedLabel">{{ strategyUpdatedLabel }}</small>
+              </div>
+              <p v-if="selectedStrategy?.id === 'ai_smart_blend'" class="strategy-copy compact-copy">{{ strategyUi.aiBlendHint }}</p>
+              <p v-if="strategyRefreshError" class="strategy-refresh-error">{{ strategyRefreshError }}</p>
+
+              <div v-if="selectedDetailedWeightEntries.length" class="strategy-detail-box">
+                <div class="strategy-detail-heading">
+                  <strong>{{ strategyUi.detailedWeights }}</strong>
+                  <span>{{ selectedDetailedWeightEntries.length }}</span>
+                </div>
+                <div class="strategy-weight-grid">
+                  <span v-for="entry in selectedDetailedWeightEntries" :key="entry.key">
+                    <b>{{ detailedWeightLabel(entry.key) }}</b>
+                    <small>{{ entry.value.toFixed(1) }}%</small>
+                  </span>
+                </div>
+              </div>
+
+              <details v-if="selectedStrategySources.length" class="strategy-source-list">
+                <summary>
+                  <strong>{{ strategyUi.sourceLibrary }}</strong>
+                  <span>{{ selectedStrategySources.length }} {{ strategyUi.sources }}</span>
+                </summary>
+                <a v-for="source in selectedStrategySources" :key="source.id" :href="source.url" target="_blank" rel="noreferrer">
+                  <span>{{ source.title }}</span>
+                  <small>
+                    {{ source.available === true ? strategyUi.sourceAvailable : source.usable === true ? strategyUi.sourceFallback : source.available === false ? strategyUi.sourceFailed : strategyUi.sourcePending }}
+                    <template v-if="source.matchedKeywords?.length"> · {{ strategyUi.matchedKeywords }} {{ source.matchedKeywords.length }}</template>
+                  </small>
+                </a>
+              </details>
+
+              <div class="weight-list">
+                <label v-for="(_, key) in customWeights" :key="key">
+                  <span>{{ t[key] }}</span>
+                  <input v-model.number="customWeights[key]" :disabled="!useCustom" type="range" min="0" max="40" />
+                  <strong>{{ customWeights[key] }}</strong>
+                </label>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div class="control-actions">
@@ -5134,6 +5834,64 @@ onUnmounted(() => {
                 {{ t.deleteSavedScan }}
               </button>
             </article>
+          </div>
+        </div>
+
+        <div v-if="activeView === 'stocks'" class="decision-workbench">
+          <div class="decision-workbench-heading">
+            <div>
+              <span>{{ scanUniverseModeLabel(scanUniverse?.mode) }}</span>
+              <strong>{{ decisionWorkbenchTitle() }}</strong>
+              <p>{{ workbenchSubtitle() }}</p>
+            </div>
+            <div v-if="scanUniverse" class="universe-pill" :class="{ live: scanUniverse.fullMarketSourceActive, fallback: scanUniverse.fallbackActive }">
+              <b>{{ scanUniverse.fullMarketSourceActive ? fullMarketAssuranceLabel() : scanUniverseFallbackLabel() }}</b>
+              <small>{{ scanUniverseSourcePreview() }}</small>
+            </div>
+          </div>
+
+          <div class="decision-bucket-grid">
+            <button
+              v-for="item in decisionBucketItems"
+              :key="item.bucket"
+              type="button"
+              :class="[item.tone, { active: activeWorkbenchBucket === item.bucket }]"
+              @click="activeWorkbenchBucket = item.bucket"
+            >
+              <span>{{ item.label }}</span>
+              <strong>{{ item.count }}</strong>
+              <small>{{ workbenchBucketHint(item.bucket) }}</small>
+            </button>
+          </div>
+
+          <div v-if="scanUniverse" class="universe-proof-strip">
+            <span>
+              <b>{{ scanUniverse.candidatePoolSize }}</b>
+              {{ scanUniverseMetricLabel('candidatePoolSize') }}
+            </span>
+            <span>
+              <b>{{ scanUniverse.deepAnalysisCount }}</b>
+              {{ scanUniverseMetricLabel('deepAnalysisCount') }}
+            </span>
+            <span>
+              <b>{{ scanUniverse.failedCount }}</b>
+              {{ t.failures }}
+            </span>
+            <span v-for="source in scanUniverse.sourceBreakdown.slice(0, 3)" :key="`source-${source.source}`">
+              <b>{{ source.count }}</b>
+              {{ source.label }} · {{ sourceRoleLabel(source.role) }}
+            </span>
+          </div>
+
+          <div v-if="topHoldingPicks.length || topEtfPicks.length" class="decision-shortcuts">
+            <button v-if="topHoldingPicks.length" class="holding" type="button" @click="activeWorkbenchBucket = 'holdings'">
+              <strong>{{ workbenchBucketLabel('holdings') }}</strong>
+              <span>{{ topHoldingPicks.map((pick) => pick.symbol).join(' · ') }}</span>
+            </button>
+            <button v-if="topEtfPicks.length" class="etf" type="button" @click="activeWorkbenchBucket = 'etf'">
+              <strong>{{ workbenchBucketLabel('etf') }}</strong>
+              <span>{{ topEtfPicks.map((pick) => pick.symbol).join(' · ') }}</span>
+            </button>
           </div>
         </div>
 
@@ -5237,6 +5995,74 @@ onUnmounted(() => {
               <span v-if="pick.tPlan" class="t-score-chip" :class="pick.tPlan.suitability">{{ predictionScoreLabel('t', pick) }} · {{ tSuitabilityLabel(pick) }}</span>
               <span v-if="pick.market === 'CN' || pick.fundFlow?.available" class="fund-flow-chip" :class="fundFlowTone(pick.fundFlow)">{{ fundFlowChipLabel(pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
+            </div>
+
+            <div class="decision-topline" :class="pick.decisionEngine?.action || finalVerdictBucket(pick)">
+              <div class="decision-topline-copy">
+                <span>{{ decisionToplineLabel() }}</span>
+                <strong>{{ finalVerdictLabel(pick) }}</strong>
+                <p>{{ reportSummaryTitle(pick) }}</p>
+              </div>
+              <div class="decision-snapshot-grid">
+                <div v-for="item in decisionSnapshotItems(pick)" :key="item.key" :class="item.tone">
+                  <span>{{ item.label }}</span>
+                  <b>{{ item.value }}</b>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="pick.holding && pick.holdingAnalysis" class="research-panel holding-panel priority-panel" :class="pick.holdingAnalysis.action">
+              <strong>{{ holdingActionLabel(pick.holdingAnalysis.action) }} · {{ pick.holding.name }}</strong>
+              <div class="holding-grid">
+                <div>
+                  <span>{{ holdingFieldLabel('quantity') }}</span>
+                  <b>{{ pick.holding.quantity }}</b>
+                </div>
+                <div>
+                  <span>{{ holdingFieldLabel('cost') }}</span>
+                  <b>{{ moneyLabel(pick.holding.costPrice, pick.currency) }}</b>
+                </div>
+                <div>
+                  <span>{{ holdingFieldLabel('pnl') }}</span>
+                  <b>{{ signedMoneyLabel(pick.holding.unrealizedPnl, pick.currency) }} · {{ percentLabel(pick.holding.unrealizedPnlPct) }}</b>
+                </div>
+                <div>
+                  <span>{{ holdingFieldLabel('weight') }}</span>
+                  <b>{{ pick.holdingAnalysis.positionWeightPct }}%</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.targetWeightPct !== undefined">
+                  <span>{{ holdingPlanTitle() }}</span>
+                  <b>{{ pick.holdingAnalysis.targetWeightPct }}%</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.suggestedQuantityChange !== undefined">
+                  <span>{{ holdingFieldLabel('quantity') }}</span>
+                  <b>{{ signedQuantityLabel(pick.holdingAnalysis.suggestedQuantityChange) }}</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.stopLossPrice">
+                  <span>{{ t.riskControls }}</span>
+                  <b>{{ pick.currency }} {{ pick.holdingAnalysis.stopLossPrice }}</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.takeProfitPrice">
+                  <span>{{ t.actionPlan }}</span>
+                  <b>{{ pick.currency }} {{ pick.holdingAnalysis.takeProfitPrice }}</b>
+                </div>
+              </div>
+              <ul class="holding-notes">
+                <li v-for="note in pick.holdingAnalysis.notes" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
+                  {{ holdingNoteLabel(note) }}
+                </li>
+              </ul>
+            </div>
+
+            <div v-if="pick.instrumentType === 'etf'" class="research-panel etf-panel priority-panel" :class="pick.decisionEngine?.regime.name">
+              <strong>{{ etfPanelTitle(pick) }} · {{ finalVerdictLabel(pick) }}</strong>
+              <div class="financial-grid etf-profile-grid">
+                <div v-for="metric in etfProfileRows(pick)" :key="metric.key">
+                  <span>{{ metric.label }}</span>
+                  <b>{{ metric.value }}</b>
+                  <small>{{ t.score }} {{ Number(metric.score).toFixed(1) }}</small>
+                </div>
+              </div>
             </div>
 
             <div v-if="pick.decisionEngine" class="research-panel decision-engine-panel" :class="[pick.decisionEngine.action, pick.decisionEngine.dataQuality.level]">
@@ -5387,49 +6213,6 @@ onUnmounted(() => {
                   <small>{{ t.score }} {{ metric.score }} · {{ pick.fundFlow.source || 'Online' }}</small>
                 </div>
               </div>
-            </div>
-
-            <div v-if="pick.holding && pick.holdingAnalysis" class="research-panel holding-panel" :class="pick.holdingAnalysis.action">
-              <strong>{{ holdingActionLabel(pick.holdingAnalysis.action) }} · {{ pick.holding.name }}</strong>
-              <div class="holding-grid">
-                <div>
-                  <span>{{ holdingFieldLabel('quantity') }}</span>
-                  <b>{{ pick.holding.quantity }}</b>
-                </div>
-                <div>
-                  <span>{{ holdingFieldLabel('cost') }}</span>
-                  <b>{{ moneyLabel(pick.holding.costPrice, pick.currency) }}</b>
-                </div>
-                <div>
-                  <span>{{ holdingFieldLabel('pnl') }}</span>
-                  <b>{{ signedMoneyLabel(pick.holding.unrealizedPnl, pick.currency) }} · {{ percentLabel(pick.holding.unrealizedPnlPct) }}</b>
-                </div>
-                <div>
-                  <span>{{ holdingFieldLabel('weight') }}</span>
-                  <b>{{ pick.holdingAnalysis.positionWeightPct }}%</b>
-                </div>
-                <div v-if="pick.holdingAnalysis.targetWeightPct !== undefined">
-                  <span>{{ holdingPlanTitle() }}</span>
-                  <b>{{ pick.holdingAnalysis.targetWeightPct }}%</b>
-                </div>
-                <div v-if="pick.holdingAnalysis.suggestedQuantityChange !== undefined">
-                  <span>{{ holdingFieldLabel('quantity') }}</span>
-                  <b>{{ signedQuantityLabel(pick.holdingAnalysis.suggestedQuantityChange) }}</b>
-                </div>
-                <div v-if="pick.holdingAnalysis.stopLossPrice">
-                  <span>{{ t.riskControls }}</span>
-                  <b>{{ pick.currency }} {{ pick.holdingAnalysis.stopLossPrice }}</b>
-                </div>
-                <div v-if="pick.holdingAnalysis.takeProfitPrice">
-                  <span>{{ t.actionPlan }}</span>
-                  <b>{{ pick.currency }} {{ pick.holdingAnalysis.takeProfitPrice }}</b>
-                </div>
-              </div>
-              <ul class="holding-notes">
-                <li v-for="note in pick.holdingAnalysis.notes" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
-                  {{ holdingNoteLabel(note) }}
-                </li>
-              </ul>
             </div>
 
             <div v-if="pick.tPlan" class="research-panel t-plan-panel" :class="pick.tPlan.suitability">

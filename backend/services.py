@@ -2954,7 +2954,18 @@ def _fund_flow_decision_params(fund_flow: dict) -> dict:
 
 
 def _snapshot_instrument_type(snapshot: MarketSnapshot) -> str:
-    return getattr(snapshot, "instrument_type", None) or str(snapshot.info.get("instrumentType") or instrument_type(snapshot.symbol, snapshot.info))
+    explicit = str(getattr(snapshot, "instrument_type", "") or snapshot.info.get("instrumentType") or "").strip().lower()
+    inferred = instrument_type(
+        snapshot.symbol,
+        {
+            **(snapshot.info or {}),
+            "shortName": (snapshot.info or {}).get("shortName") or snapshot.name,
+            "longName": (snapshot.info or {}).get("longName") or snapshot.name,
+        },
+    )
+    if inferred == "etf" or explicit in {"etf", "fund", "mutualfund"}:
+        return "etf"
+    return explicit or inferred or "stock"
 
 
 def _is_etf_snapshot(snapshot: MarketSnapshot) -> bool:
@@ -4115,6 +4126,102 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
     }
 
 
+def _scan_source_label(source: str) -> str:
+    source = str(source or "unknown")
+    if source.startswith("twse-openapi"):
+        return "TWSE listed-market OpenAPI"
+    if source.startswith("eastmoney-cn"):
+        return "Eastmoney A-share market list"
+    if source.startswith("sina-cn"):
+        return "Sina A-share market list"
+    if source.startswith("eastmoney-hk"):
+        return "Eastmoney Hong Kong market list"
+    if source.startswith("yahoo-screener"):
+        return "Yahoo Finance predefined screener"
+    if source.startswith("yahoo-search-fallback"):
+        return "Yahoo Finance fallback search"
+    if source == "local-news":
+        return "Local finance news discovery"
+    if source == "google-news":
+        return "Google News discovery"
+    if source == "market-universe":
+        return "Market universe provider"
+    if source == "etf-universe":
+        return "ETF universe provider"
+    if source == "fallback-search":
+        return "Fallback search terms"
+    if source in {"manual", "portfolio-import"}:
+        return "User supplied symbols"
+    return source
+
+
+def _scan_source_role(source: str) -> str:
+    source = str(source or "")
+    if source.startswith(("twse-openapi", "eastmoney-cn", "sina-cn", "eastmoney-hk", "yahoo-screener")):
+        return "market-wide"
+    if source == "etf-universe":
+        return "etf-universe"
+    if source in {"local-news", "google-news"}:
+        return "news-discovery"
+    if "fallback" in source:
+        return "fallback"
+    if source == "portfolio-import":
+        return "portfolio"
+    if source == "manual":
+        return "manual"
+    return "provider"
+
+
+def _scan_source_breakdown(symbols: list[DiscoveredSymbol]) -> list[dict]:
+    counts: dict[str, dict] = {}
+    for item in symbols:
+        source = str(item.source or "unknown")
+        entry = counts.setdefault(
+            source,
+            {
+                "source": source,
+                "label": _scan_source_label(source),
+                "role": _scan_source_role(source),
+                "count": 0,
+                "markets": {},
+            },
+        )
+        entry["count"] += 1
+        entry["markets"][item.market] = entry["markets"].get(item.market, 0) + 1
+    return sorted(counts.values(), key=lambda item: item["count"], reverse=True)
+
+
+def _scan_universe_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
+    symbols = context.get("symbols") or []
+    source_breakdown = _scan_source_breakdown(symbols)
+    market_counts: dict[str, int] = {}
+    for item in symbols:
+        market_counts[item.market] = market_counts.get(item.market, 0) + 1
+    fallback_active = any(item["role"] == "fallback" for item in source_breakdown)
+    fallback_active = fallback_active or any("fallback" in str(error.get("source") or "") for error in context.get("discovery_errors", []))
+    mode = "market-wide-scan" if context.get("auto_scan") else str(context.get("universe_source") or "manual")
+    if context.get("portfolio"):
+        mode = "portfolio-holdings"
+    elif mode == "manual":
+        mode = "manual-symbols"
+    full_market_roles = {"market-wide", "news-discovery", "etf-universe"}
+    return {
+        "mode": mode,
+        "scope": "market-wide-candidate-pool" if context.get("auto_scan") else "user-supplied-symbols",
+        "candidatePoolSize": len(symbols),
+        "deepAnalysisCount": context.get("evaluated", len(picks)),
+        "displayedCount": len(picks),
+        "failedCount": len(errors),
+        "requestedMarkets": [str(market).upper() for market in context.get("requested_markets", [])],
+        "marketCounts": dict(sorted(market_counts.items())),
+        "sourceBreakdown": source_breakdown,
+        "fallbackActive": fallback_active,
+        "fullMarketSourceActive": bool(context.get("auto_scan") and any(item["role"] in full_market_roles for item in source_breakdown)),
+        "discoveryLimitPerMarket": context.get("discovery_limit"),
+        "displayLimit": context.get("display_limit"),
+    }
+
+
 def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
     requested_markets = [str(market).upper() for market in context.get("requested_markets", [])]
     return {
@@ -4128,6 +4235,7 @@ def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
         "failed": len(errors),
         "discoveryErrors": context["discovery_errors"],
         "marketProfiles": {market: market_profile(market) for market in requested_markets},
+        "universe": _scan_universe_state(context, picks, errors),
     }
 
 
