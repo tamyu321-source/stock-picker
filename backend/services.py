@@ -462,6 +462,15 @@ def _investment_priority(pick: dict) -> float:
     metrics = pick["metrics"]
     setup_score = float(pick.get("breakoutSetupScore") or 0)
     overall = pick.get("overallAssessment") or {}
+    strategy_assessment = pick.get("strategyAssessment") or {}
+    if strategy_assessment.get("sortScore") is not None:
+        return round(
+            float(strategy_assessment.get("sortScore") or 0) * 0.72
+            + float(overall.get("totalScore") or pick.get("score") or 0) * 0.16
+            + float(pick.get("opportunityScore") or 0) * 0.08
+            + setup_score * 0.04,
+            3,
+        )
     if overall:
         return round(
             float(overall.get("totalScore") or 0) * 0.58
@@ -1080,7 +1089,22 @@ def _is_breakout_setup_candidate(pick: dict) -> bool:
     )
 
 
+def _is_strategy_buy_candidate(pick: dict) -> bool:
+    assessment = pick.get("strategyAssessment") or {}
+    if not assessment:
+        return False
+    overall = pick.get("overallAssessment") or {}
+    return (
+        overall.get("suitability") in {"strongBuy", "buy"}
+        and assessment.get("recommendation") == "aligned"
+        and int(assessment.get("failedGateCount") or 0) == 0
+        and int(assessment.get("triggeredVetoCount") or 0) == 0
+    )
+
+
 def _is_buy_candidate(pick: dict) -> bool:
+    if pick.get("strategyAssessment"):
+        return _is_strategy_buy_candidate(pick)
     return _is_quality_investment_candidate(pick) or _is_breakout_setup_candidate(pick)
 
 
@@ -2216,6 +2240,387 @@ def _overall_assessment(
     }
 
 
+def _strategy_behavior(strategy: dict | None) -> dict:
+    if not isinstance(strategy, dict):
+        return {}
+    behavior = strategy.get("behavior")
+    return behavior if isinstance(behavior, dict) else {}
+
+
+def _strategy_numeric(value, default: float = 50.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _strategy_support_score(profile: dict) -> float:
+    distance = profile.get("supportDistancePct")
+    if distance is None:
+        return 50.0
+    distance = _strategy_numeric(distance)
+    if distance < 0:
+        return _clamp_score(44 + distance * 2.5)
+    return _clamp_score(78 - min(22, distance * 3.2))
+
+
+def _strategy_metric_values(
+    score: float,
+    metrics: dict[str, float],
+    news_heat: dict,
+    trend_analysis: dict,
+    t_plan: dict,
+    overall: dict,
+    opportunity_score: float,
+    downside_risk_score: float,
+    breakout_setup_score: float,
+    pullback_risk_score: float,
+    price_change,
+    fund_flow: dict | None = None,
+) -> dict[str, float]:
+    components = overall.get("components") or {}
+    profile = trend_analysis.get("profile") or {}
+    t_components = t_plan.get("components") or {}
+    reversal = _strategy_numeric(trend_analysis.get("reversalRiskScore"))
+    downside = _strategy_numeric(downside_risk_score)
+    pullback = _strategy_numeric(pullback_risk_score)
+    values = {
+        "overallTotal": _strategy_numeric(overall.get("totalScore"), score),
+        "score": _strategy_numeric(score),
+        "todayBuyScore": _strategy_numeric(components.get("todayBuyScore"), score),
+        "futureRiseScore": _strategy_numeric(components.get("futureRiseScore"), opportunity_score),
+        "profitableExitScore": _strategy_numeric(components.get("profitableExitScore"), t_plan.get("score")),
+        "newsHeatImpactScore": _strategy_numeric(components.get("newsHeatImpactScore"), news_heat.get("impactScore")),
+        "newsHeatScore": _strategy_numeric(news_heat.get("heatScore")),
+        "opportunityScore": _strategy_numeric(opportunity_score),
+        "downsideRiskScore": downside,
+        "downsideRiskInverse": _clamp_score(100 - downside),
+        "breakoutSetupScore": _strategy_numeric(breakout_setup_score),
+        "pullbackRiskScore": pullback,
+        "pullbackRiskInverse": _clamp_score(100 - pullback),
+        "nextSessionContinuationScore": _strategy_numeric(trend_analysis.get("continuationScore")),
+        "nextSessionReversalRiskScore": reversal,
+        "nextSessionReversalRiskInverse": _clamp_score(100 - reversal),
+        "maStructureScore": _strategy_numeric(profile.get("maStructureScore")),
+        "momentumShapeScore": _strategy_numeric(profile.get("momentumShapeScore")),
+        "rsiScore": _strategy_numeric(profile.get("rsiScore")),
+        "macdScore": _strategy_numeric(profile.get("macdScore")),
+        "volumeConfirmationScore": _strategy_numeric(profile.get("volumeConfirmationScore")),
+        "supportScore": _strategy_support_score(profile),
+        "tScore": _strategy_numeric(t_plan.get("score")),
+        "liquidityScore": _strategy_numeric(t_components.get("liquidityScore")),
+        "volatilityScore": _strategy_numeric(t_components.get("volatilityScore")),
+        "fundFlowScore": _strategy_numeric((fund_flow or {}).get("score")),
+        "priceChange": _strategy_numeric(price_change, 0.0),
+    }
+    for factor in FACTOR_ORDER:
+        values[factor] = _strategy_numeric(metrics.get(factor))
+    return values
+
+
+def _horizon_assessment(values: dict[str, float]) -> dict:
+    short_term_score = _weighted_strategy_score(
+        values,
+        {
+            "todayBuyScore": 0.17,
+            "futureRiseScore": 0.13,
+            "profitableExitScore": 0.12,
+            "breakoutSetupScore": 0.11,
+            "nextSessionContinuationScore": 0.10,
+            "volumeConfirmationScore": 0.08,
+            "fundFlowScore": 0.07,
+            "newsHeatImpactScore": 0.07,
+            "tScore": 0.06,
+            "downsideRiskInverse": 0.05,
+            "pullbackRiskInverse": 0.04,
+        },
+    )
+    mid_long_term_score = _weighted_strategy_score(
+        values,
+        {
+            "quality": 0.22,
+            "value": 0.18,
+            "risk": 0.18,
+            "maStructureScore": 0.11,
+            "futureRiseScore": 0.10,
+            "downsideRiskInverse": 0.08,
+            "nextSessionContinuationScore": 0.06,
+            "overallTotal": 0.03,
+            "newsHeatImpactScore": 0.02,
+            "fundFlowScore": 0.02,
+        },
+    )
+    gap = abs(short_term_score - mid_long_term_score)
+    stability_score = _clamp_score(
+        min(short_term_score, mid_long_term_score) * 0.62
+        + ((short_term_score + mid_long_term_score) / 2) * 0.38
+        - max(0, gap - 16) * 0.55
+        - max(0, values.get("downsideRiskScore", 50) - 58) * 0.22
+    )
+    quality_composite = _clamp_score(mid_long_term_score * 0.52 + stability_score * 0.28 + short_term_score * 0.20)
+    if quality_composite >= 70 and mid_long_term_score >= 64 and short_term_score >= 56:
+        classification = "stableQuality"
+    elif short_term_score >= mid_long_term_score + 14:
+        classification = "shortTermOnly"
+    elif mid_long_term_score >= short_term_score + 10:
+        classification = "midLongQuality"
+    elif stability_score < 54:
+        classification = "unstable"
+    else:
+        classification = "balanced"
+    return {
+        "shortTermScore": round(short_term_score, 1),
+        "midLongTermScore": round(mid_long_term_score, 1),
+        "stabilityScore": round(stability_score, 1),
+        "qualityCompositeScore": round(quality_composite, 1),
+        "scoreGap": round(gap, 1),
+        "classification": classification,
+        "shortTermTradable": short_term_score >= 66 and values.get("downsideRiskScore", 50) <= 66,
+        "midLongInvestable": mid_long_term_score >= 64 and quality_composite >= 62 and values.get("downsideRiskScore", 50) <= 60,
+    }
+
+
+def _weighted_strategy_score(values: dict[str, float], weights: dict | None) -> float:
+    if not isinstance(weights, dict) or not weights:
+        return values.get("overallTotal", 50.0)
+    total = 0.0
+    weight_total = 0.0
+    for key, weight in weights.items():
+        numeric_weight = max(0.0, _strategy_numeric(weight, 0.0))
+        if numeric_weight <= 0:
+            continue
+        total += values.get(key, 50.0) * numeric_weight
+        weight_total += numeric_weight
+    if weight_total <= 0:
+        return values.get("overallTotal", 50.0)
+    return round(_clamp_score(total / weight_total), 1)
+
+
+def _strategy_gate_result(rule: dict, values: dict[str, float]) -> dict:
+    metric = str(rule.get("metric") or "")
+    actual = values.get(metric, 50.0)
+    if "min" in rule:
+        threshold = _strategy_numeric(rule.get("min"))
+        passed = actual >= threshold
+        gap = max(0.0, threshold - actual)
+    else:
+        threshold = _strategy_numeric(rule.get("max"))
+        passed = actual <= threshold
+        gap = max(0.0, actual - threshold)
+    return {
+        "key": rule.get("key") or "strategyGate",
+        "metric": metric,
+        "actual": round(actual, 1),
+        "threshold": round(threshold, 1),
+        "operator": "min" if "min" in rule else "max",
+        "passed": passed,
+        "gap": round(gap, 1),
+        "cap": rule.get("cap"),
+    }
+
+
+def _strategy_veto_result(rule: dict, values: dict[str, float]) -> dict:
+    metric = str(rule.get("metric") or "")
+    actual = values.get(metric, 50.0)
+    direction = str(rule.get("direction") or "")
+    if direction in {"min", "max"}:
+        threshold_key = "max" if direction == "min" else "min"
+        threshold = _strategy_numeric(rule.get(threshold_key))
+        triggered = actual <= threshold
+        operator = "lte"
+    elif "min" in rule:
+        threshold = _strategy_numeric(rule.get("min"))
+        triggered = actual <= threshold
+        operator = "lte"
+    else:
+        threshold = _strategy_numeric(rule.get("max"))
+        triggered = actual >= threshold
+        operator = "gte"
+    return {
+        "key": rule.get("key") or "strategyVeto",
+        "metric": metric,
+        "actual": round(actual, 1),
+        "threshold": round(threshold, 1),
+        "operator": operator,
+        "triggered": triggered,
+        "cap": rule.get("cap"),
+    }
+
+
+def _strategy_focus_items(behavior: dict, values: dict[str, float]) -> list[dict]:
+    focus = []
+    metric_by_key = {
+        "strategyFocusTodayEntry": "todayBuyScore",
+        "strategyFocusFutureExit": "profitableExitScore",
+        "strategyFocusRiskControl": "downsideRiskInverse",
+        "strategyFocusBreakoutVolume": "breakoutSetupScore",
+        "strategyFocusNoChase": "pullbackRiskInverse",
+        "strategyFocusNextSession": "nextSessionContinuationScore",
+        "strategyFocusReversalRisk": "nextSessionReversalRiskInverse",
+        "strategyFocusTrendStructure": "maStructureScore",
+        "strategyFocusTExit": "tScore",
+        "strategyFocusLiquidity": "liquidityScore",
+        "strategyFocusNewsFlow": "newsHeatImpactScore",
+        "strategyFocusFundFlow": "fundFlowScore",
+        "strategyFocusShortTerm": "shortTermScore",
+        "strategyFocusMidLongTerm": "midLongTermScore",
+        "strategyFocusStableQuality": "qualityCompositeScore",
+        "strategyFocusPullbackSupport": "supportScore",
+        "strategyFocusRsiMacd": "macdScore",
+        "strategyFocusConfirmBeforeBuy": "todayBuyScore",
+        "strategyFocusQualityValue": "quality",
+        "strategyFocusFinancialRepair": "value",
+    }
+    for key in behavior.get("focusKeys") or []:
+        metric = metric_by_key.get(key, "overallTotal")
+        focus.append({"key": key, "metric": metric, "score": round(values.get(metric, 50.0), 1)})
+    return focus[:5]
+
+
+def _overall_summary_key(suitability: str) -> str:
+    return {
+        "strongBuy": "overallStrongBuySummary",
+        "buy": "overallBuySummary",
+        "watch": "overallWatchSummary",
+        "avoid": "overallAvoidSummary",
+        "sell": "overallSellSummary",
+    }.get(suitability, "overallWatchSummary")
+
+
+def _strategy_suitability(adjusted_score: float, behavior: dict, gates: list[dict], vetoes: list[dict]) -> str:
+    failed_gates = [gate for gate in gates if not gate.get("passed")]
+    triggered_vetoes = [veto for veto in vetoes if veto.get("triggered")]
+    buy_floor = _strategy_numeric(behavior.get("buyFloor"), 68)
+    watch_floor = _strategy_numeric(behavior.get("watchFloor"), 54)
+    if triggered_vetoes:
+        return "sell" if adjusted_score <= 42 else "avoid"
+    if not failed_gates and adjusted_score >= buy_floor + 8:
+        return "strongBuy"
+    if not failed_gates and adjusted_score >= buy_floor:
+        return "buy"
+    if adjusted_score <= 42:
+        return "sell"
+    if adjusted_score < watch_floor:
+        return "avoid"
+    return "watch"
+
+
+def _strategy_assessment(
+    strategy: dict | None,
+    score: float,
+    metrics: dict[str, float],
+    news_heat: dict,
+    trend_analysis: dict,
+    t_plan: dict,
+    overall: dict,
+    opportunity_score: float,
+    downside_risk_score: float,
+    breakout_setup_score: float,
+    pullback_risk_score: float,
+    price_change,
+    fund_flow: dict | None = None,
+) -> tuple[dict, dict]:
+    behavior = _strategy_behavior(strategy)
+    if not behavior:
+        return overall, {}
+
+    values = _strategy_metric_values(
+        score,
+        metrics,
+        news_heat,
+        trend_analysis,
+        t_plan,
+        overall,
+        opportunity_score,
+        downside_risk_score,
+        breakout_setup_score,
+        pullback_risk_score,
+        price_change,
+        fund_flow,
+    )
+    horizons = _horizon_assessment(values)
+    values.update(
+        {
+            "shortTermScore": horizons["shortTermScore"],
+            "midLongTermScore": horizons["midLongTermScore"],
+            "stabilityScore": horizons["stabilityScore"],
+            "qualityCompositeScore": horizons["qualityCompositeScore"],
+        }
+    )
+    gates = [_strategy_gate_result(rule, values) for rule in behavior.get("entryGates") or []]
+    vetoes = [_strategy_veto_result(rule, values) for rule in behavior.get("vetoRules") or []]
+    fit_score = _weighted_strategy_score(values, behavior.get("fitWeights"))
+    sort_score = _weighted_strategy_score({**values, "strategyFitScore": fit_score}, behavior.get("sortWeights"))
+    base_total = _strategy_numeric(overall.get("totalScore"), score)
+    horizon = str(behavior.get("horizon") or "balanced")
+    if horizon == "shortTerm":
+        adjusted_score = base_total * 0.52 + fit_score * 0.32 + horizons["shortTermScore"] * 0.16
+    elif horizon == "midLongTerm":
+        adjusted_score = base_total * 0.36 + fit_score * 0.28 + horizons["midLongTermScore"] * 0.24 + horizons["qualityCompositeScore"] * 0.12
+    elif horizon == "balancedQuality":
+        adjusted_score = base_total * 0.36 + fit_score * 0.24 + horizons["qualityCompositeScore"] * 0.24 + horizons["shortTermScore"] * 0.08 + horizons["midLongTermScore"] * 0.08
+        if horizons["shortTermScore"] >= 74 and horizons["midLongTermScore"] < 52:
+            adjusted_score = min(adjusted_score, 64)
+    else:
+        adjusted_score = base_total * 0.56 + fit_score * 0.24 + horizons["qualityCompositeScore"] * 0.20
+
+    failed_gates = [gate for gate in gates if not gate.get("passed")]
+    if failed_gates:
+        adjusted_score -= min(18.0, sum(float(gate.get("gap") or 0) * 0.16 for gate in failed_gates))
+        gate_caps = [float(gate["cap"]) for gate in failed_gates if gate.get("cap") is not None]
+        if gate_caps:
+            adjusted_score = min(adjusted_score, min(gate_caps))
+    else:
+        adjusted_score += min(4.0, len(gates) * 0.8)
+
+    triggered_vetoes = [veto for veto in vetoes if veto.get("triggered")]
+    for veto in triggered_vetoes:
+        if veto.get("cap") is not None:
+            adjusted_score = min(adjusted_score, _strategy_numeric(veto.get("cap"), adjusted_score))
+
+    adjusted_score = round(_clamp_score(adjusted_score), 1)
+    suitability = _strategy_suitability(adjusted_score, behavior, gates, vetoes)
+    components = overall.get("components") or {}
+    params = {
+        "score": adjusted_score,
+        "today": round(_strategy_numeric(components.get("todayBuyScore")), 1),
+        "future": round(_strategy_numeric(components.get("futureRiseScore")), 1),
+        "exit": round(_strategy_numeric(components.get("profitableExitScore")), 1),
+        "heat": round(_strategy_numeric(news_heat.get("heatScore"), 0.0), 1),
+        "impact": round(_strategy_numeric(components.get("newsHeatImpactScore")), 1),
+        "risk": round(_strategy_numeric(downside_risk_score), 1),
+    }
+    updated_overall = {
+        **overall,
+        "summary": {"key": _overall_summary_key(suitability), "params": params},
+        "suitability": suitability,
+        "totalScore": adjusted_score,
+    }
+    updated_metrics = list(updated_overall.get("metrics") or [])
+    for metric in updated_metrics:
+        if metric.get("key") == "overallTotal":
+            metric["value"] = f"{adjusted_score:.1f}/100"
+            metric["score"] = adjusted_score
+    updated_overall["metrics"] = updated_metrics
+    assessment = {
+        "mode": behavior.get("mode") or "balanced",
+        "fitScore": fit_score,
+        "sortScore": sort_score,
+        "baseScore": round(base_total, 1),
+        "adjustedScore": adjusted_score,
+        "horizons": horizons,
+        "recommendation": "blocked" if triggered_vetoes else "aligned" if not failed_gates and suitability in {"buy", "strongBuy"} else "watch" if suitability == "watch" else "avoid",
+        "failedGateCount": len(failed_gates),
+        "triggeredVetoCount": len(triggered_vetoes),
+        "gates": gates,
+        "vetoes": vetoes,
+        "focus": _strategy_focus_items(behavior, values),
+    }
+    return updated_overall, assessment
+
+
 def _max_drawdown(closes: list[float], window: int = 60) -> float:
     values = closes[-window:] if len(closes) >= window else closes
     if len(values) < 2:
@@ -3059,6 +3464,21 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         snapshot.change,
         (strategy or {}).get("detailedWeights"),
     )
+    overall_assessment, strategy_assessment = _strategy_assessment(
+        strategy,
+        score,
+        metrics,
+        news_heat_analysis,
+        trend_analysis,
+        t_plan,
+        overall_assessment,
+        opportunity_score,
+        downside_risk_score,
+        breakout_setup_score,
+        pullback_risk_score,
+        snapshot.change,
+        fund_flow,
+    )
     verdict = _verdict(score, metrics["risk"], metrics["quality"], metrics["sentiment"], snapshot.change)
     reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change, breakout_setup_score, pullback_risk_score, trend_profile)
     financial_analysis = _financial_analysis(snapshot)
@@ -3081,6 +3501,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "tPlan": t_plan,
         "fundFlow": fund_flow if fund_flow.get("available") else None,
         "overallAssessment": overall_assessment,
+        "strategyAssessment": strategy_assessment,
         "prediction": {
             "opportunityScore": opportunity_score,
             "downsideRiskScore": downside_risk_score,

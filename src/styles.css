@@ -1727,6 +1727,74 @@ h3 {
   background: #fffaf0;
 }
 
+.strategy-model-panel {
+  border-color: #d8e3ed;
+  background: #f7fafc;
+}
+
+.strategy-model-panel.aligned {
+  border-color: #c9e2d0;
+  background: #f3fbf5;
+}
+
+.strategy-model-panel.watch {
+  border-color: #ecd68c;
+  background: #fffaf0;
+}
+
+.strategy-model-panel.avoid,
+.strategy-model-panel.blocked {
+  border-color: #efc2ba;
+  background: #fff7f5;
+}
+
+.strategy-model-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.strategy-rule-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.strategy-rule-columns > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgb(36 95 70 / 10%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 72%);
+}
+
+.strategy-rule-columns strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #17211b;
+  font-size: 0.82rem;
+}
+
+.strategy-rule-columns ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: #49564d;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.strategy-rule-columns li.passed,
+.strategy-rule-columns li.clear {
+  color: #245f46;
+}
+
+.strategy-rule-columns li.failed,
+.strategy-rule-columns li.triggered {
+  color: #8a2d20;
+  font-weight: 800;
+}
+
 .overall-panel {
   border-color: #d6e5da;
   background: #f6fbf7;

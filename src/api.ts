@@ -12,6 +12,26 @@ export interface StrategyWeights {
 
 export type DetailedStrategyWeights = Record<string, number>;
 
+export interface StrategyRuleConfig {
+  key: string;
+  metric: string;
+  min?: number;
+  max?: number;
+  cap?: number;
+  direction?: string;
+}
+
+export interface StrategyBehavior {
+  mode: string;
+  buyFloor?: number;
+  watchFloor?: number;
+  entryGates?: StrategyRuleConfig[];
+  vetoRules?: StrategyRuleConfig[];
+  fitWeights?: Record<string, number>;
+  sortWeights?: Record<string, number>;
+  focusKeys?: string[];
+}
+
 export interface Strategy {
   id: string;
   name: string;
@@ -20,15 +40,21 @@ export interface Strategy {
   riskTolerance: number;
   sourceStrategyIds?: string[];
   detailedWeights?: DetailedStrategyWeights;
+  behavior?: StrategyBehavior;
 }
 
 export interface StrategySource {
   id: string;
   title: string;
   url: string;
+  urls?: string[];
   families?: string[];
+  timeHorizon?: string;
   keywords?: string[];
   available?: boolean | null;
+  usable?: boolean;
+  fallback?: boolean;
+  status?: string;
   matchedKeywords?: string[];
   error?: string;
 }
@@ -315,6 +341,48 @@ export interface OverallAssessment {
   watchItems: DecisionPoint[];
 }
 
+export interface StrategyCheckResult {
+  key: string;
+  metric: string;
+  actual: number;
+  threshold: number;
+  operator: string;
+  passed?: boolean;
+  triggered?: boolean;
+  gap?: number;
+  cap?: number | null;
+}
+
+export interface StrategyFocusResult {
+  key: string;
+  metric: string;
+  score: number;
+}
+
+export interface StrategyAssessment {
+  mode: string;
+  fitScore: number;
+  sortScore: number;
+  baseScore: number;
+  adjustedScore: number;
+  horizons?: {
+    shortTermScore: number;
+    midLongTermScore: number;
+    stabilityScore: number;
+    qualityCompositeScore: number;
+    scoreGap: number;
+    classification: string;
+    shortTermTradable: boolean;
+    midLongInvestable: boolean;
+  };
+  recommendation: 'aligned' | 'watch' | 'avoid' | 'blocked' | string;
+  failedGateCount: number;
+  triggeredVetoCount: number;
+  gates: StrategyCheckResult[];
+  vetoes: StrategyCheckResult[];
+  focus: StrategyFocusResult[];
+}
+
 export interface StockChartPoint {
   time: string;
   open?: number | null;
@@ -482,6 +550,7 @@ export interface Pick {
   newsHeatAnalysis?: NewsHeatAnalysis;
   trendAnalysis?: TrendAnalysis;
   overallAssessment?: OverallAssessment;
+  strategyAssessment?: StrategyAssessment;
   financialAnalysis?: FinancialAnalysis;
   actionPlan?: ActionPlan;
   holding?: HoldingPosition;
@@ -580,7 +649,12 @@ export type AnalysisStreamEvent =
 
 const headers = { 'Content-Type': 'application/json' };
 let usingStaticFallback = false;
-const staticDemoBuild = import.meta.env.PROD && import.meta.env.BASE_URL === '/stock-picker/';
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
+const staticDemoBuild = import.meta.env.PROD && import.meta.env.BASE_URL === '/stock-picker/' && !configuredApiBaseUrl;
+
+function apiUrl(path: string) {
+  return configuredApiBaseUrl ? `${configuredApiBaseUrl}${path}` : path;
+}
 
 export function currentDataMode(): 'demo' | 'live' {
   return staticDemoBuild || usingStaticFallback ? 'demo' : 'live';
@@ -1287,7 +1361,7 @@ export async function fetchConfig(): Promise<AppConfig> {
     return fallbackConfig;
   }
   try {
-    const response = await fetch('/api/config');
+    const response = await fetch(apiUrl('/api/config'));
     if (!response.ok) throw new Error('Failed to load config');
     if (!hasContentType(response, 'application/json')) throw new Error('Static preview fallback');
     return response.json();
@@ -1305,7 +1379,7 @@ export async function refreshStrategyLibrary(): Promise<StrategyLibrary> {
     return { ...fallbackStrategyLibrary, refreshedAt: new Date().toISOString(), runtimeStrategies: fallbackConfig.strategies };
   }
   try {
-    const response = await fetch('/api/strategies/refresh');
+    const response = await fetch(apiUrl('/api/strategies/refresh'));
     if (!response.ok) throw new Error('Failed to refresh strategy library');
     if (!hasContentType(response, 'application/json')) throw new Error('Static preview fallback');
     return response.json();
@@ -1378,7 +1452,7 @@ export async function fetchStockChart(symbol: string): Promise<StockChartRespons
   if (staticDemoBuild || usingStaticFallback) {
     return fallbackStockChart(symbol);
   }
-  const response = await fetch(`/api/stocks/${encodeURIComponent(symbol)}/chart`);
+  const response = await fetch(apiUrl(`/api/stocks/${encodeURIComponent(symbol)}/chart`));
   if (!response.ok) {
     const payload = hasContentType(response, 'application/json') ? await response.json().catch(() => ({})) : {};
     throw new Error(payload.error || 'Failed to load stock chart');
@@ -1400,7 +1474,7 @@ export async function analyzeStocks(payload: {
     return fallbackAnalysis(payload);
   }
   try {
-    const response = await fetch('/api/analyze', {
+    const response = await fetch(apiUrl('/api/analyze'), {
       method: 'POST',
       headers,
       body: JSON.stringify(payload)
@@ -1451,7 +1525,7 @@ export async function analyzeStocksStream(
   }
   let response: Response;
   try {
-    response = await fetch('/api/analyze/stream', {
+    response = await fetch(apiUrl('/api/analyze/stream'), {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
@@ -1517,7 +1591,7 @@ export async function importPortfolioFile(file: File): Promise<PortfolioImportRe
   }
   const formData = new FormData();
   formData.append('file', file);
-  const response = await fetch('/api/portfolio/import', {
+  const response = await fetch(apiUrl('/api/portfolio/import'), {
     method: 'POST',
     body: formData
   });

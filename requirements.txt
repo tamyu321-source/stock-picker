@@ -1,4 +1,5 @@
 Flask>=2.1,<4
+Flask-Cors>=4,<7
 Waitress>=2.1,<4
 yfinance==0.2.40
 multitasking<0.0.12

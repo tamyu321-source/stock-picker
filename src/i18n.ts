@@ -637,6 +637,14 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
       name: 'AI Smart Blend',
       description: 'Blends refreshed online strategies across buy-today quality, future rise, profitable exit, news heat, trend, and risk.'
     },
+    short_term_adaptive_trade: {
+      name: 'Short-Term Adaptive Trade',
+      description: 'Separates short-term tradability from durable quality, focusing on today entry, tomorrow continuation, liquidity, fund flow, and exit windows.'
+    },
+    mid_long_quality_compounder: {
+      name: 'Mid/Long Quality Compounder',
+      description: 'Ranks durable quality candidates by fundamentals, valuation, risk control, trend support, and score stability instead of one-day heat.'
+    },
     today_breakout_volume: {
       name: 'Today Breakout + Volume',
       description: 'Focuses on whether the current price break has volume and enough same-day entry quality.'
@@ -682,6 +690,14 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     ai_smart_blend: {
       name: 'AI 智慧综合策略',
       description: '融合刷新后的网上策略，综合今日买入、未来上涨、盈利卖出、新闻热度、趋势和风险。'
+    },
+    short_term_adaptive_trade: {
+      name: '短线适配交易策略',
+      description: '把短线可交易性和长期质量拆开，重点看今日进场、次日延续、流动性、资金流和卖出窗口。'
+    },
+    mid_long_quality_compounder: {
+      name: '中长线优质复利策略',
+      description: '按基本面、估值、风险控制、趋势支撑和评分稳定性寻找耐看的优质候选，不被单日热度主导。'
     },
     today_breakout_volume: {
       name: '今日突破 + 量能',
@@ -729,6 +745,14 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
       name: 'AI 智慧綜合策略',
       description: '融合刷新後的網上策略，綜合今日買入、未來上漲、盈利賣出、新聞熱度、趨勢和風險。'
     },
+    short_term_adaptive_trade: {
+      name: '短線適配交易策略',
+      description: '把短線可交易性和長期品質拆開，重點看今日進場、次日延續、流動性、資金流和賣出窗口。'
+    },
+    mid_long_quality_compounder: {
+      name: '中長線優質複利策略',
+      description: '按基本面、估值、風險控制、趨勢支撐和評分穩定性尋找耐看的優質候選，不被單日熱度主導。'
+    },
     today_breakout_volume: {
       name: '今日突破 + 量能',
       description: '重點判斷當前突破是否有量能，以及當天是否具備足夠買入品質。'
@@ -774,6 +798,14 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     ai_smart_blend: {
       name: 'AI 智慧綜合策略',
       description: '融合刷新後的網路策略，綜合今仔日買、後勢上漲、趁錢賣出、新聞熱度、趨勢佮風險。'
+    },
+    short_term_adaptive_trade: {
+      name: '短線適配交易策略',
+      description: '共短線會交易佮長期品質拆開，重點看今仔日進場、隔日延續、流動性、資金流佮賣出窗口。'
+    },
+    mid_long_quality_compounder: {
+      name: '中長線優質複利策略',
+      description: '照基本面、估值、風險控制、趨勢支撐佮評分穩定性揣耐看的優質候選。'
     },
     today_breakout_volume: {
       name: '今仔日突破 + 量能',
@@ -821,6 +853,14 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
       name: 'AI スマート統合',
       description: '更新されたオンライン戦略を、当日買い、将来上昇、利益確定、ニュース熱量、トレンド、リスクで統合します。'
     },
+    short_term_adaptive_trade: {
+      name: '短期適応トレード',
+      description: '短期の取引適性と長期品質を分け、当日エントリー、翌日継続、流動性、資金フロー、出口を重視します。'
+    },
+    mid_long_quality_compounder: {
+      name: '中長期品質コンパウンダー',
+      description: '一日の熱量ではなく、ファンダメンタル、評価、リスク、トレンド支え、安定性で品質候補を順位付けします。'
+    },
     today_breakout_volume: {
       name: '本日ブレイク + 出来高',
       description: '現在のブレイクに出来高が伴い、当日エントリー品質が十分かを重視します。'
@@ -866,6 +906,14 @@ export const strategyText: Record<Locale, Record<string, { name: string; descrip
     ai_smart_blend: {
       name: 'AI 스마트 종합 전략',
       description: '새로 수집한 온라인 전략을 오늘 매수, 향후 상승, 수익 매도, 뉴스 열기, 추세, 리스크로 통합합니다.'
+    },
+    short_term_adaptive_trade: {
+      name: '단기 적응 매매 전략',
+      description: '단기 거래성과 장기 품질을 분리해 오늘 진입, 다음 세션 지속, 유동성, 자금 흐름, 매도 창을 중시합니다.'
+    },
+    mid_long_quality_compounder: {
+      name: '중장기 품질 복리 전략',
+      description: '하루 열기보다 펀더멘털, 밸류에이션, 리스크 관리, 추세 지지, 점수 안정성으로 품질 후보를 평가합니다.'
     },
     today_breakout_volume: {
       name: '오늘 돌파 + 거래량',

@@ -9,6 +9,7 @@ from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
 from backend.portfolio import normalize_a_share_symbol, parse_portfolio_export
 from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _eastmoney_cn_fund_flow, _parse_eastmoney_datetime, _sina_cn_fund_flow, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
 from backend.services import _breakout_setup_score, _financial_analysis, _friendly_data_error, _fund_flow_profile, _metric_availability, _metrics, _news_analysis, _news_heat_analysis, _pullback_risk_score, _score_breakdown, _sentiment_score, _verdict
+from backend.strategy_library import get_strategy_catalog
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _manual_symbol_candidates, _symbols_from_code_mentions
 
 
@@ -121,13 +122,22 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(len(payload["markets"]), 7)
         self.assertGreaterEqual(len(payload["strategies"]), 8)
         self.assertIn("strategyLibrary", payload)
-        self.assertGreaterEqual(len(payload["strategyLibrary"]["sources"]), 12)
+        self.assertGreaterEqual(len(payload["strategyLibrary"]["sources"]), 20)
         self.assertIn("todayBuy", payload["strategyLibrary"]["detailedWeightKeys"])
         strategy_ids = {strategy["id"] for strategy in payload["strategies"]}
         self.assertIn("ai_smart_blend", strategy_ids)
+        self.assertIn("short_term_adaptive_trade", strategy_ids)
+        self.assertIn("mid_long_quality_compounder", strategy_ids)
         self.assertNotIn("balanced", strategy_ids)
         self.assertNotIn("growth", strategy_ids)
         self.assertNotIn("defensive", strategy_ids)
+        ai_strategy = next(strategy for strategy in payload["strategies"] if strategy["id"] == "ai_smart_blend")
+        breakout_strategy = next(strategy for strategy in payload["strategies"] if strategy["id"] == "today_breakout_volume")
+        self.assertIn("behavior", ai_strategy)
+        self.assertIn("entryGates", ai_strategy["behavior"])
+        self.assertIn("vetoRules", ai_strategy["behavior"])
+        self.assertNotEqual(ai_strategy["behavior"]["mode"], breakout_strategy["behavior"]["mode"])
+        self.assertTrue(all(source.get("usable") for source in payload["strategyLibrary"]["sources"]))
         self.assertIn("defaultSymbols", payload)
         self.assertIn("scanUniverseSize", payload)
         self.assertIn("2330.TW", payload["defaultSymbols"]["TW"])
@@ -150,6 +160,64 @@ class ApiTestCase(unittest.TestCase):
         pick = payload["picks"][0]
         self.assertIn("componentWeights", pick["overallAssessment"])
         self.assertGreater(pick["overallAssessment"]["componentWeights"]["newsHeatImpactScore"], 12)
+        self.assertIn("strategyAssessment", pick)
+        self.assertEqual(pick["strategyAssessment"]["mode"], "news_heat_catalyst")
+        self.assertTrue(pick["strategyAssessment"]["gates"])
+        self.assertTrue(pick["strategyAssessment"]["vetoes"])
+        self.assertIn("horizons", pick["strategyAssessment"])
+        self.assertIn("shortTermScore", pick["strategyAssessment"]["horizons"])
+        self.assertIn("midLongTermScore", pick["strategyAssessment"]["horizons"])
+
+    def test_strategy_models_apply_distinct_gates_and_scores(self):
+        breakout_response = self.client.post(
+            "/api/analyze",
+            json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "today_breakout_volume"},
+        )
+        defensive_response = self.client.post(
+            "/api/analyze",
+            json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "defensive_quality_value"},
+        )
+
+        self.assertEqual(breakout_response.status_code, 200)
+        self.assertEqual(defensive_response.status_code, 200)
+        breakout_pick = breakout_response.get_json()["picks"][0]
+        defensive_pick = defensive_response.get_json()["picks"][0]
+        breakout_assessment = breakout_pick["strategyAssessment"]
+        defensive_assessment = defensive_pick["strategyAssessment"]
+        self.assertEqual(breakout_assessment["mode"], "breakout_volume")
+        self.assertEqual(defensive_assessment["mode"], "defensive_quality_value")
+        self.assertNotEqual(
+            {gate["key"] for gate in breakout_assessment["gates"]},
+            {gate["key"] for gate in defensive_assessment["gates"]},
+        )
+        self.assertNotEqual(breakout_assessment["sortScore"], defensive_assessment["sortScore"])
+        self.assertEqual(breakout_pick["overallAssessment"]["totalScore"], breakout_assessment["adjustedScore"])
+
+    def test_short_and_mid_long_models_are_separate(self):
+        short_response = self.client.post(
+            "/api/analyze",
+            json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "short_term_adaptive_trade"},
+        )
+        long_response = self.client.post(
+            "/api/analyze",
+            json={"markets": ["US"], "symbols": ["AAPL"], "strategyId": "mid_long_quality_compounder"},
+        )
+
+        self.assertEqual(short_response.status_code, 200)
+        self.assertEqual(long_response.status_code, 200)
+        short_assessment = short_response.get_json()["picks"][0]["strategyAssessment"]
+        long_assessment = long_response.get_json()["picks"][0]["strategyAssessment"]
+        self.assertEqual(short_assessment["mode"], "short_term_adaptive_trade")
+        self.assertEqual(long_assessment["mode"], "mid_long_quality_compounder")
+        self.assertIn("strategyGateShortTerm", {gate["key"] for gate in short_assessment["gates"]})
+        self.assertIn("strategyGateMidLongQuality", {gate["key"] for gate in long_assessment["gates"]})
+        self.assertIn(long_assessment["horizons"]["classification"], {"stableQuality", "shortTermOnly", "midLongQuality", "unstable", "balanced"})
+
+    def test_strategy_library_uses_fallback_sources_without_refresh(self):
+        catalog = get_strategy_catalog(refresh=False)
+        self.assertGreaterEqual(len(catalog["sources"]), 20)
+        self.assertTrue(all(source["usable"] for source in catalog["sources"]))
+        self.assertTrue(any(source["fallback"] for source in catalog["sources"]))
 
     def test_stock_chart_endpoint_returns_intraday_and_daily_series(self):
         class FakeChartResponse:

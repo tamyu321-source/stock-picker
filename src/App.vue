@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, currentDataMode, fetchConfig, fetchStockChart, importPortfolioFile, refreshStrategyLibrary, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyLibrary, type StrategyWeights } from './api';
+import { analyzeStocksStream, currentDataMode, fetchConfig, fetchStockChart, importPortfolioFile, refreshStrategyLibrary, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -119,6 +119,7 @@ const strategyLibraryText: Record<Locale, {
   onlineStrategies: string;
   sources: string;
   availableSources: string;
+  usableSources: string;
   detailedWeights: string;
   aiBlendHint: string;
   updated: string;
@@ -136,6 +137,27 @@ const strategyLibraryText: Record<Locale, {
   chartSource: string;
   limitUp: string;
   closeDetail: string;
+  decisionModel: string;
+  modelFit: string;
+  shortTermScore: string;
+  midLongTermScore: string;
+  stableQualityScore: string;
+  horizonType: string;
+  baseScore: string;
+  adjustedScore: string;
+  sortScore: string;
+  entryGates: string;
+  vetoRules: string;
+  focusItems: string;
+  passed: string;
+  failed: string;
+  triggered: string;
+  clear: string;
+  modelAligned: string;
+  modelWatch: string;
+  modelAvoid: string;
+  modelBlocked: string;
+  sourceFallback: string;
 }> = {
   en: {
     refreshStrategies: 'Refresh online strategies',
@@ -143,6 +165,7 @@ const strategyLibraryText: Record<Locale, {
     onlineStrategies: 'online strategies',
     sources: 'sources',
     availableSources: 'available sources',
+    usableSources: 'usable sources',
     detailedWeights: 'Detailed weights',
     aiBlendHint: 'AI Smart Blend will rebalance after the online source crawl refreshes.',
     updated: 'Updated',
@@ -159,7 +182,28 @@ const strategyLibraryText: Record<Locale, {
     chartUnavailable: 'Chart temporarily unavailable',
     chartSource: 'Chart source',
     limitUp: 'Limit up',
-    closeDetail: 'Close'
+    closeDetail: 'Close',
+    decisionModel: 'Strategy decision model',
+    modelFit: 'Fit score',
+    shortTermScore: 'Short-term fit',
+    midLongTermScore: 'Mid/long fit',
+    stableQualityScore: 'Quality stability',
+    horizonType: 'Horizon',
+    baseScore: 'Base final',
+    adjustedScore: 'Strategy final',
+    sortScore: 'Sort score',
+    entryGates: 'Entry gates',
+    vetoRules: 'Veto rules',
+    focusItems: 'Strategy focus',
+    passed: 'passed',
+    failed: 'failed',
+    triggered: 'triggered',
+    clear: 'clear',
+    modelAligned: 'aligned',
+    modelWatch: 'watch',
+    modelAvoid: 'avoid',
+    modelBlocked: 'blocked',
+    sourceFallback: 'fallback'
   },
   'zh-CN': {
     refreshStrategies: '刷新网上策略',
@@ -167,6 +211,7 @@ const strategyLibraryText: Record<Locale, {
     onlineStrategies: '网上策略',
     sources: '来源',
     availableSources: '可用来源',
+    usableSources: '可用策略源',
     detailedWeights: '细分权重',
     aiBlendHint: 'AI 智慧策略会在刷新网上来源后自动重新平衡。',
     updated: '更新时间',
@@ -183,7 +228,28 @@ const strategyLibraryText: Record<Locale, {
     chartUnavailable: '图表暂时不可用',
     chartSource: '图表来源',
     limitUp: '涨停价',
-    closeDetail: '关闭'
+    closeDetail: '关闭',
+    decisionModel: '策略决策模型',
+    modelFit: '策略适配',
+    shortTermScore: '短线适配',
+    midLongTermScore: '中长线适配',
+    stableQualityScore: '稳定优质',
+    horizonType: '周期类型',
+    baseScore: '原始总评',
+    adjustedScore: '策略总评',
+    sortScore: '排序分',
+    entryGates: '入场门槛',
+    vetoRules: '否决规则',
+    focusItems: '策略重点',
+    passed: '通过',
+    failed: '未过',
+    triggered: '触发',
+    clear: '未触发',
+    modelAligned: '匹配',
+    modelWatch: '观察',
+    modelAvoid: '规避',
+    modelBlocked: '阻断',
+    sourceFallback: '内置回退'
   },
   'zh-TW': {
     refreshStrategies: '刷新網上策略',
@@ -191,6 +257,7 @@ const strategyLibraryText: Record<Locale, {
     onlineStrategies: '網上策略',
     sources: '來源',
     availableSources: '可用來源',
+    usableSources: '可用策略源',
     detailedWeights: '細分權重',
     aiBlendHint: 'AI 智慧策略會在刷新網上來源後自動重新平衡。',
     updated: '更新時間',
@@ -207,7 +274,28 @@ const strategyLibraryText: Record<Locale, {
     chartUnavailable: '圖表暫時不可用',
     chartSource: '圖表來源',
     limitUp: '漲停價',
-    closeDetail: '關閉'
+    closeDetail: '關閉',
+    decisionModel: '策略決策模型',
+    modelFit: '策略適配',
+    shortTermScore: '短線適配',
+    midLongTermScore: '中長線適配',
+    stableQualityScore: '穩定優質',
+    horizonType: '週期類型',
+    baseScore: '原始總評',
+    adjustedScore: '策略總評',
+    sortScore: '排序分',
+    entryGates: '入場門檻',
+    vetoRules: '否決規則',
+    focusItems: '策略重點',
+    passed: '通過',
+    failed: '未過',
+    triggered: '觸發',
+    clear: '未觸發',
+    modelAligned: '匹配',
+    modelWatch: '觀察',
+    modelAvoid: '規避',
+    modelBlocked: '阻斷',
+    sourceFallback: '內建回退'
   },
   'nan-TW': {
     refreshStrategies: '刷新網路策略',
@@ -215,6 +303,7 @@ const strategyLibraryText: Record<Locale, {
     onlineStrategies: '網路策略',
     sources: '來源',
     availableSources: '會用的來源',
+    usableSources: '會用的策略源',
     detailedWeights: '細分權重',
     aiBlendHint: 'AI 智慧策略會照新抓著的來源自動重排權重。',
     updated: '更新時間',
@@ -231,7 +320,28 @@ const strategyLibraryText: Record<Locale, {
     chartUnavailable: '圖表暫時無法度用',
     chartSource: '圖表來源',
     limitUp: '漲停價',
-    closeDetail: '關閉'
+    closeDetail: '關閉',
+    decisionModel: '策略決策模型',
+    modelFit: '策略適配',
+    shortTermScore: '短線適配',
+    midLongTermScore: '中長線適配',
+    stableQualityScore: '穩定優質',
+    horizonType: '週期類型',
+    baseScore: '原始總評',
+    adjustedScore: '策略總評',
+    sortScore: '排序分',
+    entryGates: '入場門檻',
+    vetoRules: '否決規則',
+    focusItems: '策略重點',
+    passed: '通過',
+    failed: '未過',
+    triggered: '觸發',
+    clear: '未觸發',
+    modelAligned: '匹配',
+    modelWatch: '觀察',
+    modelAvoid: '規避',
+    modelBlocked: '阻斷',
+    sourceFallback: '內建回退'
   },
   ja: {
     refreshStrategies: 'オンライン戦略を更新',
@@ -239,6 +349,7 @@ const strategyLibraryText: Record<Locale, {
     onlineStrategies: 'オンライン戦略',
     sources: 'ソース',
     availableSources: '利用可能ソース',
+    usableSources: '利用可能な戦略ソース',
     detailedWeights: '詳細ウェイト',
     aiBlendHint: 'AI Smart Blend はオンラインソース更新後に自動で再調整します。',
     updated: '更新',
@@ -255,7 +366,28 @@ const strategyLibraryText: Record<Locale, {
     chartUnavailable: 'チャートを一時的に取得できません',
     chartSource: 'チャートソース',
     limitUp: 'ストップ高',
-    closeDetail: '閉じる'
+    closeDetail: '閉じる',
+    decisionModel: '戦略判断モデル',
+    modelFit: '適合スコア',
+    shortTermScore: '短期適合',
+    midLongTermScore: '中長期適合',
+    stableQualityScore: '品質安定性',
+    horizonType: '時間軸',
+    baseScore: '基礎総合',
+    adjustedScore: '戦略総合',
+    sortScore: '並び替えスコア',
+    entryGates: 'エントリー条件',
+    vetoRules: '除外条件',
+    focusItems: '戦略の重点',
+    passed: '通過',
+    failed: '未通過',
+    triggered: '発動',
+    clear: '未発動',
+    modelAligned: '適合',
+    modelWatch: '注視',
+    modelAvoid: '回避',
+    modelBlocked: 'ブロック',
+    sourceFallback: '内蔵フォールバック'
   },
   ko: {
     refreshStrategies: '온라인 전략 새로고침',
@@ -263,6 +395,7 @@ const strategyLibraryText: Record<Locale, {
     onlineStrategies: '온라인 전략',
     sources: '출처',
     availableSources: '사용 가능한 출처',
+    usableSources: '사용 가능한 전략 출처',
     detailedWeights: '세부 가중치',
     aiBlendHint: 'AI Smart Blend는 온라인 출처를 새로 수집한 뒤 자동으로 재조정됩니다.',
     updated: '업데이트',
@@ -279,7 +412,28 @@ const strategyLibraryText: Record<Locale, {
     chartUnavailable: '차트를 일시적으로 사용할 수 없습니다',
     chartSource: '차트 출처',
     limitUp: '상한가',
-    closeDetail: '닫기'
+    closeDetail: '닫기',
+    decisionModel: '전략 의사결정 모델',
+    modelFit: '적합 점수',
+    shortTermScore: '단기 적합',
+    midLongTermScore: '중장기 적합',
+    stableQualityScore: '품질 안정성',
+    horizonType: '기간 유형',
+    baseScore: '기본 종합',
+    adjustedScore: '전략 종합',
+    sortScore: '정렬 점수',
+    entryGates: '진입 조건',
+    vetoRules: '차단 규칙',
+    focusItems: '전략 중점',
+    passed: '통과',
+    failed: '미통과',
+    triggered: '발동',
+    clear: '미발동',
+    modelAligned: '적합',
+    modelWatch: '관찰',
+    modelAvoid: '회피',
+    modelBlocked: '차단',
+    sourceFallback: '내장 fallback'
   }
 };
 
@@ -478,9 +632,11 @@ const selectedStrategySources = computed(() => {
 const strategySourceSummary = computed(() => {
   const total = strategySources.value.length;
   const available = strategySources.value.filter((source) => source.available === true).length;
+  const usable = strategySources.value.filter((source) => source.available === true || source.usable === true).length;
   const selected = selectedStrategySources.value.length;
   if (!total) return '';
-  if (available) return `${selected || total}/${total} ${strategyUi.value.onlineStrategies} · ${available} ${strategyUi.value.availableSources}`;
+  if (available) return `${selected || total}/${total} ${strategyUi.value.onlineStrategies} · ${available} ${strategyUi.value.availableSources} · ${usable} ${strategyUi.value.usableSources}`;
+  if (usable) return `${selected || total}/${total} ${strategyUi.value.onlineStrategies} · ${usable} ${strategyUi.value.usableSources}`;
   return `${selected || total}/${total} ${strategyUi.value.onlineStrategies}`;
 });
 const strategyUpdatedLabel = computed(() => {
@@ -1919,6 +2075,142 @@ function scoreWeightLabel(item: { weight: number; baseWeight?: number; available
   const base = item.baseWeight === undefined ? effective : Number(item.baseWeight).toFixed(1);
   if (item.available === false) return `0.0% (${base}%)`;
   return base !== effective ? `${base}% -> ${effective}%` : `${effective}%`;
+}
+
+function localeText(text: LocalizedText) {
+  return text[locale.value as StandardLocale] ?? text.en;
+}
+
+function strategyMetricLabel(metric: string) {
+  const labels: Record<string, LocalizedText> = {
+    overallTotal: { en: 'Final total', 'zh-CN': '最终总分', 'zh-TW': '最終總分', ja: '最終総合', ko: '최종 종합' },
+    todayBuyScore: { en: 'Buy today', 'zh-CN': '今日买入', 'zh-TW': '今日買入', ja: '本日買い', ko: '오늘 매수' },
+    futureRiseScore: { en: 'Future rise', 'zh-CN': '后续上涨', 'zh-TW': '後續上漲', ja: '今後の上昇', ko: '향후 상승' },
+    profitableExitScore: { en: 'Profitable exit', 'zh-CN': '盈利卖出', 'zh-TW': '盈利賣出', ja: '利益確定', ko: '수익 매도' },
+    newsHeatImpactScore: { en: 'News heat impact', 'zh-CN': '新闻热度影响', 'zh-TW': '新聞熱度影響', ja: 'ニュース熱量影響', ko: '뉴스 열기 영향' },
+    breakoutSetupScore: { en: 'Breakout setup', 'zh-CN': '突破 setup', 'zh-TW': '突破 setup', ja: 'ブレイク設定', ko: '돌파 setup' },
+    pullbackRiskScore: { en: 'Pullback risk', 'zh-CN': '回落风险', 'zh-TW': '回落風險', ja: '反落リスク', ko: '되돌림 리스크' },
+    pullbackRiskInverse: { en: 'Pullback safety', 'zh-CN': '回落安全度', 'zh-TW': '回落安全度', ja: '反落安全度', ko: '되돌림 안전도' },
+    downsideRiskScore: { en: 'Downside risk', 'zh-CN': '下跌风险', 'zh-TW': '下跌風險', ja: '下落リスク', ko: '하방 리스크' },
+    downsideRiskInverse: { en: 'Downside safety', 'zh-CN': '下跌安全度', 'zh-TW': '下跌安全度', ja: '下落安全度', ko: '하방 안전도' },
+    nextSessionContinuationScore: { en: 'Next-session continuation', 'zh-CN': '次日延续', 'zh-TW': '次日延續', ja: '翌日継続', ko: '다음 세션 지속' },
+    nextSessionReversalRiskScore: { en: 'Next-session reversal risk', 'zh-CN': '次日反转风险', 'zh-TW': '次日反轉風險', ja: '翌日反転リスク', ko: '다음 세션 반전 리스크' },
+    nextSessionReversalRiskInverse: { en: 'Reversal safety', 'zh-CN': '反转安全度', 'zh-TW': '反轉安全度', ja: '反転安全度', ko: '반전 안전도' },
+    maStructureScore: { en: 'MA structure', 'zh-CN': '均线结构', 'zh-TW': '均線結構', ja: '移動平均構造', ko: '이동평균 구조' },
+    rsiScore: { en: 'RSI health', 'zh-CN': 'RSI 健康度', 'zh-TW': 'RSI 健康度', ja: 'RSI 健全性', ko: 'RSI 건강도' },
+    macdScore: { en: 'MACD confirmation', 'zh-CN': 'MACD 确认', 'zh-TW': 'MACD 確認', ja: 'MACD 確認', ko: 'MACD 확인' },
+    volumeConfirmationScore: { en: 'Volume confirmation', 'zh-CN': '量能确认', 'zh-TW': '量能確認', ja: '出来高確認', ko: '거래량 확인' },
+    supportScore: { en: 'Support position', 'zh-CN': '支撑位置', 'zh-TW': '支撐位置', ja: '支持位置', ko: '지지 위치' },
+    tScore: { en: 'T / exit score', 'zh-CN': '做T/卖出分', 'zh-TW': '做T/賣出分', ja: 'T/売却スコア', ko: 'T/매도 점수' },
+    liquidityScore: { en: 'Liquidity', 'zh-CN': '流动性', 'zh-TW': '流動性', ja: '流動性', ko: '유동성' },
+    volatilityScore: { en: 'Tradable volatility', 'zh-CN': '可交易波动', 'zh-TW': '可交易波動', ja: '取引可能な変動', ko: '거래 가능한 변동성' },
+    fundFlowScore: { en: 'Fund flow', 'zh-CN': '资金流', 'zh-TW': '資金流', ja: '資金フロー', ko: '자금 흐름' },
+    shortTermScore: { en: 'Short-term fit', 'zh-CN': '短线适配', 'zh-TW': '短線適配', ja: '短期適合', ko: '단기 적합' },
+    midLongTermScore: { en: 'Mid/long fit', 'zh-CN': '中长线适配', 'zh-TW': '中長線適配', ja: '中長期適合', ko: '중장기 적합' },
+    stabilityScore: { en: 'Score stability', 'zh-CN': '评分稳定性', 'zh-TW': '評分穩定性', ja: 'スコア安定性', ko: '점수 안정성' },
+    qualityCompositeScore: { en: 'Quality stability', 'zh-CN': '稳定优质', 'zh-TW': '穩定優質', ja: '品質安定性', ko: '품질 안정성' },
+    priceChange: { en: 'Price change', 'zh-CN': '涨跌幅', 'zh-TW': '漲跌幅', ja: '騰落率', ko: '등락률' }
+  };
+  return labels[metric] ? localeText(labels[metric]) : factorLabel(metric);
+}
+
+function strategyRuleTitle(key: string) {
+  const labels: Record<string, LocalizedText> = {
+    strategyGateTodayBuy: { en: 'Today entry must be strong enough', 'zh-CN': '今日进场条件必须足够强', 'zh-TW': '今日進場條件必須足夠強', ja: '本日エントリー条件が必要', ko: '오늘 진입 조건 필요' },
+    strategyGateFutureRise: { en: 'Future rise must clear the strategy floor', 'zh-CN': '后续上涨空间必须过线', 'zh-TW': '後續上漲空間必須過線', ja: '今後の上昇余地が必要', ko: '향후 상승 여지가 필요' },
+    strategyGateProfitableExit: { en: 'Later profitable exit must be realistic', 'zh-CN': '之后盈利卖出必须现实', 'zh-TW': '之後盈利賣出必須現實', ja: '利益確定余地が必要', ko: '이후 수익 매도가 현실적이어야 함' },
+    strategyGateDownside: { en: 'Downside risk must stay controlled', 'zh-CN': '下跌风险必须受控', 'zh-TW': '下跌風險必須受控', ja: '下落リスクの制御が必要', ko: '하방 리스크가 통제되어야 함' },
+    strategyGateBreakout: { en: 'Breakout must have price confirmation', 'zh-CN': '突破必须有价格确认', 'zh-TW': '突破必須有價格確認', ja: 'ブレイクの価格確認が必要', ko: '돌파 가격 확인 필요' },
+    strategyGateVolume: { en: 'Volume must confirm the move', 'zh-CN': '量能必须确认', 'zh-TW': '量能必須確認', ja: '出来高確認が必要', ko: '거래량 확인 필요' },
+    strategyGatePullback: { en: 'Pullback risk must be acceptable', 'zh-CN': '回落风险必须可接受', 'zh-TW': '回落風險必須可接受', ja: '反落リスクが許容範囲内', ko: '되돌림 리스크 허용 범위' },
+    strategyGateReversal: { en: 'Reversal risk must be low enough', 'zh-CN': '反转风险必须足够低', 'zh-TW': '反轉風險必須足夠低', ja: '反転リスクが低いこと', ko: '반전 리스크가 충분히 낮아야 함' },
+    strategyGateContinuation: { en: 'Next session must be able to continue', 'zh-CN': '次日必须有延续能力', 'zh-TW': '次日必須有延續能力', ja: '翌日継続力が必要', ko: '다음 세션 지속력 필요' },
+    strategyGateMacd: { en: 'MACD must confirm', 'zh-CN': 'MACD 必须确认', 'zh-TW': 'MACD 必須確認', ja: 'MACD 確認が必要', ko: 'MACD 확인 필요' },
+    strategyGateTScore: { en: 'T / exit trade must be executable', 'zh-CN': '做T/卖出窗口必须可执行', 'zh-TW': '做T/賣出窗口必須可執行', ja: 'T/売却が実行可能', ko: 'T/매도 실행 가능해야 함' },
+    strategyGateLiquidity: { en: 'Liquidity must support the trade', 'zh-CN': '流动性必须支撑交易', 'zh-TW': '流動性必須支撐交易', ja: '流動性が必要', ko: '유동성 필요' },
+    strategyGateVolatility: { en: 'Tradable range must exist', 'zh-CN': '必须有可交易价差', 'zh-TW': '必須有可交易價差', ja: '取引可能な値幅が必要', ko: '거래 가능한 범위 필요' },
+    strategyGateNewsHeat: { en: 'Catalyst heat must be visible', 'zh-CN': '题材热度必须明显', 'zh-TW': '題材熱度必須明顯', ja: '材料熱量が必要', ko: '재료 열기 필요' },
+    strategyGateSentiment: { en: 'Sentiment must support the catalyst', 'zh-CN': '情绪必须支持题材', 'zh-TW': '情緒必須支持題材', ja: 'センチメント確認が必要', ko: '심리 확인 필요' },
+    strategyGateFundFlow: { en: 'Fund flow cannot fight the setup', 'zh-CN': '资金流不能明显背离', 'zh-TW': '資金流不能明顯背離', ja: '資金フローの逆行を避ける', ko: '자금 흐름 역행 금지' },
+    strategyGateMaStructure: { en: 'Moving averages must be constructive', 'zh-CN': '均线结构必须健康', 'zh-TW': '均線結構必須健康', ja: '移動平均構造が必要', ko: '이동평균 구조 필요' },
+    strategyGateRsi: { en: 'RSI condition must confirm', 'zh-CN': 'RSI 条件必须确认', 'zh-TW': 'RSI 條件必須確認', ja: 'RSI 条件確認が必要', ko: 'RSI 조건 확인 필요' },
+    strategyGateQuality: { en: 'Quality must pass', 'zh-CN': '基本面质量必须过线', 'zh-TW': '基本面品質必須過線', ja: '品質条件が必要', ko: '품질 조건 필요' },
+    strategyGateValue: { en: 'Valuation must be acceptable', 'zh-CN': '估值必须可接受', 'zh-TW': '估值必須可接受', ja: '評価水準が必要', ko: '밸류에이션 조건 필요' },
+    strategyGateRisk: { en: 'Risk score must pass', 'zh-CN': '风险分必须过线', 'zh-TW': '風險分必須過線', ja: 'リスク点が必要', ko: '리스크 점수 필요' },
+    strategyGateShortTerm: { en: 'Short-term model must pass', 'zh-CN': '短线模型必须过线', 'zh-TW': '短線模型必須過線', ja: '短期モデルが必要', ko: '단기 모델 통과 필요' },
+    strategyGateMidLongQuality: { en: 'Mid/long quality must pass', 'zh-CN': '中长线优质分必须过线', 'zh-TW': '中長線優質分必須過線', ja: '中長期品質が必要', ko: '중장기 품질 통과 필요' },
+    strategyGateStableQuality: { en: 'Quality stability must pass', 'zh-CN': '稳定优质分必须过线', 'zh-TW': '穩定優質分必須過線', ja: '品質安定性が必要', ko: '품질 안정성 통과 필요' },
+    strategyVetoSevereDrop: { en: 'Severe drop blocks this strategy', 'zh-CN': '大跌会直接阻断策略', 'zh-TW': '大跌會直接阻斷策略', ja: '急落は戦略除外', ko: '급락은 전략 차단' },
+    strategyVetoDownside: { en: 'Downside risk veto', 'zh-CN': '下跌风险否决', 'zh-TW': '下跌風險否決', ja: '下落リスク除外', ko: '하방 리스크 차단' },
+    strategyVetoReversal: { en: 'Reversal risk veto', 'zh-CN': '反转风险否决', 'zh-TW': '反轉風險否決', ja: '反転リスク除外', ko: '반전 리스크 차단' },
+    strategyVetoNoVolume: { en: 'No volume confirmation', 'zh-CN': '量能未确认', 'zh-TW': '量能未確認', ja: '出来高未確認', ko: '거래량 미확인' },
+    strategyVetoOverheated: { en: 'Overheated chase risk', 'zh-CN': '追高过热风险', 'zh-TW': '追高過熱風險', ja: '過熱追随リスク', ko: '과열 추격 리스크' },
+    strategyVetoContinuationBreak: { en: 'Continuation has broken', 'zh-CN': '延续性已经破坏', 'zh-TW': '延續性已經破壞', ja: '継続性が崩れた', ko: '지속성 훼손' },
+    strategyVetoLiquidity: { en: 'Liquidity veto', 'zh-CN': '流动性否决', 'zh-TW': '流動性否決', ja: '流動性除外', ko: '유동성 차단' },
+    strategyVetoNewsCold: { en: 'Catalyst is too cold', 'zh-CN': '题材热度不足', 'zh-TW': '題材熱度不足', ja: '材料熱量不足', ko: '재료 열기 부족' },
+    strategyVetoNoReversalConfirm: { en: 'Reversal lacks confirmation', 'zh-CN': '反转确认不足', 'zh-TW': '反轉確認不足', ja: '反転確認不足', ko: '반전 확인 부족' },
+    strategyVetoQuality: { en: 'Quality veto', 'zh-CN': '质量否决', 'zh-TW': '品質否決', ja: '品質除外', ko: '품질 차단' },
+    strategyVetoRisk: { en: 'Risk veto', 'zh-CN': '风险否决', 'zh-TW': '風險否決', ja: 'リスク除外', ko: '리스크 차단' },
+    strategyVetoShortTermFail: { en: 'Short-term model failed', 'zh-CN': '短线模型失败', 'zh-TW': '短線模型失敗', ja: '短期モデル失敗', ko: '단기 모델 실패' },
+    strategyVetoMidLongWeak: { en: 'Mid/long quality is too weak', 'zh-CN': '中长线优质分过弱', 'zh-TW': '中長線優質分過弱', ja: '中長期品質が弱すぎます', ko: '중장기 품질이 너무 약함' }
+  };
+  return labels[key] ? localeText(labels[key]) : key;
+}
+
+function strategyFocusLabel(item: StrategyFocusResult) {
+  const labels: Record<string, LocalizedText> = {
+    strategyFocusTodayEntry: { en: 'Whether it is worth buying today', 'zh-CN': '今天是否真的值得买', 'zh-TW': '今天是否真的值得買', ja: '本日買う価値', ko: '오늘 매수 가치' },
+    strategyFocusFutureExit: { en: 'Whether later profit-taking is realistic', 'zh-CN': '之后能否盈利卖出', 'zh-TW': '之後能否盈利賣出', ja: '後日の利益確定余地', ko: '이후 수익 매도 가능성' },
+    strategyFocusRiskControl: { en: 'Downside control first', 'zh-CN': '优先控制下跌风险', 'zh-TW': '優先控制下跌風險', ja: '下落リスク優先', ko: '하방 리스크 우선' },
+    strategyFocusBreakoutVolume: { en: 'Breakout needs volume confirmation', 'zh-CN': '突破必须看量能确认', 'zh-TW': '突破必須看量能確認', ja: 'ブレイクは出来高確認', ko: '돌파는 거래량 확인' },
+    strategyFocusNoChase: { en: 'Avoid chasing after overextension', 'zh-CN': '避免过热追高', 'zh-TW': '避免過熱追高', ja: '過熱追随を避ける', ko: '과열 추격 회피' },
+    strategyFocusNextSession: { en: 'Next-session continuation', 'zh-CN': '次日延续能力', 'zh-TW': '次日延續能力', ja: '翌日継続力', ko: '다음 세션 지속력' },
+    strategyFocusReversalRisk: { en: 'Reversal risk', 'zh-CN': '反转风险', 'zh-TW': '反轉風險', ja: '反転リスク', ko: '반전 리스크' },
+    strategyFocusTrendStructure: { en: 'Trend and MA structure', 'zh-CN': '趋势与均线结构', 'zh-TW': '趨勢與均線結構', ja: 'トレンドと移動平均', ko: '추세와 이동평균' },
+    strategyFocusTExit: { en: 'T / high-sell window', 'zh-CN': '做T/高抛窗口', 'zh-TW': '做T/高拋窗口', ja: 'T/高値売り窓', ko: 'T/고가 매도 구간' },
+    strategyFocusLiquidity: { en: 'Liquidity and tradability', 'zh-CN': '流动性与可交易性', 'zh-TW': '流動性與可交易性', ja: '流動性と取引性', ko: '유동성과 거래성' },
+    strategyFocusNewsFlow: { en: 'Fresh news catalyst', 'zh-CN': '新鲜题材热度', 'zh-TW': '新鮮題材熱度', ja: '新しい材料熱量', ko: '신선한 재료 열기' },
+    strategyFocusFundFlow: { en: 'Fund flow confirmation', 'zh-CN': '资金流确认', 'zh-TW': '資金流確認', ja: '資金フロー確認', ko: '자금 흐름 확인' },
+    strategyFocusShortTerm: { en: 'Short-term tradability', 'zh-CN': '短线可交易性', 'zh-TW': '短線可交易性', ja: '短期取引適性', ko: '단기 거래 적합성' },
+    strategyFocusMidLongTerm: { en: 'Mid/long quality fit', 'zh-CN': '中长线优质适配', 'zh-TW': '中長線優質適配', ja: '中長期品質適合', ko: '중장기 품질 적합' },
+    strategyFocusStableQuality: { en: 'Stable quality candidate', 'zh-CN': '稳定优质候选', 'zh-TW': '穩定優質候選', ja: '安定品質候補', ko: '안정 품질 후보' },
+    strategyFocusPullbackSupport: { en: 'Controlled pullback near support', 'zh-CN': '靠近支撑的受控回踩', 'zh-TW': '靠近支撐的受控回踩', ja: '支持近辺の制御された押し目', ko: '지지 근처의 통제된 눌림' },
+    strategyFocusRsiMacd: { en: 'RSI and MACD confirmation', 'zh-CN': 'RSI 与 MACD 共振', 'zh-TW': 'RSI 與 MACD 共振', ja: 'RSI と MACD 確認', ko: 'RSI와 MACD 확인' },
+    strategyFocusConfirmBeforeBuy: { en: 'Confirm before buying', 'zh-CN': '确认后再买', 'zh-TW': '確認後再買', ja: '確認後に買う', ko: '확인 후 매수' },
+    strategyFocusQualityValue: { en: 'Quality and valuation first', 'zh-CN': '质量与估值优先', 'zh-TW': '品質與估值優先', ja: '品質と評価優先', ko: '품질과 밸류 우선' },
+    strategyFocusFinancialRepair: { en: 'Financial repair or support', 'zh-CN': '财务修复或支撑', 'zh-TW': '財務修復或支撐', ja: '財務改善または支え', ko: '재무 개선 또는 지지' }
+  };
+  return `${labels[item.key] ? localeText(labels[item.key]) : item.key} · ${strategyMetricLabel(item.metric)} ${Number(item.score).toFixed(1)}/100`;
+}
+
+function strategyCheckLabel(check: StrategyCheckResult, type: 'gate' | 'veto') {
+  const actual = Number(check.actual).toFixed(1);
+  const threshold = Number(check.threshold).toFixed(1);
+  const operator = check.operator === 'min' ? '>=' : check.operator === 'max' ? '<=' : check.operator === 'lte' ? '<=' : '>=';
+  const status = type === 'gate'
+    ? check.passed ? strategyUi.value.passed : strategyUi.value.failed
+    : check.triggered ? strategyUi.value.triggered : strategyUi.value.clear;
+  return `${strategyRuleTitle(check.key)} · ${strategyMetricLabel(check.metric)} ${actual} ${operator} ${threshold} · ${status}`;
+}
+
+function strategyRecommendationLabel(pick: Pick) {
+  const recommendation = pick.strategyAssessment?.recommendation;
+  if (recommendation === 'aligned') return strategyUi.value.modelAligned;
+  if (recommendation === 'watch') return strategyUi.value.modelWatch;
+  if (recommendation === 'avoid') return strategyUi.value.modelAvoid;
+  if (recommendation === 'blocked') return strategyUi.value.modelBlocked;
+  return recommendation || strategyUi.value.modelWatch;
+}
+
+function strategyHorizonLabel(classification: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    stableQuality: { en: 'Stable quality', 'zh-CN': '稳定优质', 'zh-TW': '穩定優質', ja: '安定品質', ko: '안정 품질' },
+    shortTermOnly: { en: 'Short-term only', 'zh-CN': '偏短线机会', 'zh-TW': '偏短線機會', ja: '短期寄り', ko: '단기 기회' },
+    midLongQuality: { en: 'Mid/long quality', 'zh-CN': '中长线优质', 'zh-TW': '中長線優質', ja: '中長期品質', ko: '중장기 품질' },
+    unstable: { en: 'Unstable', 'zh-CN': '不稳定', 'zh-TW': '不穩定', ja: '不安定', ko: '불안정' },
+    balanced: { en: 'Balanced', 'zh-CN': '均衡', 'zh-TW': '均衡', ja: 'バランス型', ko: '균형' }
+  };
+  return labels[classification || ''] ? localeText(labels[classification || '']) : classification || '-';
 }
 
 function uniquePointLabels(points: Array<DecisionPoint | undefined>, limit = 5) {
@@ -4453,7 +4745,7 @@ onUnmounted(() => {
               <a v-for="source in selectedStrategySources" :key="source.id" :href="source.url" target="_blank" rel="noreferrer">
                 <span>{{ source.title }}</span>
                 <small>
-                  {{ source.available === true ? strategyUi.sourceAvailable : source.available === false ? strategyUi.sourceFailed : strategyUi.sourcePending }}
+                  {{ source.available === true ? strategyUi.sourceAvailable : source.usable === true ? strategyUi.sourceFallback : source.available === false ? strategyUi.sourceFailed : strategyUi.sourcePending }}
                   <template v-if="source.matchedKeywords?.length"> · {{ strategyUi.matchedKeywords }} {{ source.matchedKeywords.length }}</template>
                 </small>
               </a>
@@ -4711,6 +5003,70 @@ onUnmounted(() => {
                   <strong>{{ t.watchItems }}</strong>
                   <ul>
                     <li v-for="item in reportWatchItems(pick)" :key="item">{{ item }}</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="pick.strategyAssessment" class="research-panel strategy-model-panel" :class="pick.strategyAssessment.recommendation">
+              <strong>{{ strategyUi.decisionModel }} · {{ strategyRecommendationLabel(pick) }}</strong>
+              <div class="financial-grid strategy-model-grid">
+                <div>
+                  <span>{{ strategyUi.modelFit }}</span>
+                  <b>{{ Number(pick.strategyAssessment.fitScore).toFixed(1) }}/100</b>
+                </div>
+                <div v-if="pick.strategyAssessment.horizons">
+                  <span>{{ strategyUi.shortTermScore }}</span>
+                  <b>{{ Number(pick.strategyAssessment.horizons.shortTermScore).toFixed(1) }}/100</b>
+                </div>
+                <div v-if="pick.strategyAssessment.horizons">
+                  <span>{{ strategyUi.midLongTermScore }}</span>
+                  <b>{{ Number(pick.strategyAssessment.horizons.midLongTermScore).toFixed(1) }}/100</b>
+                </div>
+                <div v-if="pick.strategyAssessment.horizons">
+                  <span>{{ strategyUi.stableQualityScore }}</span>
+                  <b>{{ Number(pick.strategyAssessment.horizons.qualityCompositeScore).toFixed(1) }}/100</b>
+                </div>
+                <div v-if="pick.strategyAssessment.horizons">
+                  <span>{{ strategyUi.horizonType }}</span>
+                  <b>{{ strategyHorizonLabel(pick.strategyAssessment.horizons.classification) }}</b>
+                </div>
+                <div>
+                  <span>{{ strategyUi.baseScore }}</span>
+                  <b>{{ Number(pick.strategyAssessment.baseScore).toFixed(1) }}/100</b>
+                </div>
+                <div>
+                  <span>{{ strategyUi.adjustedScore }}</span>
+                  <b>{{ Number(pick.strategyAssessment.adjustedScore).toFixed(1) }}/100</b>
+                </div>
+                <div>
+                  <span>{{ strategyUi.sortScore }}</span>
+                  <b>{{ Number(pick.strategyAssessment.sortScore).toFixed(1) }}/100</b>
+                </div>
+              </div>
+              <div class="strategy-rule-columns">
+                <div>
+                  <strong>{{ strategyUi.entryGates }}</strong>
+                  <ul>
+                    <li v-for="gate in pick.strategyAssessment.gates" :key="gate.key + gate.metric" :class="gate.passed ? 'passed' : 'failed'">
+                      {{ strategyCheckLabel(gate, 'gate') }}
+                    </li>
+                  </ul>
+                </div>
+                <div>
+                  <strong>{{ strategyUi.vetoRules }}</strong>
+                  <ul>
+                    <li v-for="veto in pick.strategyAssessment.vetoes" :key="veto.key + veto.metric" :class="veto.triggered ? 'triggered' : 'clear'">
+                      {{ strategyCheckLabel(veto, 'veto') }}
+                    </li>
+                  </ul>
+                </div>
+                <div>
+                  <strong>{{ strategyUi.focusItems }}</strong>
+                  <ul>
+                    <li v-for="item in pick.strategyAssessment.focus" :key="item.key + item.metric">
+                      {{ strategyFocusLabel(item) }}
+                    </li>
                   </ul>
                 </div>
               </div>

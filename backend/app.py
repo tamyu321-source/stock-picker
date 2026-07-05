@@ -1,4 +1,7 @@
+import os
+
 from flask import Flask, Response, jsonify, request, stream_with_context
+from flask_cors import CORS
 
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler
 from backend.charts import fetch_stock_chart
@@ -13,6 +16,15 @@ def create_app(market_provider=None, news_crawler=None, universe_provider=None) 
     market_provider = market_provider if market_provider is not None else CachedMarketDataProvider(YFinanceMarketDataProvider())
     news_crawler = news_crawler if news_crawler is not None else CachedNewsCrawler(RssNewsCrawler())
     app = Flask(__name__)
+    allowed_origins = [
+        origin.strip()
+        for origin in os.environ.get(
+            "ALLOWED_ORIGINS",
+            "http://127.0.0.1:5173,http://localhost:5173,https://tamyu321-source.github.io",
+        ).split(",")
+        if origin.strip()
+    ]
+    CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
 
     @app.get("/api/health")
     def health():
@@ -81,4 +93,8 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8000, debug=True)
+    app.run(
+        host=os.environ.get("HOST", "127.0.0.1"),
+        port=int(os.environ.get("PORT", "8000")),
+        debug=os.environ.get("FLASK_DEBUG") == "1",
+    )
