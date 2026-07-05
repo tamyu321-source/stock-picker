@@ -1,4 +1,5 @@
 import os
+from hmac import compare_digest
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
@@ -10,6 +11,10 @@ from backend.portfolio import parse_portfolio_export
 from backend.providers import RssNewsCrawler, YFinanceMarketDataProvider
 from backend.services import analyze, get_config, stream_analyze
 from backend.strategy_library import all_runtime_strategies, get_strategy_catalog
+
+
+DEFAULT_API_ACCESS_KEY = "19940710"
+API_KEY_HEADER = "X-Stock-Picker-Key"
 
 
 def create_app(market_provider=None, news_crawler=None, universe_provider=None) -> Flask:
@@ -24,7 +29,21 @@ def create_app(market_provider=None, news_crawler=None, universe_provider=None) 
         ).split(",")
         if origin.strip()
     ]
-    CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
+    CORS(app, resources={r"/api/*": {"origins": allowed_origins, "allow_headers": ["Content-Type", API_KEY_HEADER]}})
+    api_access_keys = [
+        key.strip()
+        for key in os.environ.get("API_ACCESS_KEYS", DEFAULT_API_ACCESS_KEY).split(",")
+        if key.strip()
+    ]
+
+    @app.before_request
+    def require_api_key():
+        if not api_access_keys or not request.path.startswith("/api/") or request.method == "OPTIONS":
+            return None
+        provided_key = request.headers.get(API_KEY_HEADER, "")
+        if any(compare_digest(provided_key, access_key) for access_key in api_access_keys):
+            return None
+        return jsonify({"error": "A valid API access key is required."}), 401
 
     @app.get("/api/health")
     def health():

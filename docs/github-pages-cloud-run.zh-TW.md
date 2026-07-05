@@ -21,7 +21,8 @@ gcloud run deploy stock-picker-api `
   --source . `
   --region asia-east1 `
   --allow-unauthenticated `
-  --set-env-vars ALLOWED_ORIGINS=https://tamyu321-source.github.io
+  --max-instances 2 `
+  --set-env-vars ALLOWED_ORIGINS=https://tamyu321-source.github.io,API_ACCESS_KEYS=19940710
 ```
 
 如果想優先貼近 Cloud Run 免費額度示例區域，可把 `--region asia-east1` 改成：
@@ -42,6 +43,13 @@ https://stock-picker-api-xxxxx-uc.a.run.app
 Invoke-RestMethod "https://stock-picker-api-xxxxx-uc.a.run.app/api/health"
 ```
 
+API 會要求共享密鑰。測試時也可以明確帶上 header：
+
+```powershell
+Invoke-RestMethod "https://stock-picker-api-xxxxx-uc.a.run.app/api/health" `
+  -Headers @{ "X-Stock-Picker-Key" = "19940710" }
+```
+
 ## 3. 讓 GitHub Pages 使用 Cloud Run API
 
 到 GitHub repository：
@@ -58,6 +66,13 @@ Value: https://stock-picker-api-xxxxx-uc.a.run.app
 ```
 
 不要在 URL 最後加 `/`。
+
+再新增一個 repository variable：
+
+```text
+Name: VITE_API_KEY
+Value: 19940710
+```
 
 ## 4. 重新部署 GitHub Pages
 
@@ -89,7 +104,7 @@ https://stock-picker-api-xxxxx-uc.a.run.app/api/analyze/stream
 ```powershell
 gcloud run services update stock-picker-api `
   --region asia-east1 `
-  --set-env-vars ALLOWED_ORIGINS=https://tamyu321-source.github.io
+  --set-env-vars ALLOWED_ORIGINS=https://tamyu321-source.github.io,API_ACCESS_KEYS=19940710
 ```
 
 如果你部署在 `us-central1`，上面的 `--region` 也要改成 `us-central1`。

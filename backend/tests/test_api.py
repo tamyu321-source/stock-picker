@@ -1,8 +1,11 @@
 import io
 import json
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+os.environ["API_ACCESS_KEYS"] = ""
 
 from backend.app import create_app
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
@@ -146,6 +149,16 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scanUniverseSize"]["TW"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["JP"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["KR"], "dynamic")
+
+    def test_api_key_is_required_when_configured(self):
+        with patch.dict(os.environ, {"API_ACCESS_KEYS": "19940710"}):
+            client = create_app(FakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+
+        missing_key_response = client.get("/api/health")
+        self.assertEqual(missing_key_response.status_code, 401)
+
+        valid_key_response = client.get("/api/health", headers={"X-Stock-Picker-Key": "19940710"})
+        self.assertEqual(valid_key_response.status_code, 200)
 
     def test_refined_strategy_affects_final_assessment_weights(self):
         response = self.client.post(

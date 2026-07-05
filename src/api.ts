@@ -647,13 +647,17 @@ export type AnalysisStreamEvent =
       scan: AnalysisScan;
     };
 
-const headers = { 'Content-Type': 'application/json' };
+const configuredApiKey = import.meta.env.VITE_API_KEY ?? '19940710';
 let usingStaticFallback = false;
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const staticDemoBuild = import.meta.env.PROD && import.meta.env.BASE_URL === '/stock-picker/' && !configuredApiBaseUrl;
 
 function apiUrl(path: string) {
   return configuredApiBaseUrl ? `${configuredApiBaseUrl}${path}` : path;
+}
+
+function apiHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
+  return configuredApiKey ? { ...extraHeaders, 'X-Stock-Picker-Key': configuredApiKey } : extraHeaders;
 }
 
 export function currentDataMode(): 'demo' | 'live' {
@@ -1361,7 +1365,7 @@ export async function fetchConfig(): Promise<AppConfig> {
     return fallbackConfig;
   }
   try {
-    const response = await fetch(apiUrl('/api/config'));
+    const response = await fetch(apiUrl('/api/config'), { headers: apiHeaders() });
     if (!response.ok) throw new Error('Failed to load config');
     if (!hasContentType(response, 'application/json')) throw new Error('Static preview fallback');
     return response.json();
@@ -1379,7 +1383,7 @@ export async function refreshStrategyLibrary(): Promise<StrategyLibrary> {
     return { ...fallbackStrategyLibrary, refreshedAt: new Date().toISOString(), runtimeStrategies: fallbackConfig.strategies };
   }
   try {
-    const response = await fetch(apiUrl('/api/strategies/refresh'));
+    const response = await fetch(apiUrl('/api/strategies/refresh'), { headers: apiHeaders() });
     if (!response.ok) throw new Error('Failed to refresh strategy library');
     if (!hasContentType(response, 'application/json')) throw new Error('Static preview fallback');
     return response.json();
@@ -1452,7 +1456,7 @@ export async function fetchStockChart(symbol: string): Promise<StockChartRespons
   if (staticDemoBuild || usingStaticFallback) {
     return fallbackStockChart(symbol);
   }
-  const response = await fetch(apiUrl(`/api/stocks/${encodeURIComponent(symbol)}/chart`));
+  const response = await fetch(apiUrl(`/api/stocks/${encodeURIComponent(symbol)}/chart`), { headers: apiHeaders() });
   if (!response.ok) {
     const payload = hasContentType(response, 'application/json') ? await response.json().catch(() => ({})) : {};
     throw new Error(payload.error || 'Failed to load stock chart');
@@ -1476,7 +1480,7 @@ export async function analyzeStocks(payload: {
   try {
     const response = await fetch(apiUrl('/api/analyze'), {
       method: 'POST',
-      headers,
+      headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload)
     });
     if (!response.ok) throw new Error('Failed to analyze stocks');
@@ -1527,7 +1531,7 @@ export async function analyzeStocksStream(
   try {
     response = await fetch(apiUrl('/api/analyze/stream'), {
       method: 'POST',
-      headers,
+      headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
       signal: options.signal
     });
@@ -1593,6 +1597,7 @@ export async function importPortfolioFile(file: File): Promise<PortfolioImportRe
   formData.append('file', file);
   const response = await fetch(apiUrl('/api/portfolio/import'), {
     method: 'POST',
+    headers: apiHeaders(),
     body: formData
   });
   if (!response.ok) {
