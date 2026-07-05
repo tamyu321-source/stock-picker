@@ -167,6 +167,7 @@ Pull requests are expected to pass both checks in GitHub Actions.
 ## Deployment Notes
 
 For GitHub Pages plus Google Cloud Run, see [docs/github-pages-cloud-run.zh-TW.md](./docs/github-pages-cloud-run.zh-TW.md).
+For GitHub Actions auto-deploy to Cloud Run, see [docs/github-pages-cloud-run-auto-deploy.zh-TW.md](./docs/github-pages-cloud-run-auto-deploy.zh-TW.md).
 
 Linux example:
 
