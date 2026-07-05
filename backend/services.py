@@ -8,6 +8,7 @@ from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
 from backend.decision_engine import build_decision_engine
+from backend.market_profiles import market_profile, market_profiles
 from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceMarketDataProvider, infer_market, instrument_type, local_company_name, volatility_score
 from backend.strategy_library import DETAILED_WEIGHT_KEYS, all_runtime_strategies, get_strategy_catalog
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider
@@ -55,6 +56,7 @@ def get_config() -> dict:
         "strategyLibrary": strategy_catalog,
         "defaultSymbols": DEFAULT_SYMBOLS,
         "scanUniverseSize": {market["id"]: "dynamic" for market in MARKETS},
+        "marketProfiles": market_profiles(),
     }
 
 
@@ -4054,6 +4056,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         downside_risk_score=downside_risk_score,
         breakout_setup_score=breakout_setup_score,
         pullback_risk_score=pullback_risk_score,
+        market_profile=market_profile(snapshot.market),
     )
     composite_model = _composite_from_decision_engine(decision_engine)
     verdict = decision_engine["verdict"]
@@ -4113,6 +4116,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
 
 
 def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
+    requested_markets = [str(market).upper() for market in context.get("requested_markets", [])]
     return {
         "auto": context["auto_scan"],
         "source": context["universe_source"],
@@ -4123,6 +4127,7 @@ def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
         "qualityBuys": context.get("quality_buys", _quality_buy_count(picks)),
         "failed": len(errors),
         "discoveryErrors": context["discovery_errors"],
+        "marketProfiles": {market: market_profile(market) for market in requested_markets},
     }
 
 

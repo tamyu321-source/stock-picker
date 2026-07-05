@@ -75,6 +75,28 @@ export interface MarketOption {
   currency: string;
 }
 
+export interface MarketDataSource {
+  id: string;
+  label: string;
+  kind: string;
+  role: string;
+  official?: boolean;
+  licensed?: boolean;
+}
+
+export interface MarketProfile {
+  market: Market | string;
+  coverageTier: 'local-deep' | 'regional' | 'global' | 'basic' | string;
+  sourceReliabilityScore: number;
+  localPriority: boolean;
+  preferred?: boolean;
+  focusRank?: number;
+  primarySources: MarketDataSource[];
+  capabilities: Record<string, boolean>;
+  limitations: string[];
+  professionalAnchors?: string[];
+}
+
 export interface Signal {
   source: string;
   title: string;
@@ -540,8 +562,25 @@ export interface DecisionEngineDataQuality {
   financialCoverageScore: number;
   newsCoverageScore: number;
   factorCoverageScore: number;
+  marketSupportScore?: number;
+  marketCoverageTier?: string;
   issues: string[];
   strengths: string[];
+}
+
+export interface DecisionEngineMarketSupport {
+  market?: Market | string;
+  coverageTier: string;
+  score: number;
+  sourceReliabilityScore: number;
+  capabilityScore: number;
+  localPriority: boolean;
+  preferred?: boolean;
+  focusRank?: number;
+  capabilities: Record<string, boolean>;
+  sources: string[];
+  limitations: string[];
+  professionalAnchors?: string[];
 }
 
 export interface DecisionEngineRegime {
@@ -557,6 +596,7 @@ export interface DecisionEngine {
   price: number;
   regime: DecisionEngineRegime;
   dataQuality: DecisionEngineDataQuality;
+  marketSupport?: DecisionEngineMarketSupport;
   gates: DecisionEngineGate[];
   caseEvidence: Record<string, number>;
   buyScore: number;
@@ -673,6 +713,7 @@ export interface AnalysisResponse {
     qualityBuys?: number;
     failed: number;
     discoveryErrors: Array<{ market: string; source?: string; query?: string; error: string }>;
+    marketProfiles?: Record<Market | string, MarketProfile>;
   };
 }
 
@@ -682,6 +723,7 @@ export interface AppConfig {
   strategyLibrary?: StrategyLibrary;
   defaultSymbols: Record<Market, string[]>;
   scanUniverseSize: Record<Market, number | string>;
+  marketProfiles?: Record<Market, MarketProfile>;
 }
 
 export type AnalysisScan = NonNullable<AnalysisResponse['scan']>;
@@ -944,6 +986,113 @@ const fallbackStrategyLibrary: StrategyLibrary = {
   ]
 };
 
+const fallbackMarketProfiles: Record<Market, MarketProfile> = {
+  CN: {
+    market: 'CN',
+    coverageTier: 'local-deep',
+    sourceReliabilityScore: 88,
+    localPriority: true,
+    preferred: true,
+    focusRank: 2,
+    primarySources: [
+      { id: 'eastmoney', label: 'Eastmoney', kind: 'market-data', role: 'A-share quote, turnover, flow and news context' },
+      { id: 'sina-finance', label: 'Sina Finance', kind: 'market-data', role: 'A-share quote fallback' },
+      { id: 'sse-market-data', label: 'SSE market data products', kind: 'exchange-licensed', role: 'official Shanghai exchange data path', official: true, licensed: true },
+      { id: 'szse-market-data', label: 'SZSE / SZSI market data', kind: 'exchange-licensed', role: 'official Shenzhen market data path', official: true, licensed: true }
+    ],
+    capabilities: { priceHistory: true, officialExchange: true, localNews: true, fundamentals: true, valuation: true, institutionFlow: true, fundFlow: true, marginShort: true, haltWatch: true, etfCoverage: true },
+    limitations: ['Official real-time SSE/SZSE redistribution is licensed; public providers use conservative confidence.'],
+    professionalAnchors: ['source-transparency', 'factor-attribution', 'liquidity-risk']
+  },
+  HK: {
+    market: 'HK',
+    coverageTier: 'regional',
+    sourceReliabilityScore: 78,
+    localPriority: true,
+    focusRank: 3,
+    primarySources: [
+      { id: 'yahoo-finance', label: 'Yahoo Finance', kind: 'market-data', role: 'price, fundamentals and history' },
+      { id: 'google-news', label: 'Google News', kind: 'news', role: 'English and Chinese catalyst discovery' }
+    ],
+    capabilities: { priceHistory: true, officialExchange: false, localNews: true, fundamentals: true, valuation: true, institutionFlow: false, fundFlow: false, marginShort: false, haltWatch: false, etfCoverage: true },
+    limitations: ['HKEX official and connect-flow adapters are not wired yet.'],
+    professionalAnchors: ['source-transparency', 'portfolio-risk']
+  },
+  JP: {
+    market: 'JP',
+    coverageTier: 'basic',
+    sourceReliabilityScore: 70,
+    localPriority: false,
+    focusRank: 5,
+    primarySources: [
+      { id: 'yahoo-finance', label: 'Yahoo Finance', kind: 'market-data', role: 'price, fundamentals and history' },
+      { id: 'google-news', label: 'Google News', kind: 'news', role: 'Japanese and English news fallback' }
+    ],
+    capabilities: { priceHistory: true, officialExchange: false, localNews: true, fundamentals: true, valuation: true, institutionFlow: false, fundFlow: false, marginShort: false, haltWatch: false, etfCoverage: true },
+    limitations: ['TSE official, margin and shareholder-flow adapters are not yet integrated.'],
+    professionalAnchors: ['source-transparency', 'gics-industry']
+  },
+  KR: {
+    market: 'KR',
+    coverageTier: 'basic',
+    sourceReliabilityScore: 68,
+    localPriority: false,
+    focusRank: 6,
+    primarySources: [
+      { id: 'yahoo-finance', label: 'Yahoo Finance', kind: 'market-data', role: 'price, fundamentals and history' },
+      { id: 'google-news', label: 'Google News', kind: 'news', role: 'Korean and English news fallback' }
+    ],
+    capabilities: { priceHistory: true, officialExchange: false, localNews: true, fundamentals: true, valuation: true, institutionFlow: false, fundFlow: false, marginShort: false, haltWatch: false, etfCoverage: true },
+    limitations: ['KRX official and investor-flow adapters are not yet integrated.'],
+    professionalAnchors: ['source-transparency', 'gics-industry']
+  },
+  SG: {
+    market: 'SG',
+    coverageTier: 'basic',
+    sourceReliabilityScore: 66,
+    localPriority: false,
+    focusRank: 7,
+    primarySources: [
+      { id: 'yahoo-finance', label: 'Yahoo Finance', kind: 'market-data', role: 'price, fundamentals and history' },
+      { id: 'google-news', label: 'Google News', kind: 'news', role: 'English news fallback' }
+    ],
+    capabilities: { priceHistory: true, officialExchange: false, localNews: true, fundamentals: true, valuation: true, institutionFlow: false, fundFlow: false, marginShort: false, haltWatch: false, etfCoverage: true },
+    limitations: ['SGX official and REIT-specific adapters are not yet integrated.'],
+    professionalAnchors: ['source-transparency', 'portfolio-risk']
+  },
+  US: {
+    market: 'US',
+    coverageTier: 'global',
+    sourceReliabilityScore: 76,
+    localPriority: false,
+    focusRank: 4,
+    primarySources: [
+      { id: 'yahoo-finance', label: 'Yahoo Finance', kind: 'market-data', role: 'price, fundamentals and ETF profile' },
+      { id: 'google-news', label: 'Google News', kind: 'news', role: 'company catalyst discovery' }
+    ],
+    capabilities: { priceHistory: true, officialExchange: false, localNews: true, fundamentals: true, valuation: true, institutionFlow: false, fundFlow: false, marginShort: false, haltWatch: false, etfCoverage: true },
+    limitations: ['Current open stack is broad but not a paid institutional consolidated feed.'],
+    professionalAnchors: ['economic-moat', 'factor-attribution', 'portfolio-risk', 'gics-industry']
+  },
+  TW: {
+    market: 'TW',
+    coverageTier: 'local-deep',
+    sourceReliabilityScore: 91,
+    localPriority: true,
+    preferred: true,
+    focusRank: 1,
+    primarySources: [
+      { id: 'twse-openapi', label: 'TWSE OpenAPI', kind: 'exchange-openapi', role: 'listed prices, valuations, halt and margin data', official: true },
+      { id: 'taipei-exchange', label: 'Taipei Exchange', kind: 'exchange-site', role: 'OTC market, ETF, institutional and margin context', official: true },
+      { id: 'yahoo-finance', label: 'Yahoo Finance', kind: 'market-data', role: 'fallback fundamentals and history' },
+      { id: 'local-news', label: 'MoneyDJ / Cnyes', kind: 'local-news', role: 'local market news and company catalysts' }
+    ],
+    capabilities: { priceHistory: true, officialExchange: true, localNews: true, fundamentals: true, valuation: true, institutionFlow: true, fundFlow: true, marginShort: true, haltWatch: true, etfCoverage: true },
+    limitations: ['TWSE-listed equities have the deepest open coverage; TPEX and full intraday depth still need dedicated adapters.'],
+    professionalAnchors: ['source-transparency', 'factor-attribution', 'portfolio-risk', 'local-market-microstructure']
+  }
+};
+
 const fallbackConfig: AppConfig = {
   markets: [
     { id: 'CN', label: 'China A-shares', currency: 'CNY' },
@@ -973,7 +1122,8 @@ const fallbackConfig: AppConfig = {
     SG: 'dynamic',
     US: 'dynamic',
     TW: 'dynamic'
-  }
+  },
+  marketProfiles: fallbackMarketProfiles
 };
 
 function fallbackStrategy(payload: { strategyId?: string; customWeights?: StrategyWeights }) {

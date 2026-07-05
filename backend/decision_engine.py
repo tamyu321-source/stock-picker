@@ -84,6 +84,36 @@ def _fundamental_coverage(info: dict[str, Any], instrument_type: str) -> float:
     return _clamp(present / len(keys) * 100)
 
 
+def _market_support_profile(market_profile: dict[str, Any] | None) -> dict[str, Any]:
+    profile = market_profile or {}
+    capabilities = profile.get("capabilities") or {}
+    capability_values = list(capabilities.values())
+    capability_score = _clamp(sum(1 for value in capability_values if value) / max(1, len(capability_values)) * 100)
+    reliability = _number(profile.get("sourceReliabilityScore"), 58.0) or 58.0
+    official_bonus = 5.0 if capabilities.get("officialExchange") else 0.0
+    local_bonus = 4.0 if profile.get("localPriority") else 0.0
+    score = _clamp(reliability * 0.64 + capability_score * 0.28 + official_bonus + local_bonus)
+    sources = []
+    for source in profile.get("primarySources") or []:
+        label = source.get("label")
+        if label:
+            sources.append(label)
+    return {
+        "market": profile.get("market"),
+        "coverageTier": profile.get("coverageTier", "basic"),
+        "score": round(score, 1),
+        "sourceReliabilityScore": round(reliability, 1),
+        "capabilityScore": round(capability_score, 1),
+        "localPriority": bool(profile.get("localPriority")),
+        "preferred": bool(profile.get("preferred")),
+        "focusRank": profile.get("focusRank"),
+        "capabilities": capabilities,
+        "sources": sources[:4],
+        "limitations": list(profile.get("limitations") or [])[:3],
+        "professionalAnchors": list(profile.get("professionalAnchors") or [])[:4],
+    }
+
+
 def data_quality_profile(
     *,
     instrument_type: str,
@@ -93,6 +123,7 @@ def data_quality_profile(
     news_heat: dict[str, Any],
     financial_analysis: dict[str, Any],
     availability: dict[str, bool] | None = None,
+    market_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     availability = availability or {}
     price_points = len([value for value in closes if _number(value) is not None])
@@ -126,13 +157,15 @@ def data_quality_profile(
 
     available_factor_count = sum(1 for value in availability.values() if value)
     factor_score = _clamp(available_factor_count / 5 * 100) if availability else 70.0
+    market_support = _market_support_profile(market_profile)
 
     score = _clamp(
-        price_score * 0.30
-        + fundamental_score * 0.20
-        + financial_score * 0.18
-        + news_score * 0.17
-        + factor_score * 0.15
+        price_score * 0.28
+        + fundamental_score * 0.18
+        + financial_score * 0.17
+        + news_score * 0.16
+        + factor_score * 0.13
+        + market_support["score"] * 0.08
     )
     issues: list[str] = []
     strengths: list[str] = []
@@ -152,6 +185,10 @@ def data_quality_profile(
         issues.append("financialReviewThin")
     else:
         strengths.append("financialReviewUsable")
+    if market_support["score"] >= 78:
+        strengths.append("marketSourceStackStrong")
+    elif market_support["score"] < 62:
+        issues.append("marketSourceStackBasic")
 
     return {
         "score": round(score, 1),
@@ -161,6 +198,8 @@ def data_quality_profile(
         "financialCoverageScore": round(financial_score, 1),
         "newsCoverageScore": round(news_score, 1),
         "factorCoverageScore": round(factor_score, 1),
+        "marketSupportScore": market_support["score"],
+        "marketCoverageTier": market_support["coverageTier"],
         "issues": issues,
         "strengths": strengths,
     }
@@ -476,6 +515,7 @@ def build_decision_engine(
     downside_risk_score: float,
     breakout_setup_score: float,
     pullback_risk_score: float,
+    market_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data_quality = data_quality_profile(
         instrument_type=instrument_type,
@@ -485,7 +525,9 @@ def build_decision_engine(
         news_heat=news_heat,
         financial_analysis=financial_analysis,
         availability=availability,
+        market_profile=market_profile,
     )
+    market_support = _market_support_profile(market_profile)
     regime = classify_regime(
         instrument_type=instrument_type,
         metrics=metrics,
@@ -572,6 +614,7 @@ def build_decision_engine(
         primary_reasons = [
             f"regime:{regime['name']}",
             f"dataQuality:{data_quality['level']}",
+            f"marketSupport:{market_support['coverageTier']}",
             "legacyWeights:secondary",
         ]
 
@@ -582,6 +625,7 @@ def build_decision_engine(
         "price": price,
         "regime": regime,
         "dataQuality": data_quality,
+        "marketSupport": market_support,
         "gates": gates,
         "caseEvidence": {key: round(value, 1) for key, value in case["evidence"].items()},
         "buyScore": round(buy_score, 1),

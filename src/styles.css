@@ -522,13 +522,21 @@ h2 {
 }
 
 .market-grid strong,
-.market-grid span {
+.market-grid span,
+.market-grid small {
   display: block;
 }
 
 .market-grid span {
   color: #667268;
   font-size: 0.82rem;
+}
+
+.market-grid small {
+  margin-top: 4px;
+  color: #2f6f56;
+  font-size: 0.74rem;
+  font-weight: 800;
 }
 
 .switch {
@@ -1491,20 +1499,24 @@ h3 {
 
 .metric-row .engine-chip.accumulate,
 .metric-row .engine-chip.strong,
-.metric-row .engine-chip.usable {
+.metric-row .engine-chip.usable,
+.metric-row .market-source-chip.local-deep,
+.metric-row .market-source-chip.regional {
   background: #e8f4ed;
   color: #245f46;
 }
 
 .metric-row .engine-chip.hold,
 .metric-row .engine-chip.reduce,
-.metric-row .engine-chip.thin {
+.metric-row .engine-chip.thin,
+.metric-row .market-source-chip.global {
   background: #fff4d6;
   color: #7a4d0b;
 }
 
 .metric-row .engine-chip.exit,
-.metric-row .engine-chip.weak {
+.metric-row .engine-chip.weak,
+.metric-row .market-source-chip.basic {
   background: #fff0ed;
   color: #8a2d20;
 }
@@ -1732,7 +1744,7 @@ h3 {
 
 .engine-summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 10px;
 }
 

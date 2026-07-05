@@ -12,6 +12,7 @@ from urllib.parse import quote_plus, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS
+from backend.market_profiles import market_preferred_source_shares
 from backend.providers import (
     COMPANY_SEARCH_ALIASES,
     ETF_SYMBOLS_BY_MARKET,
@@ -414,7 +415,7 @@ class MarketUniverseProvider:
                 if etf_candidates:
                     source_results.append(("etf-universe", etf_candidates))
 
-            market_symbols = _blend_discovery_sources(source_results, limit_per_market)
+            market_symbols = _blend_discovery_sources(source_results, limit_per_market, market=market)
             symbols.extend(market_symbols[:limit_per_market])
 
         seen = set()
@@ -1172,16 +1173,10 @@ def _unique_symbol_count(source_results: list[tuple[str, list[DiscoveredSymbol]]
     return len({item.symbol for _, candidates in source_results for item in candidates})
 
 
-def _blend_discovery_sources(source_results: list[tuple[str, list[DiscoveredSymbol]]], limit: int) -> list[DiscoveredSymbol]:
+def _blend_discovery_sources(source_results: list[tuple[str, list[DiscoveredSymbol]]], limit: int, market: str | None = None) -> list[DiscoveredSymbol]:
     if limit <= 0:
         return []
-    source_shares = {
-        "local-news": 0.28,
-        "google-news": 0.20,
-        "market-universe": 0.34,
-        "etf-universe": 0.12,
-        "fallback-search": 0.10,
-    }
+    source_shares = market_preferred_source_shares(market)
     output: list[DiscoveredSymbol] = []
     seen = set()
     leftovers: list[DiscoveredSymbol] = []

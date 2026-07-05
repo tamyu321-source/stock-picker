@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, currentDataMode, fetchConfig, fetchStockChart, importPortfolioFile, refreshStrategyLibrary, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights } from './api';
+import { analyzeStocksStream, currentDataMode, fetchConfig, fetchStockChart, importPortfolioFile, refreshStrategyLibrary, type AnalysisScan, type AnalysisStreamEvent, type AppConfig, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type MarketProfile, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -43,7 +43,7 @@ type SavedScan = {
   picks: Pick[];
   sectors: SectorAnalysis[];
   errors: DataIssue[];
-  scanInfo: { auto: boolean; requested: number; succeeded: number; failed: number } | null;
+  scanInfo: AnalysisScan | null;
   portfolio: PortfolioAnalysis | PortfolioImportResponse | null;
 };
 
@@ -66,7 +66,7 @@ const resultVerdictFilter = ref<ResultVerdictFilter>('all');
 const resultSortKey = ref<ResultSortKey>('recommended');
 const resultSortDirection = ref<SortDirection>('desc');
 const dataIssues = ref<DataIssue[]>([]);
-const scanInfo = ref<{ auto: boolean; requested: number; succeeded: number; failed: number } | null>(null);
+const scanInfo = ref<AnalysisScan | null>(null);
 const loadingStartedAt = ref(0);
 const loadingElapsedSeconds = ref(0);
 const loadingStepIndex = ref(0);
@@ -722,6 +722,15 @@ const chartCandles = computed(() => {
   });
 });
 const marketOptions = computed(() => config.value?.markets ?? []);
+const marketProfiles = computed<Partial<Record<Market, MarketProfile>>>(() => config.value?.marketProfiles ?? {});
+const preferredMarketsLabel = computed(() => {
+  const preferred = selectedMarkets.value
+    .filter((market) => marketProfiles.value[market]?.preferred || marketProfiles.value[market]?.localPriority)
+    .sort((left, right) => (marketProfiles.value[left]?.focusRank ?? 99) - (marketProfiles.value[right]?.focusRank ?? 99))
+    .map((market) => `${market} ${marketCoverageTierLabel(marketProfiles.value[market]?.coverageTier)}`);
+  if (!preferred.length) return marketCoverageTierLabel('global');
+  return preferred.slice(0, 2).join(' · ');
+});
 const filteredPicks = computed(() => picks.value.filter((pick) => {
   const marketMatches = resultMarketFilter.value === 'all' || pick.market === resultMarketFilter.value;
   const verdictMatches = resultVerdictFilter.value === 'all'
@@ -1131,6 +1140,45 @@ function closeStockDetail() {
 
 function marketLabel(market: Market) {
   return marketLabels[locale.value][market] ?? market;
+}
+
+function profileForMarket(market: Market) {
+  return marketProfiles.value[market] ?? scanInfo.value?.marketProfiles?.[market];
+}
+
+function marketCoverageTierLabel(tier: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    'local-deep': { en: 'Local deep', 'zh-CN': '本地深度', 'zh-TW': '本地深度', ja: 'ローカル深度', ko: '로컬 심층' },
+    regional: { en: 'Regional', 'zh-CN': '区域增强', 'zh-TW': '區域增強', ja: '地域強化', ko: '지역 강화' },
+    global: { en: 'Global', 'zh-CN': '全球基础', 'zh-TW': '全球基礎', ja: 'グローバル', ko: '글로벌' },
+    basic: { en: 'Basic', 'zh-CN': '基础可用', 'zh-TW': '基礎可用', ja: '基本', ko: '기본' }
+  };
+  return localeText(labels[tier || 'basic'] ?? labels.basic);
+}
+
+function marketCoverageLabel(market: Market) {
+  const profile = profileForMarket(market);
+  if (!profile) return marketCoverageTierLabel('basic');
+  const score = Number(profile.sourceReliabilityScore ?? 0);
+  const suffix = Number.isFinite(score) && score > 0 ? ` ${score.toFixed(0)}` : '';
+  return `${marketCoverageTierLabel(profile.coverageTier)}${suffix}`;
+}
+
+function marketSupportTitle() {
+  return localeText({
+    en: 'Market data layer',
+    'zh-CN': '市场资料层',
+    'zh-TW': '市場資料層',
+    ja: '市場データ層',
+    ko: '시장 데이터층'
+  });
+}
+
+function marketSourceStackLabel(pick: Pick) {
+  const support = pick.decisionEngine?.marketSupport;
+  const sources = support?.sources?.filter(Boolean).slice(0, 2);
+  if (sources?.length) return sources.join(' / ');
+  return marketCoverageTierLabel(support?.coverageTier ?? profileForMarket(pick.market)?.coverageTier);
 }
 
 function verdictLabel(verdict: Pick['verdict']) {
@@ -2219,6 +2267,7 @@ function decisionGateLabel(key: string | undefined) {
 function decisionReasonLabel(reason: string) {
   if (reason.startsWith('regime:')) return decisionRegimeLabel(reason.replace('regime:', ''));
   if (reason.startsWith('dataQuality:')) return dataQualityLabel(reason.replace('dataQuality:', ''));
+  if (reason.startsWith('marketSupport:')) return `${marketSupportTitle()} · ${marketCoverageTierLabel(reason.replace('marketSupport:', ''))}`;
   if (reason === 'legacyWeights:secondary') {
     return localeText({
       en: 'Legacy weights are secondary',
@@ -4856,6 +4905,7 @@ onUnmounted(() => {
       <div>
         <span>{{ t.marketCoverage }}</span>
         <strong>{{ t.allMarkets }}</strong>
+        <small>{{ preferredMarketsLabel }}</small>
       </div>
       <div>
         <span>{{ isAutoScan ? t.autoScan : t.refresh }}</span>
@@ -4907,6 +4957,7 @@ onUnmounted(() => {
               >
                 <strong>{{ market.id }}</strong>
                 <span>{{ marketLabel(market.id) }}</span>
+                <small>{{ marketCoverageLabel(market.id) }}</small>
               </button>
             </div>
           </div>
@@ -5176,6 +5227,7 @@ onUnmounted(() => {
               <span>{{ t.confidence }} {{ pick.confidence }}%</span>
               <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.action">{{ decisionRegimeLabel(pick.decisionEngine.regime.name) }}</span>
               <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.dataQuality.level">{{ dataQualityLabel(pick.decisionEngine.dataQuality.level) }} {{ formatEngineScore(pick.decisionEngine.dataQuality.score) }}</span>
+              <span v-if="pick.decisionEngine?.marketSupport" class="market-source-chip" :class="pick.decisionEngine.marketSupport.coverageTier">{{ marketCoverageTierLabel(pick.decisionEngine.marketSupport.coverageTier) }} {{ formatEngineScore(pick.decisionEngine.marketSupport.score) }}</span>
               <span>{{ predictionScoreLabel('opportunity', pick) }}</span>
               <span>{{ predictionScoreLabel('setup', pick) }}</span>
               <span>{{ predictionScoreLabel('downside', pick) }}</span>
@@ -5204,6 +5256,11 @@ onUnmounted(() => {
                   <span>{{ dataQualityLabel(pick.decisionEngine.dataQuality.level) }}</span>
                   <b>{{ formatEngineScore(pick.decisionEngine.dataQuality.score) }}</b>
                   <small>{{ engineCoverageLabel(pick) }}</small>
+                </div>
+                <div>
+                  <span>{{ marketSupportTitle() }}</span>
+                  <b>{{ formatEngineScore(pick.decisionEngine.marketSupport?.score ?? pick.decisionEngine.dataQuality.marketSupportScore) }}</b>
+                  <small>{{ marketSourceStackLabel(pick) }}</small>
                 </div>
                 <div>
                   <span>{{ t.confidence }}</span>

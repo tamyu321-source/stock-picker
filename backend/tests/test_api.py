@@ -11,6 +11,7 @@ from backend.app import create_app
 from backend.cache import CachedMarketDataProvider, CachedNewsCrawler, TtlCache
 from backend.portfolio import normalize_a_share_symbol, parse_portfolio_export
 from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _eastmoney_cn_fund_flow, _parse_eastmoney_datetime, _sina_cn_fund_flow, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
+from backend.market_profiles import market_preferred_source_shares
 from backend.services import _breakout_setup_score, _financial_analysis, _friendly_data_error, _fund_flow_profile, _metric_availability, _metrics, _news_analysis, _news_heat_analysis, _pullback_risk_score, _score_breakdown, _sentiment_score, _verdict
 from backend.strategy_library import get_strategy_catalog
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider, is_common_equity_symbol, _manual_symbol_candidates, _symbols_from_code_mentions
@@ -149,6 +150,22 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["scanUniverseSize"]["TW"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["JP"], "dynamic")
         self.assertEqual(payload["scanUniverseSize"]["KR"], "dynamic")
+        self.assertIn("marketProfiles", payload)
+        self.assertEqual(payload["marketProfiles"]["TW"]["coverageTier"], "local-deep")
+        self.assertEqual(payload["marketProfiles"]["CN"]["coverageTier"], "local-deep")
+        self.assertTrue(payload["marketProfiles"]["TW"]["capabilities"]["officialExchange"])
+        self.assertTrue(payload["marketProfiles"]["CN"]["capabilities"]["fundFlow"])
+        self.assertGreater(payload["marketProfiles"]["TW"]["sourceReliabilityScore"], payload["marketProfiles"]["JP"]["sourceReliabilityScore"])
+
+    def test_market_profiles_prioritize_taiwan_and_china_discovery_sources(self):
+        base_shares = market_preferred_source_shares("US")
+        taiwan_shares = market_preferred_source_shares("TW")
+        china_shares = market_preferred_source_shares("CN")
+
+        self.assertGreater(taiwan_shares["market-universe"], base_shares["market-universe"])
+        self.assertGreater(china_shares["local-news"], base_shares["local-news"])
+        self.assertLess(taiwan_shares["fallback-search"], base_shares["fallback-search"])
+        self.assertLess(china_shares["google-news"], base_shares["google-news"])
 
     def test_api_key_is_required_when_configured(self):
         with patch.dict(os.environ, {"API_ACCESS_KEYS": "19940710"}):
@@ -1759,6 +1776,10 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn(pick["decisionEngine"]["action"], {"accumulate", "hold", "reduce", "exit"})
         self.assertIn(pick["decisionEngine"]["regime"]["name"], {"quality_compounder", "momentum_breakout", "deep_value_turnaround", "event_driven", "falling_knife", "overheated", "balanced_watch", "insufficient_data", "defensive_etf_core", "sector_etf_tactical"})
         self.assertIn("dataQuality", pick["decisionEngine"])
+        self.assertIn("marketSupport", pick["decisionEngine"])
+        self.assertIn("marketSupportScore", pick["decisionEngine"]["dataQuality"])
+        self.assertEqual(pick["decisionEngine"]["marketSupport"]["coverageTier"], "global")
+        self.assertGreater(pick["decisionEngine"]["marketSupport"]["score"], 0)
         self.assertEqual(pick["compositeModel"]["weights"]["legacyWeights"], 0)
         self.assertIn("opportunityScore", pick)
         self.assertIn("downsideRiskScore", pick)
