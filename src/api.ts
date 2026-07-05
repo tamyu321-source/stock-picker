@@ -546,6 +546,99 @@ export interface CompositeModel {
   newsFreshnessScore?: number;
 }
 
+export interface ProfessionalFactorExposure {
+  key: string;
+  label: string;
+  score: number;
+  tone: string;
+}
+
+export interface ProfessionalFactorModel {
+  version: string;
+  style: string;
+  exposures: ProfessionalFactorExposure[];
+  dominantExposures: string[];
+  coverageScore: number;
+  financialScore: number;
+}
+
+export interface BenchmarkRelativeScore {
+  benchmark: {
+    market: Market | string;
+    symbol: string;
+    name: string;
+    baselineReturnPct: number;
+  };
+  relativeScore: number;
+  rank: 'outperforming' | 'in-line' | 'lagging' | string;
+  returns: Record<string, number>;
+  peerPercentileEstimate: number;
+}
+
+export interface RecommendationCheckpoint {
+  horizon: string;
+  targetReturnPct: number;
+  maxDrawdownPct: number;
+}
+
+export interface RecommendationTracker {
+  trackingId: string;
+  status: string;
+  openedAt: string;
+  entryPrice: number;
+  action: string;
+  expectedEdgePct: number;
+  checkpoints: RecommendationCheckpoint[];
+  reviewTriggers: string[];
+}
+
+export interface AttributionDriver {
+  key: string;
+  label: string;
+  contribution: number;
+}
+
+export interface AttributionEngine {
+  version: string;
+  netContribution: number;
+  drivers: AttributionDriver[];
+  supportDrivers: AttributionDriver[];
+  dragDrivers: AttributionDriver[];
+  factorDrivers: string[];
+}
+
+export interface PortfolioOptimizer {
+  version: string;
+  targetWeightPct: number;
+  currentWeightPct?: number | null;
+  suggestedChangePct?: number | null;
+  maxWeightPct: number;
+  marginalRiskScore: number;
+  concentrationAction: string;
+  overlapTags: string[];
+}
+
+export interface AlertRule {
+  key: string;
+  severity: string;
+  condition: string;
+}
+
+export interface AlertMonitor {
+  priority: string;
+  rules: AlertRule[];
+  nextReview: string;
+}
+
+export interface ProfessionalAnalytics {
+  factorModel: ProfessionalFactorModel;
+  benchmarkRelative: BenchmarkRelativeScore;
+  recommendationTracker: RecommendationTracker;
+  attribution: AttributionEngine;
+  portfolioOptimizer?: PortfolioOptimizer | null;
+  alertMonitor: AlertMonitor;
+}
+
 export interface DecisionEngineGate {
   kind: 'blockBuy' | 'forceReduce' | 'exitCandidate' | string;
   key: string;
@@ -633,6 +726,7 @@ export interface Pick {
   fundFlow?: FundFlowProfile | null;
   compositeModel?: CompositeModel;
   decisionEngine?: DecisionEngine;
+  professionalAnalytics?: ProfessionalAnalytics;
   prediction?: {
     opportunityScore: number;
     downsideRiskScore: number;

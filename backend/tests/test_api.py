@@ -455,6 +455,10 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(pick["holding"]["quantity"], 100)
         self.assertIn(pick["holdingAnalysis"]["action"], {"add", "hold", "reduce", "exit"})
         self.assertTrue(pick["holdingAnalysis"]["notes"])
+        optimizer = pick["professionalAnalytics"]["portfolioOptimizer"]
+        self.assertEqual(optimizer["version"], "portfolio-optimizer-v1")
+        self.assertIsNotNone(optimizer["currentWeightPct"])
+        self.assertIn(optimizer["concentrationAction"], {"add", "hold", "trim"})
 
     def test_manual_holdings_use_live_price_for_pnl_and_position_weight(self):
         class ChinaMarketProvider:
@@ -1871,6 +1875,14 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("marketSupportScore", pick["decisionEngine"]["dataQuality"])
         self.assertEqual(pick["decisionEngine"]["marketSupport"]["coverageTier"], "global")
         self.assertGreater(pick["decisionEngine"]["marketSupport"]["score"], 0)
+        professional = pick["professionalAnalytics"]
+        self.assertEqual(professional["factorModel"]["version"], "professional-factor-v1")
+        self.assertGreaterEqual(len(professional["factorModel"]["exposures"]), 6)
+        self.assertIn(professional["benchmarkRelative"]["rank"], {"outperforming", "in-line", "lagging"})
+        self.assertEqual(len(professional["recommendationTracker"]["checkpoints"]), 3)
+        self.assertEqual(professional["attribution"]["version"], "attribution-v1")
+        self.assertEqual(professional["portfolioOptimizer"]["version"], "portfolio-optimizer-v1")
+        self.assertTrue(professional["alertMonitor"]["rules"])
         self.assertEqual(pick["compositeModel"]["weights"]["legacyWeights"], 0)
         self.assertIn("opportunityScore", pick)
         self.assertIn("downsideRiskScore", pick)

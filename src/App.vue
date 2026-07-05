@@ -2755,6 +2755,61 @@ function decisionEngineTitle() {
   });
 }
 
+function professionalAnalyticsTitle() {
+  return localeText({
+    en: 'Professional analytics',
+    'zh-CN': '专业投研分析',
+    'zh-TW': '專業投研分析',
+    ja: 'プロ分析',
+    ko: '전문 분석'
+  });
+}
+
+function professionalModuleLabel(key: string) {
+  const labels: Record<string, LocalizedText> = {
+    factor: { en: 'Factor model', 'zh-CN': '因子模型', 'zh-TW': '因子模型', ja: 'ファクターモデル', ko: '팩터 모델' },
+    benchmark: { en: 'Benchmark', 'zh-CN': '基准比较', 'zh-TW': '基準比較', ja: 'ベンチマーク', ko: '벤치마크' },
+    tracker: { en: 'Tracker', 'zh-CN': '推荐追踪', 'zh-TW': '推薦追蹤', ja: '追跡', ko: '추적' },
+    attribution: { en: 'Attribution', 'zh-CN': '归因', 'zh-TW': '歸因', ja: '要因分解', ko: '기여 분석' },
+    optimizer: { en: 'Portfolio optimizer', 'zh-CN': '组合优化器', 'zh-TW': '組合優化器', ja: 'ポートフォリオ最適化', ko: '포트폴리오 최적화' },
+    alerts: { en: 'Alert monitor', 'zh-CN': '监控提醒器', 'zh-TW': '監控提醒器', ja: 'アラート監視', ko: '알림 모니터' }
+  };
+  return localeText(labels[key] ?? labels.factor);
+}
+
+function benchmarkRankLabel(rank: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    outperforming: { en: 'Outperforming', 'zh-CN': '跑赢基准', 'zh-TW': '跑贏基準', ja: 'アウトパフォーム', ko: '초과 성과' },
+    'in-line': { en: 'In line', 'zh-CN': '接近基准', 'zh-TW': '接近基準', ja: '基準並み', ko: '기준 부합' },
+    lagging: { en: 'Lagging', 'zh-CN': '落后基准', 'zh-TW': '落後基準', ja: '劣後', ko: '부진' }
+  };
+  return localeText(labels[rank || 'in-line'] ?? labels['in-line']);
+}
+
+function alertPriorityLabel(priority: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    high: { en: 'High priority', 'zh-CN': '高优先级', 'zh-TW': '高優先級', ja: '高優先度', ko: '높은 우선순위' },
+    medium: { en: 'Medium priority', 'zh-CN': '中优先级', 'zh-TW': '中優先級', ja: '中優先度', ko: '중간 우선순위' },
+    normal: { en: 'Normal', 'zh-CN': '普通', 'zh-TW': '普通', ja: '通常', ko: '일반' }
+  };
+  return localeText(labels[priority || 'normal'] ?? labels.normal);
+}
+
+function contributionLabel(value: number | undefined) {
+  const numeric = Number(value ?? 0);
+  if (!Number.isFinite(numeric)) return '0.0';
+  return `${numeric > 0 ? '+' : ''}${numeric.toFixed(1)}`;
+}
+
+function professionalFactorRows(pick: Pick) {
+  return pick.professionalAnalytics?.factorModel.exposures.slice(0, 6) ?? [];
+}
+
+function professionalCheckpointLabel(pick: Pick) {
+  const checkpoints = pick.professionalAnalytics?.recommendationTracker.checkpoints ?? [];
+  return checkpoints.map((item) => `${item.horizon} ${item.targetReturnPct > 0 ? '+' : ''}${item.targetReturnPct}%`).join(' · ');
+}
+
 function decisionActionLabel(action: string | undefined) {
   const labels: Record<string, LocalizedText> = {
     accumulate: { en: 'Accumulate', 'zh-CN': '分批买入', 'zh-TW': '分批買入', ja: '段階的に買い', ko: '분할 매수' },
@@ -6101,6 +6156,47 @@ onUnmounted(() => {
               </div>
               <div class="engine-reason-list">
                 <span v-for="reason in pick.decisionEngine.primaryReasons || []" :key="reason">{{ decisionReasonLabel(reason) }}</span>
+              </div>
+            </div>
+
+            <div v-if="pick.professionalAnalytics" class="research-panel professional-panel" :class="pick.professionalAnalytics.alertMonitor.priority">
+              <strong>{{ professionalAnalyticsTitle() }} · {{ benchmarkRankLabel(pick.professionalAnalytics.benchmarkRelative.rank) }}</strong>
+              <div class="professional-grid">
+                <div class="professional-section">
+                  <span>{{ professionalModuleLabel('factor') }}</span>
+                  <b>{{ pick.professionalAnalytics.factorModel.style }}</b>
+                  <small>{{ professionalModuleLabel('factor') }} {{ formatEngineScore(pick.professionalAnalytics.factorModel.coverageScore) }}/100</small>
+                </div>
+                <div class="professional-section">
+                  <span>{{ professionalModuleLabel('benchmark') }}</span>
+                  <b>{{ formatEngineScore(pick.professionalAnalytics.benchmarkRelative.relativeScore) }}/100</b>
+                  <small>{{ pick.professionalAnalytics.benchmarkRelative.benchmark.symbol }} · {{ benchmarkRankLabel(pick.professionalAnalytics.benchmarkRelative.rank) }}</small>
+                </div>
+                <div class="professional-section">
+                  <span>{{ professionalModuleLabel('tracker') }}</span>
+                  <b>{{ contributionLabel(pick.professionalAnalytics.recommendationTracker.expectedEdgePct) }}%</b>
+                  <small>{{ professionalCheckpointLabel(pick) }}</small>
+                </div>
+                <div class="professional-section">
+                  <span>{{ professionalModuleLabel('attribution') }}</span>
+                  <b>{{ contributionLabel(pick.professionalAnalytics.attribution.netContribution) }}</b>
+                  <small>{{ pick.professionalAnalytics.attribution.drivers.slice(0, 2).map((driver) => driver.label).join(' / ') }}</small>
+                </div>
+                <div class="professional-section">
+                  <span>{{ professionalModuleLabel('optimizer') }}</span>
+                  <b>{{ pick.professionalAnalytics.portfolioOptimizer?.targetWeightPct ?? 0 }}%</b>
+                  <small>{{ pick.professionalAnalytics.portfolioOptimizer?.concentrationAction ?? 'hold' }} · risk {{ formatEngineScore(pick.professionalAnalytics.portfolioOptimizer?.marginalRiskScore) }}</small>
+                </div>
+                <div class="professional-section">
+                  <span>{{ professionalModuleLabel('alerts') }}</span>
+                  <b>{{ alertPriorityLabel(pick.professionalAnalytics.alertMonitor.priority) }}</b>
+                  <small>{{ pick.professionalAnalytics.alertMonitor.rules.slice(0, 2).map((rule) => rule.key).join(' / ') }}</small>
+                </div>
+              </div>
+              <div class="factor-strip">
+                <span v-for="factor in professionalFactorRows(pick)" :key="factor.key" :class="factor.tone">
+                  {{ factor.label }} {{ formatEngineScore(factor.score) }}
+                </span>
               </div>
             </div>
 

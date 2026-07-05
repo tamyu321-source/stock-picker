@@ -9,6 +9,7 @@ from statistics import mean
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
 from backend.decision_engine import build_decision_engine
 from backend.market_profiles import market_profile, market_profiles
+from backend.professional_analytics import build_portfolio_optimizer, build_professional_analytics
 from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceMarketDataProvider, infer_market, instrument_type, local_company_name, volatility_score
 from backend.strategy_library import DETAILED_WEIGHT_KEYS, all_runtime_strategies, get_strategy_catalog
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider
@@ -3887,6 +3888,8 @@ def _apply_portfolio_context(context: dict, picks: list[dict]) -> dict | None:
             continue
         pick["holding"] = position
         pick["holdingAnalysis"] = _holding_analysis(pick, position, total_market_value)
+        professional = pick.setdefault("professionalAnalytics", {})
+        professional["portfolioOptimizer"] = build_portfolio_optimizer(pick, position, total_market_value)
     return _portfolio_summary(context, picks)
 
 
@@ -4070,6 +4073,16 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         market_profile=market_profile(snapshot.market),
     )
     composite_model = _composite_from_decision_engine(decision_engine)
+    professional_analytics = build_professional_analytics(snapshot, metrics, decision_engine, financial_analysis)
+    professional_analytics["portfolioOptimizer"] = build_portfolio_optimizer(
+        {
+            "market": snapshot.market,
+            "sector": snapshot.sector,
+            "instrumentType": composite_model["instrumentType"],
+            "decisionEngine": decision_engine,
+            "compositeModel": composite_model,
+        }
+    )
     verdict = decision_engine["verdict"]
     reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change, breakout_setup_score, pullback_risk_score, trend_profile)
     return {
@@ -4095,6 +4108,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "strategyAssessment": strategy_assessment,
         "compositeModel": composite_model,
         "decisionEngine": decision_engine,
+        "professionalAnalytics": professional_analytics,
         "prediction": {
             "opportunityScore": opportunity_score,
             "downsideRiskScore": downside_risk_score,
