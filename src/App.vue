@@ -5414,7 +5414,7 @@ onUnmounted(() => {
       <form v-if="authMode === 'user'" class="auth-form" @submit.prevent="submitAccessLogin">
         <label>
           <span>{{ authHeading() }}</span>
-          <input v-model="accessKeyInput" type="password" autocomplete="current-password" placeholder="19940710" />
+          <input v-model="accessKeyInput" type="password" autocomplete="current-password" placeholder="輸入你的登入 key" />
         </label>
         <button class="primary-action" type="submit" :disabled="authLoading || !accessKeyInput.trim()">
           <span v-if="authLoading" class="spinner" aria-hidden="true"></span>
@@ -5456,7 +5456,7 @@ onUnmounted(() => {
       <form class="admin-create-form" @submit.prevent="submitNewUser">
         <label>
           <span>New user key</span>
-          <input v-model="newUserKey" type="password" autocomplete="new-password" placeholder="例如 19940710 或新 key" />
+          <input v-model="newUserKey" type="password" autocomplete="new-password" placeholder="輸入新使用者 key" />
         </label>
         <label>
           <span>Label</span>
