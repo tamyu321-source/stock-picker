@@ -1,6 +1,7 @@
 export type Market = 'US' | 'CN' | 'HK' | 'JP' | 'KR' | 'SG' | 'TW';
 export type Verdict = 'buy' | 'watch' | 'sell';
 export type SectorRecommendation = 'overweight' | 'neutral' | 'underweight';
+export type InstrumentType = 'stock' | 'etf' | string;
 
 export interface StrategyWeights {
   momentum: number;
@@ -439,6 +440,12 @@ export interface HoldingNote {
 export interface HoldingAnalysis {
   action: HoldingAction;
   positionWeightPct: number;
+  targetWeightPct?: number;
+  suggestedQuantityChange?: number;
+  stopLossPrice?: number | null;
+  takeProfitPrice?: number | null;
+  buyScore?: number;
+  sellScore?: number;
   notes: HoldingNote[];
 }
 
@@ -505,11 +512,24 @@ export interface FundFlowProfile {
   smallRatio?: number | null;
 }
 
+export interface CompositeModel {
+  instrumentType: InstrumentType;
+  buyScore: number;
+  sellScore: number;
+  holdScore: number;
+  rankScore: number;
+  decision: 'accumulate' | 'hold' | 'reduce' | 'exit' | string;
+  weights: Record<string, number>;
+  financialScore?: number;
+  newsFreshnessScore?: number;
+}
+
 export interface Pick {
   symbol: string;
   name: string;
   market: Market;
   sector: string;
+  instrumentType?: InstrumentType;
   price: number;
   change: number;
   currency: string;
@@ -523,6 +543,7 @@ export interface Pick {
   tScore?: number;
   tPlan?: TTradePlan;
   fundFlow?: FundFlowProfile | null;
+  compositeModel?: CompositeModel;
   prediction?: {
     opportunityScore: number;
     downsideRiskScore: number;

@@ -1343,6 +1343,10 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingBelowCost: (p) => `Position is below cost by ${p.pnlPct}%; wait for stabilization before adding.`,
       holdingConcentration: (p) => `Position weight is ${p.weight}%; concentration risk needs active control.`,
       holdingProfitProtect: (p) => `Profit is ${p.pnlPct}%, but pullback risk is ${p.risk}/100; protect gains.`,
+      holdingCostGap: (p) => `Live price is ${p.gap}% versus cost ${p.cost}.`,
+      holdingSizingPlan: (p) => `Target weight is ${p.target}%; suggested share change ${p.change}.`,
+      holdingStopLossPlan: (p) => `Review exit or reduction if price breaks ${p.price}.`,
+      holdingEtfCore: () => 'ETF holding can stay as a core allocation only while trend and drawdown stay controlled.',
       portfolioTotalDrawdown: (p) => `Portfolio drawdown is ${p.pnlPct}%; prioritize risk review.`,
       portfolioConcentration: (p) => `${p.symbol} is ${p.weight}% of holdings; concentration is high.`,
       portfolioLargeLoss: (p) => `${p.symbol} is down ${p.pnlPct}%; avoid passive averaging down.`,
@@ -1388,6 +1392,10 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingBelowCost: (p) => `持仓低于成本 ${p.pnlPct}%；加仓前先等价格稳定。`,
       holdingConcentration: (p) => `单只仓位占比 ${p.weight}%；集中度风险需要主动控制。`,
       holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，但回撤风险 ${p.risk}/100；应保护利润。`,
+      holdingCostGap: (p) => `现价相对成本 ${p.cost} 的差距为 ${p.gap}%。`,
+      holdingSizingPlan: (p) => `目标仓位 ${p.target}%；建议增减股数 ${p.change}。`,
+      holdingStopLossPlan: (p) => `若价格跌破 ${p.price}，应重新评估减仓或退出。`,
+      holdingEtfCore: () => 'ETF 只有在趋势与回撤受控时，才适合作为核心配置继续持有。',
       portfolioTotalDrawdown: (p) => `持仓整体亏损 ${p.pnlPct}%；优先检查风险。`,
       portfolioConcentration: (p) => `${p.symbol} 占持仓 ${p.weight}%；集中度偏高。`,
       portfolioLargeLoss: (p) => `${p.symbol} 亏损 ${p.pnlPct}%；避免被动摊平。`,
@@ -1433,6 +1441,10 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingBelowCost: (p) => `持倉低於成本 ${p.pnlPct}%；加倉前先等價格穩定。`,
       holdingConcentration: (p) => `單檔倉位占比 ${p.weight}%；集中度風險需要主動控制。`,
       holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，但回撤風險 ${p.risk}/100；應保護利潤。`,
+      holdingCostGap: (p) => `現價相對成本 ${p.cost} 的差距為 ${p.gap}%。`,
+      holdingSizingPlan: (p) => `目標倉位 ${p.target}%；建議增減股數 ${p.change}。`,
+      holdingStopLossPlan: (p) => `若價格跌破 ${p.price}，應重新評估減倉或退出。`,
+      holdingEtfCore: () => 'ETF 只有在趨勢與回撤受控時，才適合作為核心配置繼續持有。',
       portfolioTotalDrawdown: (p) => `持倉整體虧損 ${p.pnlPct}%；優先檢查風險。`,
       portfolioConcentration: (p) => `${p.symbol} 占持倉 ${p.weight}%；集中度偏高。`,
       portfolioLargeLoss: (p) => `${p.symbol} 虧損 ${p.pnlPct}%；避免被動攤平。`,
@@ -1478,6 +1490,10 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingBelowCost: (p) => `持倉低過成本 ${p.pnlPct}%；加倉前先等價格穩定。`,
       holdingConcentration: (p) => `單檔倉位占比 ${p.weight}%；集中度風險愛控制。`,
       holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，毋過回撤風險 ${p.risk}/100；愛保護利潤。`,
+      holdingCostGap: (p) => `現價比成本 ${p.cost} 差 ${p.gap}%。`,
+      holdingSizingPlan: (p) => `目標倉位 ${p.target}%；建議增減股數 ${p.change}。`,
+      holdingStopLossPlan: (p) => `若價格跌破 ${p.price}，愛重新評估減倉抑是退出。`,
+      holdingEtfCore: () => 'ETF 只有趨勢佮回撤受控，才適合繼續做核心配置。',
       portfolioTotalDrawdown: (p) => `持倉整體虧損 ${p.pnlPct}%；先檢查風險。`,
       portfolioConcentration: (p) => `${p.symbol} 占持倉 ${p.weight}%；集中度偏懸。`,
       portfolioLargeLoss: (p) => `${p.symbol} 虧損 ${p.pnlPct}%；避免被動攤平。`,
@@ -1523,6 +1539,10 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingBelowCost: (p) => `取得価格を ${p.pnlPct}% 下回っています。追加前に価格安定を待ってください。`,
       holdingConcentration: (p) => `保有比率は ${p.weight}% です。集中リスクを管理してください。`,
       holdingProfitProtect: (p) => `${p.pnlPct}% の含み益がありますが、押し戻しリスクは ${p.risk}/100 です。利益保護を優先してください。`,
+      holdingCostGap: (p) => `現在値は取得単価 ${p.cost} に対して ${p.gap}% です。`,
+      holdingSizingPlan: (p) => `目標比率は ${p.target}%、提案株数変更は ${p.change} です。`,
+      holdingStopLossPlan: (p) => `${p.price} を割り込む場合は、縮小または撤退を再評価してください。`,
+      holdingEtfCore: () => 'ETF はトレンドとドローダウンが管理されている間だけ、コア配分として保有できます。',
       portfolioTotalDrawdown: (p) => `ポートフォリオの評価損は ${p.pnlPct}% です。リスク点検を優先してください。`,
       portfolioConcentration: (p) => `${p.symbol} は保有全体の ${p.weight}% です。集中度が高いです。`,
       portfolioLargeLoss: (p) => `${p.symbol} は ${p.pnlPct}% 下落しています。受け身のナンピンは避けてください。`,
@@ -1568,6 +1588,10 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingBelowCost: (p) => `평균 단가 대비 ${p.pnlPct}% 낮습니다. 추가 전 가격 안정화를 기다리세요.`,
       holdingConcentration: (p) => `보유 비중이 ${p.weight}%입니다. 집중 리스크 관리가 필요합니다.`,
       holdingProfitProtect: (p) => `${p.pnlPct}% 수익 상태지만 되돌림 리스크가 ${p.risk}/100입니다. 수익 보호를 우선하세요.`,
+      holdingCostGap: (p) => `현재가는 평균 단가 ${p.cost} 대비 ${p.gap}%입니다.`,
+      holdingSizingPlan: (p) => `목표 비중은 ${p.target}%이며, 제안 수량 변화는 ${p.change}주입니다.`,
+      holdingStopLossPlan: (p) => `${p.price} 이탈 시 축소 또는 이탈을 재평가하세요.`,
+      holdingEtfCore: () => 'ETF는 추세와 낙폭이 통제될 때만 핵심 배분으로 계속 보유할 수 있습니다.',
       portfolioTotalDrawdown: (p) => `포트폴리오 손실이 ${p.pnlPct}%입니다. 리스크 점검을 우선하세요.`,
       portfolioConcentration: (p) => `${p.symbol}이 보유 비중의 ${p.weight}%입니다. 집중도가 높습니다.`,
       portfolioLargeLoss: (p) => `${p.symbol}이 ${p.pnlPct}% 하락했습니다. 수동적인 물타기는 피하세요.`,
@@ -2068,6 +2092,54 @@ function filteredEmptyHint() {
 function factorLabel(value: string | number | undefined) {
   const key = String(value ?? '') as keyof StrategyWeights;
   return t.value[key] ?? String(value ?? '');
+}
+
+function instrumentLabel(pick: Pick) {
+  if (pick.instrumentType === 'etf') {
+    return localeText({
+      en: 'ETF',
+      'zh-CN': 'ETF',
+      'zh-TW': 'ETF',
+      ja: 'ETF',
+      ko: 'ETF'
+    });
+  }
+  return localeText({
+    en: 'Stock',
+    'zh-CN': '股票',
+    'zh-TW': '股票',
+    ja: '個別株',
+    ko: '주식'
+  });
+}
+
+function financialReviewTitle(pick: Pick) {
+  if (pick.instrumentType === 'etf') {
+    return localeText({
+      en: 'ETF analysis',
+      'zh-CN': 'ETF 分析',
+      'zh-TW': 'ETF 分析',
+      ja: 'ETF 分析',
+      ko: 'ETF 분석'
+    });
+  }
+  return t.value.financialReview;
+}
+
+function holdingPlanTitle() {
+  return localeText({
+    en: 'Position plan',
+    'zh-CN': '仓位计划',
+    'zh-TW': '倉位計畫',
+    ja: 'ポジション計画',
+    ko: '포지션 계획'
+  });
+}
+
+function signedQuantityLabel(value: number | null | undefined) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number) || number === 0) return '0';
+  return `${number > 0 ? '+' : ''}${number}`;
 }
 
 function scoreWeightLabel(item: { weight: number; baseWeight?: number; available?: boolean }) {
@@ -4001,6 +4073,14 @@ function financialMetricLabel(metric: FinancialMetric) {
       analystTargetUpside: '分析師目標價空間',
       dividendYield: '股息率',
       liquidityQuality: '流動性 / 規模代理',
+      etfTrend: 'ETF 趨勢',
+      etfDrawdownControl: 'ETF 回撤控制',
+      etfVolatility: 'ETF 波動控制',
+      etfLiquidity: 'ETF 流動性',
+      etfAssets: 'ETF 規模',
+      etfExpenseRatio: 'ETF 費用率',
+      etfDividendYield: 'ETF 收益率',
+      etfRangePosition: 'ETF 區間位置',
       fundFlowMain: '主力資金流',
       fundFlowSuperLarge: '超大單資金流',
       fundFlowLarge: '大單資金流',
@@ -4020,6 +4100,14 @@ function financialMetricLabel(metric: FinancialMetric) {
     analystTargetUpside: { en: 'Analyst target upside', 'zh-CN': '分析师目标价空间', 'zh-TW': '分析師目標價空間', ja: 'アナリスト目標上値余地', ko: '애널리스트 목표가 상승 여력' },
     dividendYield: { en: 'Dividend yield', 'zh-CN': '股息率', 'zh-TW': '股息率', ja: '配当利回り', ko: '배당수익률' },
     liquidityQuality: { en: 'Liquidity/size proxy', 'zh-CN': '流动性/规模代理', 'zh-TW': '流動性/規模代理', ja: '流動性 / 規模代理', ko: '유동성 / 규모 대체 지표' },
+    etfTrend: { en: 'ETF trend', 'zh-CN': 'ETF 趋势', 'zh-TW': 'ETF 趨勢', ja: 'ETF トレンド', ko: 'ETF 추세' },
+    etfDrawdownControl: { en: 'Drawdown control', 'zh-CN': '回撤控制', 'zh-TW': '回撤控制', ja: 'ドローダウン管理', ko: '낙폭 관리' },
+    etfVolatility: { en: 'Volatility control', 'zh-CN': '波动控制', 'zh-TW': '波動控制', ja: '変動性管理', ko: '변동성 관리' },
+    etfLiquidity: { en: 'ETF liquidity', 'zh-CN': 'ETF 流动性', 'zh-TW': 'ETF 流動性', ja: 'ETF 流動性', ko: 'ETF 유동성' },
+    etfAssets: { en: 'Fund assets', 'zh-CN': '基金规模', 'zh-TW': '基金規模', ja: 'ファンド規模', ko: '펀드 규모' },
+    etfExpenseRatio: { en: 'Expense ratio', 'zh-CN': '费用率', 'zh-TW': '費用率', ja: '経費率', ko: '보수율' },
+    etfDividendYield: { en: 'Distribution yield', 'zh-CN': '分配收益率', 'zh-TW': '配息收益率', ja: '分配利回り', ko: '분배 수익률' },
+    etfRangePosition: { en: 'Range position', 'zh-CN': '区间位置', 'zh-TW': '區間位置', ja: 'レンジ位置', ko: '범위 위치' },
     fundFlowMain: { en: 'Main fund flow', 'zh-CN': '主力资金流', 'zh-TW': '主力資金流', ja: '主力資金フロー', ko: '주력 자금 흐름' },
     fundFlowSuperLarge: { en: 'Super-large order flow', 'zh-CN': '超大单资金流', 'zh-TW': '超大單資金流', ja: '超大口注文フロー', ko: '초대형 주문 흐름' },
     fundFlowLarge: { en: 'Large order flow', 'zh-CN': '大单资金流', 'zh-TW': '大單資金流', ja: '大口注文フロー', ko: '대형 주문 흐름' },
@@ -4944,6 +5032,7 @@ onUnmounted(() => {
             <div class="pick-heading">
               <div>
                 <span class="market-tag">{{ pick.market }}</span>
+                <span class="market-tag instrument-tag" :class="pick.instrumentType || 'stock'">{{ instrumentLabel(pick) }}</span>
                 <h3>{{ pick.symbol }} · {{ pick.name }}</h3>
                 <p>{{ sectorLabel(pick) }}</p>
               </div>
@@ -5102,6 +5191,22 @@ onUnmounted(() => {
                   <span>{{ holdingFieldLabel('weight') }}</span>
                   <b>{{ pick.holdingAnalysis.positionWeightPct }}%</b>
                 </div>
+                <div v-if="pick.holdingAnalysis.targetWeightPct !== undefined">
+                  <span>{{ holdingPlanTitle() }}</span>
+                  <b>{{ pick.holdingAnalysis.targetWeightPct }}%</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.suggestedQuantityChange !== undefined">
+                  <span>{{ holdingFieldLabel('quantity') }}</span>
+                  <b>{{ signedQuantityLabel(pick.holdingAnalysis.suggestedQuantityChange) }}</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.stopLossPrice">
+                  <span>{{ t.riskControls }}</span>
+                  <b>{{ pick.currency }} {{ pick.holdingAnalysis.stopLossPrice }}</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.takeProfitPrice">
+                  <span>{{ t.actionPlan }}</span>
+                  <b>{{ pick.currency }} {{ pick.holdingAnalysis.takeProfitPrice }}</b>
+                </div>
               </div>
               <ul class="holding-notes">
                 <li v-for="note in pick.holdingAnalysis.notes" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
@@ -5185,7 +5290,7 @@ onUnmounted(() => {
             </div>
 
             <div v-if="pick.financialAnalysis" class="research-panel">
-              <strong>{{ t.financialReview }} · {{ pointLabel(pick.financialAnalysis.summary) }}</strong>
+              <strong>{{ financialReviewTitle(pick) }} · {{ pointLabel(pick.financialAnalysis.summary) }}</strong>
               <div class="financial-grid">
                 <div v-for="metric in pick.financialAnalysis.metrics" :key="metric.key">
                   <span>{{ financialMetricLabel(metric) }}</span>

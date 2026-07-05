@@ -13,7 +13,7 @@ from backend.portfolio import normalize_a_share_symbol, parse_portfolio_export
 from backend.providers import Article, EastmoneyCnMarketDataProvider, MarketSnapshot, RssNewsCrawler, TaiwanExchangeMarketDataProvider, YahooHttpMarketDataProvider, _eastmoney_cn_fund_flow, _parse_eastmoney_datetime, _sina_cn_fund_flow, fallback_market_data_provider, infer_market, is_recent_article, local_company_name, news_queries, news_query
 from backend.services import _breakout_setup_score, _financial_analysis, _friendly_data_error, _fund_flow_profile, _metric_availability, _metrics, _news_analysis, _news_heat_analysis, _pullback_risk_score, _score_breakdown, _sentiment_score, _verdict
 from backend.strategy_library import get_strategy_catalog
-from backend.universe import DiscoveredSymbol, MarketUniverseProvider, _manual_symbol_candidates, _symbols_from_code_mentions
+from backend.universe import DiscoveredSymbol, MarketUniverseProvider, is_common_equity_symbol, _manual_symbol_candidates, _symbols_from_code_mentions
 
 
 class FakeMarketProvider:
@@ -406,6 +406,11 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(pick["holding"]["unrealizedPnl"], 2000.0)
         self.assertAlmostEqual(pick["holding"]["unrealizedPnlPct"], 10.0)
         self.assertEqual(pick["holdingAnalysis"]["positionWeightPct"], 100.0)
+        self.assertIn("targetWeightPct", pick["holdingAnalysis"])
+        self.assertIn("suggestedQuantityChange", pick["holdingAnalysis"])
+        self.assertIn("stopLossPrice", pick["holdingAnalysis"])
+        self.assertIn("takeProfitPrice", pick["holdingAnalysis"])
+        self.assertIn("compositeModel", pick)
         self.assertEqual(payload["portfolio"]["totalMarketValue"], 22000.0)
 
     def test_ttl_cache_expires_entries(self):
@@ -1784,6 +1789,49 @@ class ApiTestCase(unittest.TestCase):
         self.assertTrue(pick["financialAnalysis"]["metrics"])
         self.assertIn("actionPlan", pick)
         self.assertIn("steps", pick["actionPlan"])
+
+    def test_etf_analysis_uses_fund_specific_metrics_and_composite_model(self):
+        class EtfMarketProvider:
+            def fetch(self, symbol):
+                closes = [420 + index * 0.55 + (index % 7) * 0.12 for index in range(130)]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="SPDR S&P 500 ETF Trust",
+                    market="US",
+                    sector="ETF / Fund",
+                    price=round(closes[-1], 3),
+                    change=0.4,
+                    currency="USD",
+                    closes=closes,
+                    info={
+                        "quoteType": "ETF",
+                        "instrumentType": "etf",
+                        "shortName": "SPDR S&P 500 ETF Trust",
+                        "regularMarketVolume": 64_000_000,
+                        "marketCap": 550_000_000_000,
+                        "totalAssets": 550_000_000_000,
+                        "annualReportExpenseRatio": 0.0009,
+                        "dividendYield": 0.012,
+                        "fiftyTwoWeekHigh": 505,
+                        "fiftyTwoWeekLow": 390,
+                    },
+                    instrument_type="etf",
+                )
+
+        client = create_app(EtfMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["US"], "symbols": ["SPY"], "strategyId": "balanced"})
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        self.assertEqual(pick["instrumentType"], "etf")
+        self.assertEqual(pick["compositeModel"]["instrumentType"], "etf")
+        self.assertIn(pick["compositeModel"]["decision"], {"accumulate", "hold", "reduce", "exit"})
+        metric_keys = {metric["key"] for metric in pick["financialAnalysis"]["metrics"]}
+        self.assertIn("etfTrend", metric_keys)
+        self.assertIn("etfExpenseRatio", metric_keys)
+        self.assertIn("etfLiquidity", metric_keys)
+        self.assertEqual(_manual_symbol_candidates("510300", {"CN"}), ["510300.SS"])
+        self.assertTrue(is_common_equity_symbol("510300.SS", "CN"))
 
     def test_response_contains_sector_analysis(self):
         response = self.client.post("/api/analyze", json={"markets": ["US"], "symbols": ["AAPL", "MSFT"], "strategyId": "balanced"})

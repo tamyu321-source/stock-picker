@@ -1407,13 +1407,18 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  margin-bottom: 8px;
+  margin: 0 6px 8px 0;
   padding: 0 8px;
   border-radius: 999px;
   background: #eef4ef;
   color: #245f46;
   font-size: 0.78rem;
   font-weight: 900;
+}
+
+.instrument-tag.etf {
+  background: #eef2ff;
+  color: #3747a6;
 }
 
 h3 {

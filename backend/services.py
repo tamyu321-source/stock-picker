@@ -7,7 +7,7 @@ from math import exp, log10
 from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
-from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceMarketDataProvider, infer_market, local_company_name, volatility_score
+from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceMarketDataProvider, infer_market, instrument_type, local_company_name, volatility_score
 from backend.strategy_library import DETAILED_WEIGHT_KEYS, all_runtime_strategies, get_strategy_catalog
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider
 
@@ -463,6 +463,23 @@ def _investment_priority(pick: dict) -> float:
     setup_score = float(pick.get("breakoutSetupScore") or 0)
     overall = pick.get("overallAssessment") or {}
     strategy_assessment = pick.get("strategyAssessment") or {}
+    composite = pick.get("compositeModel") or {}
+    if composite.get("rankScore") is not None and strategy_assessment.get("sortScore") is not None:
+        return round(
+            float(strategy_assessment.get("sortScore") or 0) * 0.52
+            + float(composite.get("rankScore") or 0) * 0.38
+            + float(pick.get("opportunityScore") or 0) * 0.06
+            + setup_score * 0.04,
+            3,
+        )
+    if composite.get("rankScore") is not None:
+        return round(
+            float(composite.get("rankScore") or 0) * 0.74
+            + float(overall.get("totalScore") or pick.get("score") or 0) * 0.14
+            + float(pick.get("opportunityScore") or 0) * 0.08
+            + setup_score * 0.04,
+            3,
+        )
     if strategy_assessment.get("sortScore") is not None:
         return round(
             float(strategy_assessment.get("sortScore") or 0) * 0.72
@@ -495,6 +512,14 @@ def _investment_priority(pick: dict) -> float:
 
 def _sell_priority(pick: dict) -> float:
     metrics = pick["metrics"]
+    composite = pick.get("compositeModel") or {}
+    if composite.get("sellScore") is not None:
+        return round(
+            float(composite.get("sellScore") or 0) * 0.76
+            + float(pick.get("downsideRiskScore") or 0) * 0.20
+            + (12 if _is_severe_price_drop(pick.get("change")) else 5 if _is_large_price_drop(pick.get("change")) else 0),
+            3,
+        )
     if "downsideRiskScore" in pick:
         return float(pick["downsideRiskScore"])
     price_penalty = 14 if _is_severe_price_drop(pick.get("change")) else 7 if _is_large_price_drop(pick.get("change")) else 0
@@ -511,8 +536,10 @@ def _sell_priority(pick: dict) -> float:
 
 def _is_exit_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
+    composite = pick.get("compositeModel") or {}
     return (
         _is_severe_price_drop(pick.get("change"))
+        or float(composite.get("sellScore") or 0) >= 68
         or float(pick.get("downsideRiskScore") or 0) >= DOWNSIDE_EXIT_FLOOR
         or pick["score"] < 52
         or (metrics["risk"] < 35 and pick["score"] < 58)
@@ -521,8 +548,10 @@ def _is_exit_candidate(pick: dict) -> bool:
 
 def _is_urgent_exit_candidate(pick: dict) -> bool:
     metrics = pick["metrics"]
+    composite = pick.get("compositeModel") or {}
     return (
         _is_severe_price_drop(pick.get("change"))
+        or float(composite.get("sellScore") or 0) >= 78
         or float(pick.get("downsideRiskScore") or 0) >= DOWNSIDE_URGENT_EXIT_FLOOR
         or pick["score"] <= 48
         or metrics["sentiment"] <= 35
@@ -1094,15 +1123,39 @@ def _is_strategy_buy_candidate(pick: dict) -> bool:
     if not assessment:
         return False
     overall = pick.get("overallAssessment") or {}
+    composite = pick.get("compositeModel") or {}
     return (
         overall.get("suitability") in {"strongBuy", "buy"}
         and assessment.get("recommendation") == "aligned"
         and int(assessment.get("failedGateCount") or 0) == 0
         and int(assessment.get("triggeredVetoCount") or 0) == 0
+        and float(composite.get("buyScore") or overall.get("totalScore") or 0) >= 68
+        and float(composite.get("sellScore") or 0) <= 54
+    )
+
+
+def _is_etf_investment_candidate(pick: dict) -> bool:
+    composite = pick.get("compositeModel") or {}
+    metrics = pick["metrics"]
+    trend = pick.get("trendAnalysis") or {}
+    return (
+        pick.get("instrumentType") == "etf"
+        and float(composite.get("buyScore") or 0) >= 69
+        and float(composite.get("sellScore") or 100) <= 50
+        and float(composite.get("rankScore") or 0) >= 64
+        and float(pick.get("opportunityScore") or 0) >= 62
+        and float(pick.get("downsideRiskScore") or 100) <= 56
+        and metrics["risk"] >= 52
+        and metrics["quality"] >= 55
+        and float(trend.get("continuationScore") or 50) >= 54
+        and not _is_large_price_drop(pick.get("change"))
+        and not _is_overheated_price_jump(pick.get("change"))
     )
 
 
 def _is_buy_candidate(pick: dict) -> bool:
+    if pick.get("instrumentType") == "etf":
+        return _is_etf_investment_candidate(pick)
     if pick.get("strategyAssessment"):
         return _is_strategy_buy_candidate(pick)
     return _is_quality_investment_candidate(pick) or _is_breakout_setup_candidate(pick)
@@ -2664,6 +2717,15 @@ def _momentum_score(closes: list[float]) -> float:
 def _metric_availability(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, bool]:
     info = snapshot.info
     fund_flow_available = bool(_fund_flow_profile(info).get("available"))
+    if _is_etf_snapshot(snapshot):
+        profile = _etf_metric_profile(snapshot)
+        return {
+            "sentiment": bool(articles) or fund_flow_available,
+            "momentum": len(snapshot.closes) >= 22,
+            "value": any(profile.get(key) is not None for key in ["expenseScore", "yieldScore", "rangeScore"]),
+            "risk": len(snapshot.closes) >= 22,
+            "quality": any(profile.get(key) is not None for key in ["liquidity", "sizeScore", "drawdownControl"]),
+        }
     has_quality = any(
         _metric_number(info.get(key)) is not None
         for key in ["returnOnEquity", "profitMargins", "revenueGrowth", "earningsGrowth", "debtToEquity", "marketCap", "regularMarketVolume"]
@@ -2803,7 +2865,180 @@ def _fund_flow_decision_params(fund_flow: dict) -> dict:
     }
 
 
+def _snapshot_instrument_type(snapshot: MarketSnapshot) -> str:
+    return getattr(snapshot, "instrument_type", None) or str(snapshot.info.get("instrumentType") or instrument_type(snapshot.symbol, snapshot.info))
+
+
+def _is_etf_snapshot(snapshot: MarketSnapshot) -> bool:
+    return _snapshot_instrument_type(snapshot) == "etf"
+
+
+def _ratio_as_percent(value) -> float | None:
+    number = _metric_number(value)
+    if number is None:
+        return None
+    return number * 100 if abs(number) <= 1 else number
+
+
+def _etf_assets_label(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    absolute = abs(value)
+    if absolute >= 1_000_000_000_000:
+        return f"{value / 1_000_000_000_000:.2f}t"
+    if absolute >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}b"
+    if absolute >= 1_000_000:
+        return f"{value / 1_000_000:.1f}m"
+    return f"{value:.0f}"
+
+
+def _etf_metric_profile(snapshot: MarketSnapshot) -> dict[str, float | None]:
+    closes = snapshot.closes
+    momentum = _momentum_score(closes)
+    liquidity = _liquidity_score(snapshot.info)
+    volatility = volatility_score(closes)
+    drawdown = _max_drawdown(closes, 90)
+    drawdown_control = _clamp_score(100 - drawdown * 180)
+    range_position = _range_position(snapshot)
+    expense_pct = _ratio_as_percent(
+        snapshot.info.get("annualReportExpenseRatio")
+        or snapshot.info.get("netExpenseRatio")
+        or snapshot.info.get("expenseRatio")
+    )
+    yield_pct = _ratio_as_percent(
+        snapshot.info.get("dividendYield")
+        or snapshot.info.get("yield")
+        or snapshot.info.get("trailingAnnualDividendYield")
+    )
+    total_assets = _metric_number(snapshot.info.get("totalAssets") or snapshot.info.get("marketCap"))
+    expense_score = None if expense_pct is None else _clamp_score(100 - expense_pct * 24)
+    yield_score = None if yield_pct is None else _clamp_score(48 + min(32, yield_pct * 7))
+    range_score = None if range_position is None else _clamp_score(88 - abs(range_position - 58) * 0.9)
+    size_score = None
+    if total_assets and total_assets > 0:
+        size_score = _clamp_score(44 + log10(total_assets / 1_000_000_000 + 1) * 18)
+    return {
+        "momentum": round(momentum, 1),
+        "liquidity": round(liquidity, 1) if liquidity is not None else None,
+        "volatility": round(volatility, 1),
+        "drawdownControl": round(drawdown_control, 1),
+        "drawdownPct": round(drawdown * 100, 1),
+        "rangePosition": round(range_position, 1) if range_position is not None else None,
+        "rangeScore": round(range_score, 1) if range_score is not None else None,
+        "expensePct": round(expense_pct, 3) if expense_pct is not None else None,
+        "expenseScore": round(expense_score, 1) if expense_score is not None else None,
+        "yieldPct": round(yield_pct, 2) if yield_pct is not None else None,
+        "yieldScore": round(yield_score, 1) if yield_score is not None else None,
+        "totalAssets": total_assets,
+        "sizeScore": round(size_score, 1) if size_score is not None else None,
+    }
+
+
+def _etf_analysis(snapshot: MarketSnapshot) -> dict:
+    profile = _etf_metric_profile(snapshot)
+    metrics = [
+        {"key": "etfTrend", "value": f"{profile['momentum']:.1f}/100", "score": profile["momentum"]},
+        {"key": "etfDrawdownControl", "value": f"{profile['drawdownPct']:.1f}% max drawdown", "score": profile["drawdownControl"]},
+        {"key": "etfVolatility", "value": f"{profile['volatility']:.1f}/100", "score": profile["volatility"]},
+    ]
+    if profile.get("liquidity") is not None:
+        metrics.append({"key": "etfLiquidity", "value": f"{profile['liquidity']:.1f}/100", "score": profile["liquidity"]})
+    if profile.get("sizeScore") is not None:
+        metrics.append({"key": "etfAssets", "value": _etf_assets_label(_metric_number(profile.get("totalAssets"))), "score": profile["sizeScore"]})
+    if profile.get("expensePct") is not None:
+        metrics.append({"key": "etfExpenseRatio", "value": f"{profile['expensePct']:.3f}%", "score": profile["expenseScore"]})
+    if profile.get("yieldPct") is not None:
+        metrics.append({"key": "etfDividendYield", "value": f"{profile['yieldPct']:.2f}%", "score": profile["yieldScore"]})
+    if profile.get("rangePosition") is not None:
+        metrics.append({"key": "etfRangePosition", "value": f"{profile['rangePosition']:.1f}%", "score": profile["rangeScore"]})
+
+    positives = []
+    negatives = []
+    watch_items = []
+    momentum_score = float(profile.get("momentum") or 50)
+    liquidity_score = profile.get("liquidity")
+    drawdown_score = float(profile.get("drawdownControl") or 50)
+    volatility = float(profile.get("volatility") or 50)
+    expense_score = profile.get("expenseScore")
+    yield_pct = profile.get("yieldPct")
+    range_position = profile.get("rangePosition")
+
+    if momentum_score >= 62:
+        positives.append({"key": "momentumSupport", "params": {"score": round(momentum_score, 1)}})
+    elif momentum_score <= 45:
+        negatives.append({"key": "weakMomentum", "params": {"score": round(momentum_score, 1)}})
+    else:
+        watch_items.append({"key": "watchBreakout", "params": {}})
+
+    if liquidity_score is not None and liquidity_score >= 64:
+        positives.append({"key": "financialLiquiditySupport", "params": {"score": round(float(liquidity_score), 1)}})
+    elif liquidity_score is not None and liquidity_score <= 42:
+        negatives.append({"key": "financialLiquidityRisk", "params": {"score": round(float(liquidity_score), 1)}})
+
+    if drawdown_score >= 68 and volatility >= 50:
+        positives.append({"key": "riskControlled", "params": {"score": round(drawdown_score, 1)}})
+    elif drawdown_score <= 45 or volatility <= 38:
+        negatives.append({"key": "riskHigh", "params": {"score": round(min(drawdown_score, volatility), 1)}})
+    else:
+        watch_items.append({"key": "watchRisk", "params": {}})
+
+    if expense_score is not None and expense_score <= 58:
+        watch_items.append({"key": "financialWatchValuation", "params": {"value": round(float(profile.get("expensePct") or 0), 3)}})
+    if yield_pct is not None and yield_pct >= 2.5:
+        positives.append({"key": "financialDividendSupport", "params": {"yield": round(float(yield_pct), 2)}})
+    if range_position is not None and float(range_position) >= 88:
+        watch_items.append({"key": "financialWatchHighRange", "params": {"position": round(float(range_position), 1)}})
+
+    average_score = mean(float(metric["score"]) for metric in metrics if metric.get("score") is not None) if metrics else 50
+    if average_score >= 63 and not negatives:
+        summary_key = "financialStrongSummary"
+    elif average_score <= 46 or len(negatives) >= 2:
+        summary_key = "financialWeakSummary"
+    else:
+        summary_key = "financialMixedSummary"
+    return {
+        "summary": {"key": summary_key, "params": {"count": len(metrics)}},
+        "metrics": metrics[:8],
+        "positives": positives[:5],
+        "negatives": negatives[:5],
+        "watchItems": watch_items[:5],
+        "profile": profile,
+    }
+
+
+def _etf_metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, float]:
+    profile = _etf_metric_profile(snapshot)
+    fund_flow = _fund_flow_profile(snapshot.info)
+    flow_score = float(fund_flow.get("score") or 0)
+    news_score = _sentiment_score(articles)
+    liquidity = float(profile.get("liquidity") or profile.get("sizeScore") or 52)
+    expense_score = profile.get("expenseScore")
+    yield_score = profile.get("yieldScore")
+    range_score = profile.get("rangeScore")
+    value_parts = [value for value in [expense_score, yield_score, range_score] if value is not None]
+    quality_parts = [
+        liquidity,
+        float(profile.get("drawdownControl") or 50),
+        float(profile.get("volatility") or 50),
+        float(profile.get("sizeScore") or liquidity),
+    ]
+    risk = _clamp_score(float(profile.get("drawdownControl") or 50) * 0.58 + float(profile.get("volatility") or 50) * 0.42)
+    momentum = _clamp_score(float(profile.get("momentum") or 50) + (flow_score * 0.10 if fund_flow.get("available") else 0))
+    sentiment = _clamp_score(news_score + (flow_score * 0.14 if fund_flow.get("available") else 0))
+    return {
+        "momentum": round(momentum, 1),
+        "value": round(mean(value_parts), 1) if value_parts else 55.0,
+        "sentiment": round(sentiment, 1),
+        "risk": round(risk, 1),
+        "quality": round(mean(quality_parts), 1),
+    }
+
+
 def _metrics(snapshot: MarketSnapshot, articles: list[Article]) -> dict[str, float]:
+    if _is_etf_snapshot(snapshot):
+        return _etf_metrics(snapshot, articles)
+
     closes = snapshot.closes
     momentum = _momentum_score(closes)
     fund_flow = _fund_flow_profile(snapshot.info)
@@ -2881,6 +3116,9 @@ def _plain_value(value, suffix: str = "") -> str:
 
 
 def _financial_analysis(snapshot: MarketSnapshot) -> dict:
+    if _is_etf_snapshot(snapshot):
+        return _etf_analysis(snapshot)
+
     info = snapshot.info
     price = snapshot.price
     pe = _number(info.get("trailingPE") or info.get("forwardPE"))
@@ -3116,6 +3354,167 @@ def _action_plan(
     }
 
 
+def _average_metric_score(analysis: dict | None) -> float:
+    metrics = (analysis or {}).get("metrics") or []
+    scores = [float(metric.get("score")) for metric in metrics if _metric_number(metric.get("score")) is not None]
+    return mean(scores) if scores else 50.0
+
+
+def _composite_investment_model(
+    snapshot: MarketSnapshot,
+    metrics: dict[str, float],
+    score: float,
+    overall: dict,
+    news_analysis: dict,
+    news_heat: dict,
+    trend_analysis: dict,
+    financial_analysis: dict,
+    t_plan: dict,
+    opportunity_score: float,
+    downside_risk_score: float,
+    breakout_setup_score: float,
+    pullback_risk_score: float,
+    price_change,
+) -> dict:
+    instrument = _snapshot_instrument_type(snapshot)
+    continuation = float(trend_analysis.get("continuationScore") or 50)
+    reversal = float(trend_analysis.get("reversalRiskScore") or 50)
+    heat_impact = float(news_heat.get("impactScore") or 45)
+    freshness = float(news_heat.get("freshnessScore") or 0)
+    financial_score = _average_metric_score(financial_analysis)
+    overall_score = float(overall.get("totalScore") or score)
+    t_score = float(t_plan.get("score") or 50)
+    positive_news, negative_news, net_news = _news_strengths(news_analysis)
+    change = _metric_number(price_change)
+    price_bonus = _price_action_bonus(change)
+    price_risk = _price_action_risk(change)
+    negatives = len(financial_analysis.get("negatives") or [])
+    positives = len(financial_analysis.get("positives") or [])
+    liquidity_score = float(((t_plan.get("components") or {}).get("liquidityScore")) or metrics.get("quality") or 50)
+
+    if instrument == "etf":
+        buy_score = _clamp_score(
+            overall_score * 0.20
+            + opportunity_score * 0.16
+            + continuation * 0.18
+            + metrics["risk"] * 0.14
+            + liquidity_score * 0.12
+            + financial_score * 0.12
+            + metrics["value"] * 0.06
+            + heat_impact * 0.04
+            + max(0, net_news) * 0.04
+            + price_bonus * 0.32
+            - downside_risk_score * 0.09
+            - pullback_risk_score * 0.06
+        )
+        sell_score = _clamp_score(
+            downside_risk_score * 0.24
+            + reversal * 0.18
+            + pullback_risk_score * 0.15
+            + (100 - metrics["risk"]) * 0.16
+            + (100 - continuation) * 0.11
+            + max(0, -net_news) * 0.08
+            + negative_news * 0.08
+            + max(0, 50 - liquidity_score) * 0.14
+            + price_risk * 0.62
+            + negatives * 4
+            - positives * 2
+        )
+        weights = {
+            "trend": 18,
+            "riskDrawdown": 16,
+            "liquidity": 12,
+            "expenseYield": 12,
+            "newsHeat": 8,
+            "priceAction": 10,
+            "downside": 24,
+        }
+    else:
+        buy_score = _clamp_score(
+            overall_score * 0.28
+            + opportunity_score * 0.18
+            + metrics["quality"] * 0.14
+            + metrics["momentum"] * 0.10
+            + metrics["risk"] * 0.09
+            + financial_score * 0.10
+            + continuation * 0.07
+            + breakout_setup_score * 0.06
+            + heat_impact * 0.05
+            + max(0, net_news) * 0.04
+            + price_bonus * 0.42
+            - downside_risk_score * 0.08
+            - pullback_risk_score * 0.07
+        )
+        sell_score = _clamp_score(
+            downside_risk_score * 0.25
+            + reversal * 0.18
+            + pullback_risk_score * 0.16
+            + (100 - metrics["risk"]) * 0.12
+            + (100 - metrics["momentum"]) * 0.10
+            + (100 - metrics["quality"]) * 0.08
+            + negative_news * 0.12
+            + max(0, -net_news) * 0.06
+            + price_risk * 0.70
+            + negatives * 5
+            - positives * 2
+        )
+        weights = {
+            "overall": 28,
+            "opportunity": 18,
+            "quality": 14,
+            "momentum": 10,
+            "risk": 12,
+            "financials": 10,
+            "newsHeat": 8,
+        }
+
+    if _is_severe_price_drop(change):
+        sell_score = max(sell_score, 82)
+        buy_score = min(buy_score, 34)
+    elif _is_large_price_drop(change):
+        sell_score = max(sell_score, 62)
+        buy_score = min(buy_score, 55)
+    if reversal >= NEXT_SESSION_REVERSAL_BLOCK_BUY_FLOOR:
+        buy_score = min(buy_score, 63)
+    if freshness <= 15 and not news_analysis.get("events"):
+        buy_score = min(buy_score, 68)
+
+    rank_score = _clamp_score(buy_score * 0.72 + (100 - sell_score) * 0.28)
+    hold_score = _clamp_score(100 - abs(buy_score - sell_score) * 0.55 - max(0, sell_score - 60) * 0.35)
+    if sell_score >= 76:
+        decision = "exit"
+    elif sell_score >= 62:
+        decision = "reduce"
+    elif buy_score >= 72 and sell_score <= 48:
+        decision = "accumulate"
+    else:
+        decision = "hold"
+
+    return {
+        "instrumentType": instrument,
+        "buyScore": round(buy_score, 1),
+        "sellScore": round(sell_score, 1),
+        "holdScore": round(hold_score, 1),
+        "rankScore": round(rank_score, 1),
+        "decision": decision,
+        "weights": weights,
+        "financialScore": round(financial_score, 1),
+        "newsFreshnessScore": round(freshness, 1),
+    }
+
+
+def _composite_verdict(default_verdict: str, model: dict, metrics: dict[str, float], price_change) -> str:
+    buy_score = float(model.get("buyScore") or 0)
+    sell_score = float(model.get("sellScore") or 0)
+    if sell_score >= 76 or _is_severe_price_drop(price_change):
+        return "sell"
+    if sell_score >= 62 or _is_large_price_drop(price_change):
+        return "watch"
+    if buy_score >= 72 and sell_score <= 48 and metrics["risk"] >= 48 and metrics["momentum"] >= 50:
+        return "buy"
+    return default_verdict if default_verdict != "buy" else "watch"
+
+
 def _portfolio_context_from_payload(payload: dict) -> dict | None:
     portfolio = payload.get("portfolio") if isinstance(payload.get("portfolio"), dict) else {}
     raw_positions = portfolio.get("positions") if isinstance(portfolio, dict) else None
@@ -3199,23 +3598,35 @@ def _holding_note(key: str, severity: str = "info", **params) -> dict:
 def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> dict:
     market_value = _metric_number(position.get("marketValue")) or 0
     position_weight = market_value / total_market_value * 100 if total_market_value else 0
+    quantity = _metric_number(position.get("quantity")) or 0
+    live_price = _metric_number(position.get("lastPrice")) or _metric_number(pick.get("price")) or 0
+    cost_price = _metric_number(position.get("costPrice"))
     pnl_pct = _metric_number(position.get("unrealizedPnlPct"))
     downside_risk = _metric_number(pick.get("downsideRiskScore")) or 0
     pullback_risk = _metric_number(pick.get("pullbackRiskScore")) or 0
+    composite = pick.get("compositeModel") or {}
+    buy_score = float(composite.get("buyScore") or 0)
+    sell_score = float(composite.get("sellScore") or 0)
+    is_etf = pick.get("instrumentType") == "etf"
+    max_weight = 22 if is_etf else 15
     notes = []
 
-    if pick.get("verdict") == "sell" or downside_risk >= DOWNSIDE_URGENT_EXIT_FLOOR:
+    if pick.get("verdict") == "sell" or downside_risk >= DOWNSIDE_URGENT_EXIT_FLOOR or sell_score >= 76:
         action = "exit"
         notes.append(_holding_note("holdingStrategyExit", "danger", score=pick["score"], risk=round(downside_risk, 1)))
-    elif downside_risk >= DOWNSIDE_EXIT_FLOOR or position_weight >= 35:
+        target_weight = 0.0
+    elif downside_risk >= DOWNSIDE_EXIT_FLOOR or sell_score >= 62 or position_weight >= max_weight * 1.35:
         action = "reduce"
-        notes.append(_holding_note("holdingReduceRisk", "warning", risk=round(downside_risk, 1)))
-    elif pick.get("verdict") == "buy" and pick.get("score", 0) >= STRICT_BUY_SCORE_FLOOR and (pnl_pct is None or pnl_pct > -8):
+        notes.append(_holding_note("holdingReduceRisk", "warning", risk=round(max(downside_risk, sell_score), 1)))
+        target_weight = min(max_weight, max(0.0, position_weight * 0.62))
+    elif pick.get("verdict") == "buy" and buy_score >= 68 and (pnl_pct is None or pnl_pct > -8) and position_weight < max_weight:
         action = "add"
         notes.append(_holding_note("holdingAddOnlyInBatches", "info", score=pick["score"]))
+        target_weight = min(max_weight, max(position_weight + 3.0, 8.0 if is_etf else 5.0))
     else:
         action = "hold"
         notes.append(_holding_note("holdingHoldWait", "info", score=pick["score"]))
+        target_weight = min(max_weight, position_weight)
 
     if pnl_pct is not None and pnl_pct <= -20:
         notes.append(_holding_note("holdingLargeLoss", "danger", pnlPct=round(pnl_pct, 1)))
@@ -3231,10 +3642,47 @@ def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> 
     if pnl_pct is not None and pnl_pct >= 12 and (pullback_risk >= PULLBACK_RISK_BLOCK_BUY_FLOOR or _is_overheated_price_jump(pick.get("change"))):
         notes.append(_holding_note("holdingProfitProtect", "warning", pnlPct=round(pnl_pct, 1), risk=round(pullback_risk, 1)))
 
+    target_value = total_market_value * target_weight / 100 if total_market_value and target_weight is not None else market_value
+    suggested_quantity_change = 0
+    if live_price > 0 and quantity > 0:
+        suggested_quantity_change = round((target_value - market_value) / live_price)
+        if action == "exit":
+            suggested_quantity_change = -round(quantity)
+        elif action == "hold" and abs(suggested_quantity_change) < max(1, quantity * 0.05):
+            suggested_quantity_change = 0
+    volatility_pct = float(((pick.get("tPlan") or {}).get("components") or {}).get("volatilityPct") or 3.0)
+    stop_gap = min(0.12, max(0.035, volatility_pct * 0.0075 + downside_risk * 0.00045))
+    take_gap = min(0.18, max(0.055, volatility_pct * 0.010 + max(0, buy_score - sell_score) * 0.0012))
+    stop_loss_price = _round_trade_price(live_price * (1 - stop_gap)) if live_price else None
+    take_profit_price = _round_trade_price(live_price * (1 + take_gap)) if live_price else None
+    if cost_price is not None and live_price:
+        cost_gap = (live_price / cost_price - 1) * 100 if cost_price else None
+        if cost_gap is not None:
+            notes.append(_holding_note("holdingCostGap", "info", gap=round(cost_gap, 1), cost=round(cost_price, 3)))
+    if suggested_quantity_change:
+        notes.append(
+            _holding_note(
+                "holdingSizingPlan",
+                "danger" if action == "exit" else "warning" if suggested_quantity_change < 0 else "info",
+                target=round(target_weight, 1),
+                change=suggested_quantity_change,
+            )
+        )
+    if stop_loss_price:
+        notes.append(_holding_note("holdingStopLossPlan", "warning" if action in {"reduce", "exit"} else "info", price=stop_loss_price))
+    if is_etf and action in {"add", "hold"}:
+        notes.append(_holding_note("holdingEtfCore", "info"))
+
     return {
         "action": action,
         "positionWeightPct": round(position_weight, 1),
-        "notes": notes[:6],
+        "targetWeightPct": round(target_weight, 1),
+        "suggestedQuantityChange": suggested_quantity_change,
+        "stopLossPrice": stop_loss_price,
+        "takeProfitPrice": take_profit_price,
+        "buyScore": round(buy_score, 1),
+        "sellScore": round(sell_score, 1),
+        "notes": notes[:8],
     }
 
 
@@ -3451,6 +3899,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
     opportunity_score, downside_risk_score = _prediction_scores(metrics, score, news_analysis, snapshot.change, breakout_setup_score, pullback_risk_score, fund_flow, trend_profile)
     t_score, t_components = _t_trade_score(snapshot, metrics, news_analysis, breakout_setup_score, pullback_risk_score, downside_risk_score)
     t_plan = _t_trade_plan(snapshot, metrics, t_score, t_components, breakout_setup_score, pullback_risk_score, downside_risk_score)
+    financial_analysis = _financial_analysis(snapshot)
     overall_assessment = _overall_assessment(
         score,
         metrics,
@@ -3479,14 +3928,35 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         snapshot.change,
         fund_flow,
     )
-    verdict = _verdict(score, metrics["risk"], metrics["quality"], metrics["sentiment"], snapshot.change)
+    composite_model = _composite_investment_model(
+        snapshot,
+        metrics,
+        score,
+        overall_assessment,
+        news_analysis,
+        news_heat_analysis,
+        trend_analysis,
+        financial_analysis,
+        t_plan,
+        opportunity_score,
+        downside_risk_score,
+        breakout_setup_score,
+        pullback_risk_score,
+        snapshot.change,
+    )
+    verdict = _composite_verdict(
+        _verdict(score, metrics["risk"], metrics["quality"], metrics["sentiment"], snapshot.change),
+        composite_model,
+        metrics,
+        snapshot.change,
+    )
     reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change, breakout_setup_score, pullback_risk_score, trend_profile)
-    financial_analysis = _financial_analysis(snapshot)
     return {
         "symbol": snapshot.symbol,
         "name": company_name,
         "market": snapshot.market,
         "sector": snapshot.sector,
+        "instrumentType": composite_model["instrumentType"],
         "price": snapshot.price,
         "change": snapshot.change,
         "currency": snapshot.currency,
@@ -3502,6 +3972,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "fundFlow": fund_flow if fund_flow.get("available") else None,
         "overallAssessment": overall_assessment,
         "strategyAssessment": strategy_assessment,
+        "compositeModel": composite_model,
         "prediction": {
             "opportunityScore": opportunity_score,
             "downsideRiskScore": downside_risk_score,

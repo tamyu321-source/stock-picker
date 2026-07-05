@@ -38,6 +38,7 @@ class MarketSnapshot:
     currency: str
     closes: list[float]
     info: dict[str, Any]
+    instrument_type: str = "stock"
 
 
 @dataclass(frozen=True)
@@ -503,6 +504,129 @@ KNOWN_SECTORS = {
     "373220.KS": "Battery Manufacturing",
 }
 
+ETF_SYMBOLS_BY_MARKET = {
+    "US": ["SPY", "VOO", "IVV", "QQQ", "VTI", "IWM", "SCHD", "XLK", "GLD", "TLT"],
+    "CN": ["510300.SS", "510500.SS", "588000.SS", "159919.SZ", "159915.SZ", "512100.SS"],
+    "HK": ["2800.HK", "2828.HK", "3033.HK", "3067.HK", "3088.HK"],
+    "TW": ["0050.TW", "0056.TW", "00878.TW", "006208.TW", "00713.TW"],
+    "JP": ["1306.T", "1321.T", "1348.T", "1545.T", "2558.T"],
+    "KR": ["069500.KS", "102110.KS", "229200.KS", "305720.KS", "360750.KS"],
+    "SG": ["ES3.SI", "G3B.SI", "CLR.SI", "A35.SI", "MBH.SI"],
+}
+
+ETF_NAMES = {
+    "SPY": "SPDR S&P 500 ETF Trust",
+    "VOO": "Vanguard S&P 500 ETF",
+    "IVV": "iShares Core S&P 500 ETF",
+    "QQQ": "Invesco QQQ Trust",
+    "VTI": "Vanguard Total Stock Market ETF",
+    "IWM": "iShares Russell 2000 ETF",
+    "SCHD": "Schwab U.S. Dividend Equity ETF",
+    "XLK": "Technology Select Sector SPDR Fund",
+    "GLD": "SPDR Gold Shares",
+    "TLT": "iShares 20+ Year Treasury Bond ETF",
+    "510300.SS": "CSI 300 ETF",
+    "510500.SS": "CSI 500 ETF",
+    "588000.SS": "STAR 50 ETF",
+    "159919.SZ": "CSI 300 ETF",
+    "159915.SZ": "ChiNext ETF",
+    "512100.SS": "CSI 1000 ETF",
+    "2800.HK": "Tracker Fund of Hong Kong",
+    "2828.HK": "Hang Seng China Enterprises ETF",
+    "3033.HK": "CSOP Hang Seng TECH Index ETF",
+    "3067.HK": "iShares Core Hang Seng Index ETF",
+    "3088.HK": "Hang Seng TECH ETF",
+    "0050.TW": "Yuanta Taiwan 50 ETF",
+    "0056.TW": "Yuanta Taiwan High Dividend ETF",
+    "00878.TW": "Cathay Taiwan ESG Sustainability High Dividend ETF",
+    "006208.TW": "Fubon Taiwan 50 ETF",
+    "00713.TW": "Yuanta Taiwan High Dividend Low Volatility ETF",
+    "1306.T": "NEXT FUNDS TOPIX ETF",
+    "1321.T": "NEXT FUNDS Nikkei 225 ETF",
+    "1348.T": "MAXIS TOPIX ETF",
+    "1545.T": "NEXT FUNDS NASDAQ-100 ETF",
+    "2558.T": "MAXIS S&P 500 ETF",
+    "069500.KS": "KODEX 200 ETF",
+    "102110.KS": "TIGER 200 ETF",
+    "229200.KS": "KODEX KOSDAQ150 ETF",
+    "305720.KS": "KODEX Secondary Battery Industry ETF",
+    "360750.KS": "TIGER US S&P 500 ETF",
+    "ES3.SI": "SPDR Straits Times Index ETF",
+    "G3B.SI": "Nikko AM Singapore STI ETF",
+    "CLR.SI": "Lion-OCBC Securities Hang Seng TECH ETF",
+    "A35.SI": "ABF Singapore Bond Index Fund",
+    "MBH.SI": "Nikko AM SGD Investment Grade Corporate Bond ETF",
+}
+
+ETF_SEARCH_ALIASES = {
+    "SPY": ["S&P 500 ETF", "SPDR S&P 500", "SPY ETF"],
+    "VOO": ["Vanguard S&P 500", "VOO ETF"],
+    "IVV": ["iShares Core S&P 500", "IVV ETF"],
+    "QQQ": ["Nasdaq 100 ETF", "Invesco QQQ", "QQQ ETF"],
+    "VTI": ["Total Stock Market ETF", "VTI ETF"],
+    "IWM": ["Russell 2000 ETF", "IWM ETF"],
+    "SCHD": ["Dividend ETF", "SCHD ETF"],
+    "XLK": ["Technology ETF", "XLK ETF"],
+    "GLD": ["Gold ETF", "GLD ETF"],
+    "TLT": ["Treasury bond ETF", "TLT ETF"],
+    "510300.SS": ["CSI 300 ETF", "沪深300 ETF", "510300"],
+    "510500.SS": ["CSI 500 ETF", "中证500 ETF", "510500"],
+    "588000.SS": ["STAR 50 ETF", "科创50 ETF", "588000"],
+    "159919.SZ": ["CSI 300 ETF", "沪深300 ETF", "159919"],
+    "159915.SZ": ["ChiNext ETF", "创业板 ETF", "159915"],
+    "512100.SS": ["CSI 1000 ETF", "中证1000 ETF", "512100"],
+    "2800.HK": ["Tracker Fund", "Hong Kong tracker fund", "盈富基金"],
+    "2828.HK": ["Hang Seng China Enterprises ETF", "H-share ETF"],
+    "3033.HK": ["Hang Seng TECH ETF", "恒生科技 ETF"],
+    "3067.HK": ["Hang Seng Index ETF"],
+    "3088.HK": ["Hang Seng TECH ETF"],
+    "0050.TW": ["Taiwan 50 ETF", "元大台灣50", "0050"],
+    "0056.TW": ["Taiwan high dividend ETF", "元大高股息", "0056"],
+    "00878.TW": ["Taiwan ESG high dividend ETF", "國泰永續高股息", "00878"],
+    "006208.TW": ["Fubon Taiwan 50", "富邦台50", "006208"],
+    "00713.TW": ["Taiwan low volatility high dividend ETF", "元大台灣高息低波", "00713"],
+    "1306.T": ["TOPIX ETF", "1306 ETF"],
+    "1321.T": ["Nikkei 225 ETF", "1321 ETF"],
+    "1348.T": ["TOPIX ETF", "1348 ETF"],
+    "1545.T": ["NASDAQ 100 ETF Japan", "1545 ETF"],
+    "2558.T": ["S&P 500 ETF Japan", "2558 ETF"],
+    "069500.KS": ["KODEX 200", "KOSPI 200 ETF"],
+    "102110.KS": ["TIGER 200", "KOSPI 200 ETF"],
+    "229200.KS": ["KODEX KOSDAQ150", "KOSDAQ 150 ETF"],
+    "305720.KS": ["Secondary battery ETF", "KODEX battery ETF"],
+    "360750.KS": ["TIGER US S&P 500", "S&P 500 Korea ETF"],
+    "ES3.SI": ["STI ETF", "SPDR Straits Times ETF"],
+    "G3B.SI": ["Nikko AM STI ETF", "Singapore STI ETF"],
+    "CLR.SI": ["Hang Seng TECH ETF Singapore"],
+    "A35.SI": ["Singapore bond ETF", "ABF Singapore Bond Index Fund"],
+    "MBH.SI": ["Singapore corporate bond ETF"],
+}
+
+KNOWN_ETF_SYMBOLS = {symbol for symbols in ETF_SYMBOLS_BY_MARKET.values() for symbol in symbols}
+LOCAL_COMPANY_NAMES.update(ETF_NAMES)
+COMPANY_SEARCH_ALIASES.update(ETF_SEARCH_ALIASES)
+KNOWN_SECTORS.update({symbol: "ETF / Fund" for symbol in KNOWN_ETF_SYMBOLS})
+
+
+def is_known_etf_symbol(symbol: str) -> bool:
+    return symbol.upper() in KNOWN_ETF_SYMBOLS
+
+
+def instrument_type(symbol: str, info: dict[str, Any] | None = None) -> str:
+    info = info or {}
+    quote_type = str(info.get("quoteType") or info.get("instrumentType") or "").strip().upper()
+    if quote_type in {"ETF", "MUTUALFUND", "FUND"}:
+        return "etf"
+    if is_known_etf_symbol(symbol):
+        return "etf"
+    text = " ".join(
+        str(info.get(key) or "")
+        for key in ["shortName", "longName", "category", "fundFamily", "sector", "industry"]
+    ).lower()
+    if "etf" in text or "exchange traded fund" in text or "index fund" in text:
+        return "etf"
+    return "stock"
+
 
 def infer_market(symbol: str) -> str:
     upper = symbol.upper()
@@ -523,6 +647,8 @@ def infer_market(symbol: str) -> str:
 
 def fallback_sector(symbol: str) -> str:
     upper = symbol.upper()
+    if is_known_etf_symbol(upper):
+        return "ETF / Fund"
     if upper in KNOWN_SECTORS:
         return KNOWN_SECTORS[upper]
     return f"{infer_market(symbol)} Equity"
@@ -572,6 +698,8 @@ class YFinanceMarketDataProvider:
                 if volume_surge is not None:
                     info["volumeSurge20"] = round(volume_surge, 2)
             info = _merge_market_fundamentals(symbol, info)
+            kind = instrument_type(symbol, info)
+            info["instrumentType"] = kind
 
             price = closes[-1]
             previous = closes[-2] if len(closes) > 1 else price
@@ -589,6 +717,7 @@ class YFinanceMarketDataProvider:
                 currency=info.get("currency") or "",
                 closes=closes,
                 info=info,
+                instrument_type=kind,
             )
         except Exception:
             return fallback_market_data_provider(symbol)
@@ -648,6 +777,8 @@ class EastmoneyCnMarketDataProvider:
             info["turnoverValue"] = latest["amount"]
         if latest.get("volume") and not info.get("regularMarketVolume"):
             info["regularMarketVolume"] = latest["volume"] * 100
+        kind = instrument_type(upper, info)
+        info["instrumentType"] = kind
         price = closes[-1]
         previous = closes[-2] if len(closes) > 1 else price
         change = latest.get("changePercent")
@@ -665,6 +796,7 @@ class EastmoneyCnMarketDataProvider:
             currency="CNY",
             closes=closes,
             info=info,
+            instrument_type=kind,
         )
 
     def _json(self, url: str) -> dict | list:
@@ -721,6 +853,8 @@ class YahooHttpMarketDataProvider:
         volume_surge = _surge_ratio(volumes)
         if volume_surge is not None:
             fundamentals["volumeSurge20"] = round(volume_surge, 2)
+        kind = instrument_type(symbol, fundamentals)
+        fundamentals["instrumentType"] = kind
         price = float(meta.get("regularMarketPrice") or closes[-1])
         previous = closes[-2] if len(closes) > 1 else price
         change = ((price - previous) / previous * 100) if previous else 0
@@ -744,6 +878,7 @@ class YahooHttpMarketDataProvider:
             currency=meta.get("currency") or _raw(price_info.get("currency")) or "",
             closes=closes[-130:],
             info=fundamentals,
+            instrument_type=kind,
         )
 
     def _chart_urls(self, symbol: str) -> list[str]:
@@ -783,7 +918,7 @@ class YahooHttpMarketDataProvider:
         raise last_error or ValueError("Yahoo Finance request failed.")
 
     def _quote_summary(self, symbol: str) -> dict:
-        modules = "price,summaryProfile,defaultKeyStatistics,financialData,summaryDetail,calendarEvents,earningsTrend"
+        modules = "price,summaryProfile,defaultKeyStatistics,financialData,summaryDetail,calendarEvents,earningsTrend,fundProfile,topHoldings,fundPerformance"
         try:
             payload = self._json(self._quote_summary_urls(symbol, modules), attempts=1, timeout=3)
             results = payload.get("quoteSummary", {}).get("result") or []
@@ -797,7 +932,11 @@ class YahooHttpMarketDataProvider:
         financial = info.get("financialData", {})
         detail = info.get("summaryDetail", {})
         price_info = info.get("price", {})
+        fund_profile = info.get("fundProfile", {})
+        top_holdings = info.get("topHoldings", {})
+        fund_performance = info.get("fundPerformance", {})
         return {
+            "quoteType": _raw(price_info.get("quoteType")) or meta.get("instrumentType"),
             "trailingPE": _raw(detail.get("trailingPE")),
             "forwardPE": _raw(stats.get("forwardPE")),
             "beta": _raw(detail.get("beta")),
@@ -815,7 +954,14 @@ class YahooHttpMarketDataProvider:
             "recommendationKey": _raw(financial.get("recommendationKey")),
             "numberOfAnalystOpinions": _raw(financial.get("numberOfAnalystOpinions")),
             "marketCap": _raw(price_info.get("marketCap")),
+            "totalAssets": _raw(stats.get("totalAssets")) or _raw(fund_profile.get("totalAssets")) or _raw(top_holdings.get("totalAssets")),
+            "annualReportExpenseRatio": _raw(fund_profile.get("annualReportExpenseRatio")) or _raw(fund_profile.get("expenses")),
+            "category": _raw(fund_profile.get("categoryName")) or _raw(fund_profile.get("category")),
+            "fundFamily": _raw(fund_profile.get("family")),
+            "ytdReturn": _raw(fund_performance.get("trailingReturns", {}).get("ytd")) if isinstance(fund_performance.get("trailingReturns"), dict) else None,
             "dividendYield": _raw(detail.get("dividendYield")),
+            "yield": _raw(detail.get("yield")),
+            "navPrice": _raw(detail.get("navPrice")) or meta.get("regularMarketPrice"),
             "fiftyTwoWeekHigh": _raw(detail.get("fiftyTwoWeekHigh")) or meta.get("fiftyTwoWeekHigh"),
             "fiftyTwoWeekLow": _raw(detail.get("fiftyTwoWeekLow")) or meta.get("fiftyTwoWeekLow"),
             "regularMarketVolume": meta.get("regularMarketVolume"),
@@ -847,6 +993,7 @@ class TaiwanExchangeMarketDataProvider:
         name = local_company_name(symbol.upper(), symbol.upper())
         volume = _market_number(latest[1]) if len(latest) > 1 else None
         turnover = _market_number(latest[2]) if len(latest) > 2 else None
+        kind = instrument_type(symbol.upper(), {"shortName": name})
 
         return MarketSnapshot(
             symbol=symbol.upper(),
@@ -863,7 +1010,9 @@ class TaiwanExchangeMarketDataProvider:
                 "fiftyTwoWeekLow": min(closes),
                 "regularMarketVolume": volume,
                 "turnoverValue": turnover,
+                "instrumentType": kind,
             },
+            instrument_type=kind,
         )
 
     def _history_rows(self, code: str) -> list[list[str]]:

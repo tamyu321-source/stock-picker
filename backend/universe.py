@@ -14,11 +14,13 @@ from urllib.request import Request, urlopen
 from backend.data import DEFAULT_SYMBOLS, MARKETS
 from backend.providers import (
     COMPANY_SEARCH_ALIASES,
+    ETF_SYMBOLS_BY_MARKET,
     LOCAL_COMPANY_NAMES,
     Article,
     RssNewsCrawler,
     google_news_url,
     infer_market,
+    is_known_etf_symbol,
     is_recent_article,
     local_company_name,
     recency_weight,
@@ -211,6 +213,12 @@ CURATED_FALLBACK_SYMBOLS = {
     ],
 }
 
+for _market, _symbols in ETF_SYMBOLS_BY_MARKET.items():
+    existing = CURATED_FALLBACK_SYMBOLS.setdefault(_market, [])
+    for _symbol in _symbols:
+        if _symbol not in existing:
+            existing.append(_symbol)
+
 MARKET_NEWS_QUERIES = {
     "CN": [
         "A股 公司 财报 业绩 股价",
@@ -401,6 +409,11 @@ class MarketUniverseProvider:
                 else:
                     errors.append({"market": market, "source": "fallback-search", "error": "No fallback symbols were available."})
 
+            if _unique_symbol_count(source_results) > 0:
+                etf_candidates = self._discover_etfs(market, max(1, min(limit_per_market, 12)))
+                if etf_candidates:
+                    source_results.append(("etf-universe", etf_candidates))
+
             market_symbols = _blend_discovery_sources(source_results, limit_per_market)
             symbols.extend(market_symbols[:limit_per_market])
 
@@ -541,7 +554,8 @@ class MarketUniverseProvider:
             symbol = str(quote.get("symbol") or "").upper()
             if not symbol or infer_market(symbol) != market or not is_common_equity_symbol(symbol, market):
                 continue
-            if quote.get("quoteType") and quote.get("quoteType") != "EQUITY":
+            quote_type = str(quote.get("quoteType") or "EQUITY").upper()
+            if quote_type not in {"EQUITY", "ETF", "MUTUALFUND", "FUND"}:
                 continue
             name = local_company_name(symbol, quote.get("shortname") or quote.get("longname") or quote.get("name") or term)
             output.append(DiscoveredSymbol(symbol=symbol, name=name, market=market, source=f"market-news-search:{term}"))
@@ -575,6 +589,21 @@ class MarketUniverseProvider:
                         source=f"market-news-eastmoney:{term}",
                     )
                 )
+        return output
+
+    def _discover_etfs(self, market: str, limit: int) -> list[DiscoveredSymbol]:
+        output = []
+        for symbol in ETF_SYMBOLS_BY_MARKET.get(market, []):
+            output.append(
+                DiscoveredSymbol(
+                    symbol=symbol,
+                    name=local_company_name(symbol, symbol),
+                    market=market,
+                    source="curated-etf-universe",
+                )
+            )
+            if len(output) >= limit:
+                break
         return output
 
     def _discover_market(self, market: str, limit: int) -> list[DiscoveredSymbol]:
@@ -622,7 +651,8 @@ class MarketUniverseProvider:
                     continue
                 if not is_common_equity_symbol(symbol, market):
                     continue
-                if quote.get("quoteType") and quote.get("quoteType") != "EQUITY":
+                quote_type = str(quote.get("quoteType") or "EQUITY").upper()
+                if quote_type not in {"EQUITY", "ETF", "MUTUALFUND", "FUND"}:
                     continue
                 name = local_company_name(symbol, quote.get("shortname") or quote.get("longname") or quote.get("name") or symbol)
                 output.append(DiscoveredSymbol(symbol=symbol, name=name, market=market, source=f"yahoo-search-fallback:{term}"))
@@ -649,6 +679,7 @@ class MarketUniverseProvider:
                     symbols.append(DiscoveredSymbol(symbol=symbol, name=name, market="US", source=f"yahoo-screener:{screener}"))
             if len(symbols) >= limit:
                 break
+        symbols = _merge_unique_symbols(symbols, self._discover_etfs("US", max(1, min(10, limit))))
         return symbols[:limit]
 
     def _discover_eastmoney_cn(self, limit: int) -> list[DiscoveredSymbol]:
@@ -841,6 +872,8 @@ def _number(value) -> float:
 
 
 def is_common_equity_symbol(symbol: str, market: str) -> bool:
+    if is_known_etf_symbol(symbol):
+        return True
     base = symbol.split(".")[0]
     if market == "CN":
         return base.startswith(("600", "601", "603", "605", "688", "000", "001", "002", "003", "300", "301"))
@@ -923,7 +956,12 @@ def _manual_symbol_candidates(query: str, allowed_markets: set[str]) -> list[str
         return [symbol] if market in allowed_markets and is_common_equity_symbol(symbol, market) else []
 
     if re.fullmatch(r"\d{6}", normalized) and "CN" in allowed_markets:
-        symbol = f"{normalized}.SS" if normalized.startswith("6") else f"{normalized}.SZ"
+        if is_known_etf_symbol(f"{normalized}.SS"):
+            symbol = f"{normalized}.SS"
+        elif is_known_etf_symbol(f"{normalized}.SZ"):
+            symbol = f"{normalized}.SZ"
+        else:
+            symbol = f"{normalized}.SS" if normalized.startswith("6") else f"{normalized}.SZ"
         return [symbol] if is_common_equity_symbol(symbol, "CN") else []
 
     if re.fullmatch(r"\d{4,5}\.HK", normalized):
@@ -1138,9 +1176,10 @@ def _blend_discovery_sources(source_results: list[tuple[str, list[DiscoveredSymb
     if limit <= 0:
         return []
     source_shares = {
-        "local-news": 0.30,
-        "google-news": 0.22,
-        "market-universe": 0.38,
+        "local-news": 0.28,
+        "google-news": 0.20,
+        "market-universe": 0.34,
+        "etf-universe": 0.12,
         "fallback-search": 0.10,
     }
     output: list[DiscoveredSymbol] = []
