@@ -24,10 +24,10 @@ env:
   PROJECT_ID: stock-picker-prod
   REGION: asia-east1
   SERVICE: stock-picker-api
-  CLOUD_RUN_API_ACCESS_KEYS: ${{ vars.CLOUD_RUN_API_ACCESS_KEYS }}
 
 jobs:
   deploy:
+    name: Deploy API
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -39,21 +39,22 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
       - name: Deploy API to Cloud Run
-        id: deploy
-        uses: google-github-actions/deploy-cloudrun@v3
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-          service: ${{ env.SERVICE }}
-          region: ${{ env.REGION }}
-          source: .
-          env_vars: |-
-            ALLOWED_ORIGINS=https://tamyu321-source.github.io
-            API_ACCESS_KEYS=${{ env.CLOUD_RUN_API_ACCESS_KEYS }}
-          env_vars_update_strategy: merge
-          flags: |-
-            --allow-unauthenticated
-            --max-instances=2
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --project "$PROJECT_ID" \
+            --source . \
+            --region "$REGION" \
+            --allow-unauthenticated \
+            --max-instances 2 \
+            --set-env-vars "ALLOWED_ORIGINS=https://tamyu321-source.github.io,API_ACCESS_KEYS=${{ vars.CLOUD_RUN_API_ACCESS_KEYS }}"
 
       - name: Show service URL
-        run: echo "Cloud Run URL: ${{ steps.deploy.outputs.url }}"
+        run: |
+          gcloud run services describe "$SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format "value(status.url)"
