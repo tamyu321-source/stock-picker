@@ -12,6 +12,7 @@ type ResultVerdictFilter = 'all' | Pick['verdict'] | 't';
 type ResultSortKey =
   | 'recommended'
   | 'overall'
+  | 'decision'
   | 'score'
   | 'todayBuy'
   | 'futureRise'
@@ -103,7 +104,7 @@ const SAVED_SCAN_LIMIT = 6;
 const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
 const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 't', 'watch', 'sell'];
-const resultSortOptions: ResultSortKey[] = ['recommended', 'overall', 'score', 'todayBuy', 'futureRise', 'profitableExit', 'newsHeat', 'continuation', 'riskLow', 'tScore', 'change', 'confidence'];
+const resultSortOptions: ResultSortKey[] = ['recommended', 'decision', 'overall', 'score', 'todayBuy', 'futureRise', 'profitableExit', 'newsHeat', 'continuation', 'riskLow', 'tScore', 'change', 'confidence'];
 const languageOptions: Array<{ id: Locale; label: string; shortLabel: string; flagClass: string }> = [
   { id: 'en', label: 'English', shortLabel: 'EN', flagClass: 'flag-uk' },
   { id: 'zh-CN', label: '简体中文', shortLabel: '简', flagClass: 'flag-cn' },
@@ -1148,10 +1149,13 @@ function overallSuitabilityLabel(suitability: OverallSuitability) {
 }
 
 function finalVerdictLabel(pick: Pick) {
+  if (pick.decisionEngine) return decisionActionLabel(pick.decisionEngine.action);
   return pick.overallAssessment ? overallSuitabilityLabel(pick.overallAssessment.suitability) : verdictLabel(pick.verdict);
 }
 
 function finalVerdictBucket(pick: Pick): Pick['verdict'] {
+  if (pick.decisionEngine?.action === 'accumulate') return 'buy';
+  if (pick.decisionEngine?.action === 'exit') return 'sell';
   const suitability = pick.overallAssessment?.suitability;
   if (suitability === 'strongBuy' || suitability === 'buy') return 'buy';
   if (suitability === 'sell') return 'sell';
@@ -1189,6 +1193,7 @@ function resultVerdictFilterLabel(option: ResultVerdictFilter) {
 function resultSortLabel(option: ResultSortKey) {
   const labels: Record<ResultSortKey, Partial<Record<Locale, string>> & { en: string }> = {
     recommended: { en: 'AI recommended', 'zh-CN': 'AI 推荐顺序', 'zh-TW': 'AI 推薦順序', 'nan-TW': 'AI 推薦順序', ja: 'AI 推奨順', ko: 'AI 추천순' },
+    decision: { en: 'Decision rank', 'zh-CN': '决策排序', 'zh-TW': '決策排序', 'nan-TW': '決策排序', ja: '判断順位', ko: '의사결정 순위' },
     overall: { en: 'Final total', 'zh-CN': '最终总评', 'zh-TW': '最終總評', 'nan-TW': '最終總評', ja: '最終評価', ko: '최종 종합' },
     score: { en: 'Base score', 'zh-CN': '原始评分', 'zh-TW': '原始評分', 'nan-TW': '原始評分', ja: '基本スコア', ko: '기본 점수' },
     todayBuy: { en: 'Worth buying today', 'zh-CN': '今日买入', 'zh-TW': '今日買入', 'nan-TW': '今仔日買', ja: '本日買い', ko: '오늘 매수' },
@@ -1230,7 +1235,8 @@ function sortFieldLabel() {
 
 function pickSortValue(pick: Pick, option: ResultSortKey) {
   if (option === 'recommended') return null;
-  if (option === 'overall') return pick.overallAssessment?.totalScore;
+  if (option === 'decision') return pick.decisionEngine?.rankScore ?? pick.compositeModel?.rankScore;
+  if (option === 'overall') return pick.decisionEngine?.rankScore ?? pick.overallAssessment?.totalScore;
   if (option === 'score') return pick.score;
   if (option === 'todayBuy') return pick.overallAssessment?.components.todayBuyScore ?? pick.prediction?.todayBuyScore;
   if (option === 'futureRise') return pick.overallAssessment?.components.futureRiseScore ?? pick.prediction?.futureRiseScore ?? pick.opportunityScore;
@@ -2019,7 +2025,11 @@ function currentScanMarkdown() {
     lines.push('');
     lines.push(`- Market: ${marketLabel(pick.market)}`);
     lines.push(`- Verdict: ${finalVerdictLabel(pick)}`);
-    lines.push(`- Score: ${pick.score}/100`);
+    if (pick.decisionEngine) {
+      lines.push(`- ${decisionEngineTitle()}: ${decisionRegimeLabel(pick.decisionEngine.regime.name)} · ${decisionActionLabel(pick.decisionEngine.action)} · rank ${formatEngineScore(pick.decisionEngine.rankScore)}`);
+      lines.push(`- ${dataQualityLabel(pick.decisionEngine.dataQuality.level)}: ${formatEngineScore(pick.decisionEngine.dataQuality.score)}/100`);
+    }
+    lines.push(`- Base score: ${pick.score}/100`);
     lines.push(`- Confidence: ${pick.confidence}%`);
     lines.push(`- Price: ${pick.currency} ${pick.price} (${pick.change > 0 ? '+' : ''}${pick.change}%)`);
     if (pick.overallAssessment) lines.push(`- ${t.value.finalReview}: ${markdownLine(pointLabel(pick.overallAssessment.summary))}`);
@@ -2140,6 +2150,102 @@ function signedQuantityLabel(value: number | null | undefined) {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number) || number === 0) return '0';
   return `${number > 0 ? '+' : ''}${number}`;
+}
+
+function decisionEngineTitle() {
+  return localeText({
+    en: 'Decision engine',
+    'zh-CN': '决策引擎',
+    'zh-TW': '決策引擎',
+    ja: '判断エンジン',
+    ko: '의사결정 엔진'
+  });
+}
+
+function decisionActionLabel(action: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    accumulate: { en: 'Accumulate', 'zh-CN': '分批买入', 'zh-TW': '分批買入', ja: '段階的に買い', ko: '분할 매수' },
+    hold: { en: 'Hold / wait', 'zh-CN': '持有观察', 'zh-TW': '持有觀察', ja: '保有/待機', ko: '보유/대기' },
+    reduce: { en: 'Reduce risk', 'zh-CN': '降低风险', 'zh-TW': '降低風險', ja: 'リスク削減', ko: '리스크 축소' },
+    exit: { en: 'Exit', 'zh-CN': '退出', 'zh-TW': '退出', ja: '撤退', ko: '이탈' }
+  };
+  return localeText(labels[action || 'hold'] ?? labels.hold);
+}
+
+function decisionRegimeLabel(regime: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    quality_compounder: { en: 'Quality compounder', 'zh-CN': '优质复利股', 'zh-TW': '優質複利股', ja: '高品質成長', ko: '우량 복리형' },
+    momentum_breakout: { en: 'Momentum breakout', 'zh-CN': '动能突破', 'zh-TW': '動能突破', ja: 'モメンタム突破', ko: '모멘텀 돌파' },
+    deep_value_turnaround: { en: 'Value turnaround', 'zh-CN': '低估修复', 'zh-TW': '低估修復', ja: '割安反転', ko: '가치 반등' },
+    event_driven: { en: 'Event driven', 'zh-CN': '事件催化', 'zh-TW': '事件催化', ja: 'イベント主導', ko: '이벤트 주도' },
+    falling_knife: { en: 'Falling knife', 'zh-CN': '下跌破位', 'zh-TW': '下跌破位', ja: '急落リスク', ko: '급락 리스크' },
+    overheated: { en: 'Overheated', 'zh-CN': '短线过热', 'zh-TW': '短線過熱', ja: '過熱', ko: '과열' },
+    balanced_watch: { en: 'Balanced watch', 'zh-CN': '综合观察', 'zh-TW': '綜合觀察', ja: '総合監視', ko: '종합 관찰' },
+    insufficient_data: { en: 'Insufficient data', 'zh-CN': '数据不足', 'zh-TW': '資料不足', ja: 'データ不足', ko: '데이터 부족' },
+    defensive_etf_core: { en: 'Core ETF', 'zh-CN': '核心 ETF', 'zh-TW': '核心 ETF', ja: 'コアETF', ko: '코어 ETF' },
+    sector_etf_tactical: { en: 'Tactical ETF', 'zh-CN': '战术 ETF', 'zh-TW': '戰術 ETF', ja: '戦術ETF', ko: '전술 ETF' }
+  };
+  return localeText(labels[regime || 'balanced_watch'] ?? labels.balanced_watch);
+}
+
+function dataQualityLabel(level: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    strong: { en: 'Strong data', 'zh-CN': '数据充分', 'zh-TW': '資料充分', ja: '強いデータ', ko: '데이터 강함' },
+    usable: { en: 'Usable data', 'zh-CN': '数据可用', 'zh-TW': '資料可用', ja: '利用可能', ko: '사용 가능' },
+    thin: { en: 'Thin data', 'zh-CN': '数据偏薄', 'zh-TW': '資料偏薄', ja: 'データ薄め', ko: '데이터 부족' },
+    weak: { en: 'Weak data', 'zh-CN': '数据不足', 'zh-TW': '資料不足', ja: 'データ不足', ko: '데이터 약함' }
+  };
+  return localeText(labels[level || 'thin'] ?? labels.thin);
+}
+
+function decisionGateLabel(key: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    dataQualityTooWeak: { en: 'Data quality blocks new buy', 'zh-CN': '数据质量不足，阻止买入', 'zh-TW': '資料品質不足，阻止買入', ja: 'データ品質が買いを阻止', ko: '데이터 품질이 매수를 제한' },
+    severePriceBreakdown: { en: 'Severe price breakdown', 'zh-CN': '严重破位下跌', 'zh-TW': '嚴重破位下跌', ja: '深刻な下落', ko: '심각한 가격 이탈' },
+    largePriceBreakdown: { en: 'Large price breakdown', 'zh-CN': '明显破位下跌', 'zh-TW': '明顯破位下跌', ja: '大きな下落', ko: '큰 가격 이탈' },
+    downsideRiskUrgent: { en: 'Urgent downside risk', 'zh-CN': '下行风险紧急', 'zh-TW': '下行風險緊急', ja: '下落リスク大', ko: '하방 리스크 긴급' },
+    downsideRiskHigh: { en: 'High downside risk', 'zh-CN': '下行风险偏高', 'zh-TW': '下行風險偏高', ja: '下落リスク高め', ko: '하방 리스크 높음' },
+    reversalRiskHigh: { en: 'Reversal risk high', 'zh-CN': '反转风险偏高', 'zh-TW': '反轉風險偏高', ja: '反転リスク高め', ko: '반전 리스크 높음' },
+    pullbackRiskExtreme: { en: 'Pullback risk extreme', 'zh-CN': '回撤风险极高', 'zh-TW': '回撤風險極高', ja: '反落リスク極大', ko: '되돌림 리스크 극단' },
+    negativeNewsDominates: { en: 'Negative news dominates', 'zh-CN': '负面新闻占优', 'zh-TW': '負面新聞占優', ja: '悪材料優勢', ko: '부정 뉴스 우세' },
+    negativeNewsSevere: { en: 'Severe negative news', 'zh-CN': '重大负面新闻', 'zh-TW': '重大負面新聞', ja: '重大悪材料', ko: '중대 부정 뉴스' },
+    liquidityTooWeak: { en: 'Liquidity too weak', 'zh-CN': '流动性不足', 'zh-TW': '流動性不足', ja: '流動性不足', ko: '유동성 부족' },
+    etfLiquidityWeak: { en: 'ETF liquidity weak', 'zh-CN': 'ETF 流动性偏弱', 'zh-TW': 'ETF 流動性偏弱', ja: 'ETF流動性弱め', ko: 'ETF 유동성 약함' },
+    financialQualityWeak: { en: 'Financial quality weak', 'zh-CN': '财务质量偏弱', 'zh-TW': '財務品質偏弱', ja: '財務品質弱め', ko: '재무 품질 약함' }
+  };
+  return localeText(labels[key || ''] ?? { en: String(key ?? ''), 'zh-CN': String(key ?? ''), 'zh-TW': String(key ?? ''), ja: String(key ?? ''), ko: String(key ?? '') });
+}
+
+function decisionReasonLabel(reason: string) {
+  if (reason.startsWith('regime:')) return decisionRegimeLabel(reason.replace('regime:', ''));
+  if (reason.startsWith('dataQuality:')) return dataQualityLabel(reason.replace('dataQuality:', ''));
+  if (reason === 'legacyWeights:secondary') {
+    return localeText({
+      en: 'Legacy weights are secondary',
+      'zh-CN': '旧权重仅作辅助',
+      'zh-TW': '舊權重僅作輔助',
+      ja: '旧ウェイトは補助',
+      ko: '기존 가중치는 보조'
+    });
+  }
+  return decisionGateLabel(reason);
+}
+
+function formatEngineScore(value: number | undefined) {
+  const numeric = Number(value ?? 0);
+  return Number.isFinite(numeric) ? numeric.toFixed(1) : '0.0';
+}
+
+function engineCoverageLabel(pick: Pick) {
+  const engine = pick.decisionEngine;
+  if (!engine) return '';
+  const price = formatEngineScore(engine.dataQuality.priceHistoryScore);
+  const news = formatEngineScore(engine.dataQuality.newsCoverageScore);
+  if (locale.value === 'en') return `${price} price · ${news} news`;
+  if (locale.value === 'zh-CN') return `${price} 价格 · ${news} 新闻`;
+  if (locale.value === 'ja') return `${price} 価格 · ${news} ニュース`;
+  if (locale.value === 'ko') return `${price} 가격 · ${news} 뉴스`;
+  return `${price} 價格 · ${news} 新聞`;
 }
 
 function scoreWeightLabel(item: { weight: number; baseWeight?: number; available?: boolean }) {
@@ -2333,6 +2439,9 @@ function reportWatchItems(pick: Pick) {
 }
 
 function reportSummaryTitle(pick: Pick) {
+  if (pick.decisionEngine) {
+    return `${decisionRegimeLabel(pick.decisionEngine.regime.name)} · ${decisionActionLabel(pick.decisionEngine.action)}`;
+  }
   const summary = pick.overallAssessment?.summary ?? pick.decision?.summary ?? pick.actionPlan?.summary;
   return summary ? pointLabel(summary) : finalVerdictLabel(pick);
 }
@@ -2347,6 +2456,14 @@ function reportSummarySubtitle(pick: Pick) {
 }
 
 function reportMetricItems(pick: Pick) {
+  if (pick.decisionEngine) {
+    return [
+      { key: 'decisionRank', label: resultSortLabel('decision'), value: `${formatEngineScore(pick.decisionEngine.rankScore)}/100`, score: pick.decisionEngine.rankScore },
+      { key: 'buyScore', label: decisionActionLabel('accumulate'), value: `${formatEngineScore(pick.decisionEngine.buyScore)}/100`, score: pick.decisionEngine.buyScore },
+      { key: 'sellScore', label: decisionActionLabel('reduce'), value: `${formatEngineScore(pick.decisionEngine.sellScore)}/100`, score: pick.decisionEngine.sellScore },
+      { key: 'dataQuality', label: dataQualityLabel(pick.decisionEngine.dataQuality.level), value: `${formatEngineScore(pick.decisionEngine.dataQuality.score)}/100`, score: pick.decisionEngine.dataQuality.score }
+    ];
+  }
   const metrics = pick.overallAssessment?.metrics?.slice(0, 5).map((metric) => ({
     key: metric.key,
     label: overallMetricLabel(metric),
@@ -2361,6 +2478,13 @@ function reportMetricItems(pick: Pick) {
 }
 
 function primaryScoreCaption(pick: Pick) {
+  if (pick.decisionEngine) {
+    if (locale.value === 'en') return 'Decision';
+    if (locale.value === 'zh-CN') return '决策分';
+    if (locale.value === 'ja') return '判断点';
+    if (locale.value === 'ko') return '판단점수';
+    return '決策分';
+  }
   if (!pick.overallAssessment) return t.value.score;
   if (locale.value === 'en') return 'Final';
   if (locale.value === 'zh-CN') return '最终分';
@@ -5038,7 +5162,7 @@ onUnmounted(() => {
               </div>
               <div class="score-pill">
                 <span>{{ primaryScoreCaption(pick) }}</span>
-                <strong>{{ pick.overallAssessment?.totalScore ?? pick.score }}</strong>
+                <strong>{{ pick.decisionEngine?.rankScore ?? pick.overallAssessment?.totalScore ?? pick.score }}</strong>
               </div>
             </div>
             <div class="pick-toolbar">
@@ -5050,6 +5174,8 @@ onUnmounted(() => {
             <div class="metric-row">
               <span>{{ finalVerdictLabel(pick) }}</span>
               <span>{{ t.confidence }} {{ pick.confidence }}%</span>
+              <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.action">{{ decisionRegimeLabel(pick.decisionEngine.regime.name) }}</span>
+              <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.dataQuality.level">{{ dataQualityLabel(pick.decisionEngine.dataQuality.level) }} {{ formatEngineScore(pick.decisionEngine.dataQuality.score) }}</span>
               <span>{{ predictionScoreLabel('opportunity', pick) }}</span>
               <span>{{ predictionScoreLabel('setup', pick) }}</span>
               <span>{{ predictionScoreLabel('downside', pick) }}</span>
@@ -5061,7 +5187,41 @@ onUnmounted(() => {
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
             </div>
 
-            <div class="integrated-report" :class="pick.overallAssessment?.suitability ?? pick.verdict">
+            <div v-if="pick.decisionEngine" class="research-panel decision-engine-panel" :class="[pick.decisionEngine.action, pick.decisionEngine.dataQuality.level]">
+              <strong>{{ decisionEngineTitle() }} · {{ decisionActionLabel(pick.decisionEngine.action) }}</strong>
+              <div class="engine-summary-grid">
+                <div>
+                  <span>{{ resultSortLabel('decision') }}</span>
+                  <b>{{ formatEngineScore(pick.decisionEngine.rankScore) }}</b>
+                  <small>{{ decisionRegimeLabel(pick.decisionEngine.regime.name) }}</small>
+                </div>
+                <div>
+                  <span>{{ t.riskControls }}</span>
+                  <b>{{ formatEngineScore(pick.decisionEngine.sellScore) }}</b>
+                  <small>{{ formatEngineScore(pick.decisionEngine.riskRewardScore) }} RR</small>
+                </div>
+                <div>
+                  <span>{{ dataQualityLabel(pick.decisionEngine.dataQuality.level) }}</span>
+                  <b>{{ formatEngineScore(pick.decisionEngine.dataQuality.score) }}</b>
+                  <small>{{ engineCoverageLabel(pick) }}</small>
+                </div>
+                <div>
+                  <span>{{ t.confidence }}</span>
+                  <b>{{ formatEngineScore(pick.decisionEngine.confidenceScore) }}%</b>
+                  <small>{{ decisionReasonLabel('legacyWeights:secondary') }}</small>
+                </div>
+              </div>
+              <div v-if="pick.decisionEngine.gates?.length" class="engine-gate-list">
+                <span v-for="gate in pick.decisionEngine.gates" :key="gate.key + gate.kind" :class="gate.severity">
+                  {{ decisionGateLabel(gate.key) }}
+                </span>
+              </div>
+              <div class="engine-reason-list">
+                <span v-for="reason in pick.decisionEngine.primaryReasons || []" :key="reason">{{ decisionReasonLabel(reason) }}</span>
+              </div>
+            </div>
+
+            <div class="integrated-report" :class="finalVerdictBucket(pick)">
               <div class="integrated-report-heading">
                 <div>
                   <strong>{{ t.finalReview }} · {{ reportSummaryTitle(pick) }}</strong>

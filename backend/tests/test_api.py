@@ -1753,6 +1753,13 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         pick = response.get_json()["picks"][0]
         self.assertIn("scoreBreakdown", pick)
+        self.assertIn("decisionEngine", pick)
+        self.assertEqual(pick["decisionEngine"]["version"], "scenario-v1")
+        self.assertEqual(pick["decisionEngine"]["legacyWeightRole"], "secondary")
+        self.assertIn(pick["decisionEngine"]["action"], {"accumulate", "hold", "reduce", "exit"})
+        self.assertIn(pick["decisionEngine"]["regime"]["name"], {"quality_compounder", "momentum_breakout", "deep_value_turnaround", "event_driven", "falling_knife", "overheated", "balanced_watch", "insufficient_data", "defensive_etf_core", "sector_etf_tactical"})
+        self.assertIn("dataQuality", pick["decisionEngine"])
+        self.assertEqual(pick["compositeModel"]["weights"]["legacyWeights"], 0)
         self.assertIn("opportunityScore", pick)
         self.assertIn("downsideRiskScore", pick)
         self.assertIn("nextSessionContinuationScore", pick)
@@ -1790,6 +1797,66 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("actionPlan", pick)
         self.assertIn("steps", pick["actionPlan"])
 
+    def test_decision_engine_risk_gate_overrides_positive_weight_score(self):
+        class PriceBreakdownProvider:
+            def fetch(self, symbol):
+                closes = [100 + index * 0.05 for index in range(128)] + [108.0, 96.0]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Risk Gate Corp",
+                    market="US",
+                    sector="Technology",
+                    price=96.0,
+                    change=-11.1,
+                    currency="USD",
+                    closes=closes,
+                    info={
+                        "trailingPE": 18,
+                        "returnOnEquity": 0.2,
+                        "profitMargins": 0.18,
+                        "debtToEquity": 24,
+                        "regularMarketVolume": 9_000_000,
+                        "marketCap": 40_000_000_000,
+                        "fiftyTwoWeekHigh": 125,
+                        "fiftyTwoWeekLow": 82,
+                    },
+                )
+
+        class PositiveNewsCrawler:
+            def fetch(self, symbol, name):
+                return [
+                    Article(
+                        source="Test RSS",
+                        title=f"{name} reports strong growth and analyst upgrade",
+                        summary="Revenue beats expectations and guidance raised",
+                        link="https://example.com/risk-gate",
+                        published_at=datetime.now(timezone.utc),
+                        sentiment=0.85,
+                        credibility=0.9,
+                        relevance=1.0,
+                    )
+                ]
+
+        client = create_app(PriceBreakdownProvider(), PositiveNewsCrawler(), FakeUniverseProvider()).test_client()
+        response = client.post(
+            "/api/analyze",
+            json={
+                "markets": ["US"],
+                "symbols": ["RISK"],
+                "strategyId": "balanced",
+                "customWeights": {"sentiment": 95, "momentum": 1, "value": 1, "risk": 1, "quality": 2},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        gate_keys = {gate["key"] for gate in pick["decisionEngine"]["gates"]}
+        self.assertIn("severePriceBreakdown", gate_keys)
+        self.assertEqual(pick["decisionEngine"]["action"], "exit")
+        self.assertEqual(pick["verdict"], "sell")
+        self.assertLessEqual(pick["decisionEngine"]["buyScore"], 30)
+        self.assertEqual(pick["decisionEngine"]["legacyWeightRole"], "secondary")
+
     def test_etf_analysis_uses_fund_specific_metrics_and_composite_model(self):
         class EtfMarketProvider:
             def fetch(self, symbol):
@@ -1825,6 +1892,8 @@ class ApiTestCase(unittest.TestCase):
         pick = response.get_json()["picks"][0]
         self.assertEqual(pick["instrumentType"], "etf")
         self.assertEqual(pick["compositeModel"]["instrumentType"], "etf")
+        self.assertEqual(pick["decisionEngine"]["instrumentType"], "etf")
+        self.assertIn(pick["decisionEngine"]["regime"]["name"], {"defensive_etf_core", "sector_etf_tactical"})
         self.assertIn(pick["compositeModel"]["decision"], {"accumulate", "hold", "reduce", "exit"})
         metric_keys = {metric["key"] for metric in pick["financialAnalysis"]["metrics"]}
         self.assertIn("etfTrend", metric_keys)

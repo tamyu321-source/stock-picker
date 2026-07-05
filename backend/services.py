@@ -7,6 +7,7 @@ from math import exp, log10
 from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
+from backend.decision_engine import build_decision_engine
 from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceMarketDataProvider, infer_market, instrument_type, local_company_name, volatility_score
 from backend.strategy_library import DETAILED_WEIGHT_KEYS, all_runtime_strategies, get_strategy_catalog
 from backend.universe import DiscoveredSymbol, MarketUniverseProvider
@@ -439,20 +440,81 @@ def _verdict(
     return "watch"
 
 
+def _decision_engine_for(pick: dict) -> dict:
+    engine = pick.get("decisionEngine")
+    return engine if isinstance(engine, dict) else {}
+
+
+def _decision_engine_gate_kinds(pick: dict) -> set[str]:
+    engine = _decision_engine_for(pick)
+    return {str(gate.get("kind")) for gate in engine.get("gates") or []}
+
+
+def _decision_engine_blocks_buy(pick: dict) -> bool:
+    return bool(_decision_engine_gate_kinds(pick) & {"blockBuy", "forceReduce", "exitCandidate"})
+
+
+def _decision_engine_buy_candidate(pick: dict) -> bool:
+    engine = _decision_engine_for(pick)
+    if not engine:
+        return False
+    return (
+        engine.get("verdict") == "buy"
+        and engine.get("action") == "accumulate"
+        and not _decision_engine_blocks_buy(pick)
+        and float(engine.get("buyScore") or 0) >= 72
+        and float(engine.get("sellScore") or 100) <= 50
+        and float((engine.get("dataQuality") or {}).get("score") or 0) >= 45
+    )
+
+
+def _decision_engine_exit_candidate(pick: dict, urgent: bool = False) -> bool:
+    engine = _decision_engine_for(pick)
+    if not engine:
+        return False
+    gate_kinds = _decision_engine_gate_kinds(pick)
+    sell_score = float(engine.get("sellScore") or 0)
+    if urgent:
+        return engine.get("action") == "exit" or "exitCandidate" in gate_kinds or sell_score >= 78
+    return engine.get("action") == "exit" or "exitCandidate" in gate_kinds or sell_score >= 76
+
+
+def _apply_engine_verdict(pick: dict, urgent_exit_only: bool = False) -> None:
+    pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
+    if _is_buy_candidate(pick):
+        pick["verdict"] = "buy"
+        pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}]
+    elif _is_urgent_exit_candidate(pick) if urgent_exit_only else _is_exit_candidate(pick):
+        pick["verdict"] = "sell"
+    else:
+        pick["verdict"] = "watch"
+    pick["decision"] = _decision_details(
+        pick["verdict"],
+        pick["score"],
+        pick["metrics"],
+        pick["signals"],
+        pick["newsAnalysis"],
+        pick.get("change"),
+        pick.get("breakoutSetupScore"),
+        pick.get("pullbackRiskScore"),
+        pick.get("fundFlow"),
+    )
+    pick["actionPlan"] = _action_plan(
+        pick["verdict"],
+        pick["score"],
+        pick["metrics"],
+        pick["newsAnalysis"],
+        pick["financialAnalysis"],
+        pick.get("change"),
+        pick.get("pullbackRiskScore"),
+    )
+
+
 def _relative_verdicts(picks: list[dict]) -> None:
     if not picks:
         return
     for pick in picks:
-        pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
-        if _is_buy_candidate(pick):
-            pick["verdict"] = "buy"
-            pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}]
-        elif _is_exit_candidate(pick):
-            pick["verdict"] = "sell"
-        else:
-            pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"), pick.get("breakoutSetupScore"), pick.get("pullbackRiskScore"), pick.get("fundFlow"))
-        pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"], pick.get("change"), pick.get("pullbackRiskScore"))
+        _apply_engine_verdict(pick)
 
     for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
         pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index}})
@@ -464,6 +526,15 @@ def _investment_priority(pick: dict) -> float:
     overall = pick.get("overallAssessment") or {}
     strategy_assessment = pick.get("strategyAssessment") or {}
     composite = pick.get("compositeModel") or {}
+    engine = _decision_engine_for(pick)
+    if engine.get("rankScore") is not None:
+        return round(
+            float(engine.get("rankScore") or 0) * 0.82
+            + float(engine.get("riskRewardScore") or 0) * 0.08
+            + float(strategy_assessment.get("sortScore") or 0) * 0.06
+            + setup_score * 0.04,
+            3,
+        )
     if composite.get("rankScore") is not None and strategy_assessment.get("sortScore") is not None:
         return round(
             float(strategy_assessment.get("sortScore") or 0) * 0.52
@@ -512,6 +583,14 @@ def _investment_priority(pick: dict) -> float:
 
 def _sell_priority(pick: dict) -> float:
     metrics = pick["metrics"]
+    engine = _decision_engine_for(pick)
+    if engine.get("sellScore") is not None:
+        return round(
+            float(engine.get("sellScore") or 0) * 0.80
+            + float(pick.get("downsideRiskScore") or 0) * 0.16
+            + (12 if _is_severe_price_drop(pick.get("change")) else 5 if _is_large_price_drop(pick.get("change")) else 0),
+            3,
+        )
     composite = pick.get("compositeModel") or {}
     if composite.get("sellScore") is not None:
         return round(
@@ -535,6 +614,8 @@ def _sell_priority(pick: dict) -> float:
 
 
 def _is_exit_candidate(pick: dict) -> bool:
+    if _decision_engine_for(pick):
+        return _decision_engine_exit_candidate(pick)
     metrics = pick["metrics"]
     composite = pick.get("compositeModel") or {}
     return (
@@ -547,6 +628,8 @@ def _is_exit_candidate(pick: dict) -> bool:
 
 
 def _is_urgent_exit_candidate(pick: dict) -> bool:
+    if _decision_engine_for(pick):
+        return _decision_engine_exit_candidate(pick, urgent=True)
     metrics = pick["metrics"]
     composite = pick.get("compositeModel") or {}
     return (
@@ -1119,6 +1202,8 @@ def _is_breakout_setup_candidate(pick: dict) -> bool:
 
 
 def _is_strategy_buy_candidate(pick: dict) -> bool:
+    if _decision_engine_for(pick):
+        return _decision_engine_buy_candidate(pick)
     assessment = pick.get("strategyAssessment") or {}
     if not assessment:
         return False
@@ -1135,6 +1220,8 @@ def _is_strategy_buy_candidate(pick: dict) -> bool:
 
 
 def _is_etf_investment_candidate(pick: dict) -> bool:
+    if _decision_engine_for(pick):
+        return _decision_engine_buy_candidate(pick)
     composite = pick.get("compositeModel") or {}
     metrics = pick["metrics"]
     trend = pick.get("trendAnalysis") or {}
@@ -1154,6 +1241,8 @@ def _is_etf_investment_candidate(pick: dict) -> bool:
 
 
 def _is_buy_candidate(pick: dict) -> bool:
+    if _decision_engine_for(pick):
+        return _decision_engine_buy_candidate(pick)
     if pick.get("instrumentType") == "etf":
         return _is_etf_investment_candidate(pick)
     if pick.get("strategyAssessment"):
@@ -1166,6 +1255,16 @@ def _is_t_trade_candidate(pick: dict) -> bool:
 
 
 def _is_watch_candidate(pick: dict) -> bool:
+    engine = _decision_engine_for(pick)
+    if engine:
+        return (
+            not _is_exit_candidate(pick)
+            and (
+                engine.get("action") in {"hold", "reduce"}
+                or float(engine.get("rankScore") or 0) >= 52
+                or float(pick.get("tScore") or 0) >= T_TRADE_WATCH_FLOOR
+            )
+        )
     metrics = pick["metrics"]
     return (
         not _is_exit_candidate(pick)
@@ -1180,20 +1279,7 @@ def _is_watch_candidate(pick: dict) -> bool:
 
 def _apply_auto_scan_search_algorithm(picks: list[dict]) -> None:
     for pick in picks:
-        pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
-        if _is_buy_candidate(pick):
-            pick["verdict"] = "buy"
-            pick["reasonCodes"] = [
-                reason
-                for reason in pick["reasonCodes"]
-                if reason["key"] not in {"notHighConviction", "clearsBuyThreshold"}
-            ]
-        elif _is_urgent_exit_candidate(pick):
-            pick["verdict"] = "sell"
-        else:
-            pick["verdict"] = "watch"
-        pick["decision"] = _decision_details(pick["verdict"], pick["score"], pick["metrics"], pick["signals"], pick["newsAnalysis"], pick.get("change"), pick.get("breakoutSetupScore"), pick.get("pullbackRiskScore"), pick.get("fundFlow"))
-        pick["actionPlan"] = _action_plan(pick["verdict"], pick["score"], pick["metrics"], pick["newsAnalysis"], pick["financialAnalysis"], pick.get("change"), pick.get("pullbackRiskScore"))
+        _apply_engine_verdict(pick, urgent_exit_only=True)
 
     for index, pick in enumerate(sorted([item for item in picks if item["verdict"] == "buy"], key=_investment_priority, reverse=True), start=1):
         pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index}})
@@ -3515,6 +3601,25 @@ def _composite_verdict(default_verdict: str, model: dict, metrics: dict[str, flo
     return default_verdict if default_verdict != "buy" else "watch"
 
 
+def _composite_from_decision_engine(engine: dict) -> dict:
+    evidence = engine.get("caseEvidence") or {}
+    weights = {
+        "scenario": 100,
+        "legacyWeights": 0,
+    }
+    return {
+        "instrumentType": engine.get("instrumentType", "stock"),
+        "buyScore": round(float(engine.get("buyScore") or 0), 1),
+        "sellScore": round(float(engine.get("sellScore") or 0), 1),
+        "holdScore": round(float(engine.get("holdScore") or 0), 1),
+        "rankScore": round(float(engine.get("rankScore") or 0), 1),
+        "decision": engine.get("action") or "hold",
+        "weights": weights,
+        "financialScore": round(float(evidence.get("financialScore") or evidence.get("fundProfile") or 50), 1),
+        "newsFreshnessScore": round(float((engine.get("regime") or {}).get("signals", {}).get("newsImpactScore") or 0), 1),
+    }
+
+
 def _portfolio_context_from_payload(payload: dict) -> dict | None:
     portfolio = payload.get("portfolio") if isinstance(payload.get("portfolio"), dict) else {}
     raw_positions = portfolio.get("positions") if isinstance(portfolio, dict) else None
@@ -3604,6 +3709,8 @@ def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> 
     pnl_pct = _metric_number(position.get("unrealizedPnlPct"))
     downside_risk = _metric_number(pick.get("downsideRiskScore")) or 0
     pullback_risk = _metric_number(pick.get("pullbackRiskScore")) or 0
+    engine = _decision_engine_for(pick)
+    engine_action = engine.get("action")
     composite = pick.get("compositeModel") or {}
     buy_score = float(composite.get("buyScore") or 0)
     sell_score = float(composite.get("sellScore") or 0)
@@ -3611,21 +3718,21 @@ def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> 
     max_weight = 22 if is_etf else 15
     notes = []
 
-    if pick.get("verdict") == "sell" or downside_risk >= DOWNSIDE_URGENT_EXIT_FLOOR or sell_score >= 76:
+    if engine_action == "exit" or pick.get("verdict") == "sell" or downside_risk >= DOWNSIDE_URGENT_EXIT_FLOOR or sell_score >= 76:
         action = "exit"
-        notes.append(_holding_note("holdingStrategyExit", "danger", score=pick["score"], risk=round(downside_risk, 1)))
+        notes.append(_holding_note("holdingStrategyExit", "danger", score=round(sell_score, 1), risk=round(downside_risk, 1)))
         target_weight = 0.0
-    elif downside_risk >= DOWNSIDE_EXIT_FLOOR or sell_score >= 62 or position_weight >= max_weight * 1.35:
+    elif engine_action == "reduce" or downside_risk >= DOWNSIDE_EXIT_FLOOR or sell_score >= 62 or position_weight >= max_weight * 1.35:
         action = "reduce"
         notes.append(_holding_note("holdingReduceRisk", "warning", risk=round(max(downside_risk, sell_score), 1)))
         target_weight = min(max_weight, max(0.0, position_weight * 0.62))
-    elif pick.get("verdict") == "buy" and buy_score >= 68 and (pnl_pct is None or pnl_pct > -8) and position_weight < max_weight:
+    elif engine_action == "accumulate" and pick.get("verdict") == "buy" and buy_score >= 68 and (pnl_pct is None or pnl_pct > -8) and position_weight < max_weight:
         action = "add"
-        notes.append(_holding_note("holdingAddOnlyInBatches", "info", score=pick["score"]))
+        notes.append(_holding_note("holdingAddOnlyInBatches", "info", score=round(buy_score, 1)))
         target_weight = min(max_weight, max(position_weight + 3.0, 8.0 if is_etf else 5.0))
     else:
         action = "hold"
-        notes.append(_holding_note("holdingHoldWait", "info", score=pick["score"]))
+        notes.append(_holding_note("holdingHoldWait", "info", score=round(buy_score, 1)))
         target_weight = min(max_weight, position_weight)
 
     if pnl_pct is not None and pnl_pct <= -20:
@@ -3928,28 +4035,28 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         snapshot.change,
         fund_flow,
     )
-    composite_model = _composite_investment_model(
-        snapshot,
-        metrics,
-        score,
-        overall_assessment,
-        news_analysis,
-        news_heat_analysis,
-        trend_analysis,
-        financial_analysis,
-        t_plan,
-        opportunity_score,
-        downside_risk_score,
-        breakout_setup_score,
-        pullback_risk_score,
-        snapshot.change,
+    decision_engine = build_decision_engine(
+        instrument_type=_snapshot_instrument_type(snapshot),
+        market=snapshot.market,
+        price=snapshot.price,
+        change=snapshot.change,
+        closes=snapshot.closes,
+        info=snapshot.info,
+        metrics=metrics,
+        legacy_score=score,
+        availability=availability,
+        news_analysis=news_analysis,
+        news_heat=news_heat_analysis,
+        trend_analysis=trend_analysis,
+        financial_analysis=financial_analysis,
+        t_plan=t_plan,
+        opportunity_score=opportunity_score,
+        downside_risk_score=downside_risk_score,
+        breakout_setup_score=breakout_setup_score,
+        pullback_risk_score=pullback_risk_score,
     )
-    verdict = _composite_verdict(
-        _verdict(score, metrics["risk"], metrics["quality"], metrics["sentiment"], snapshot.change),
-        composite_model,
-        metrics,
-        snapshot.change,
-    )
+    composite_model = _composite_from_decision_engine(decision_engine)
+    verdict = decision_engine["verdict"]
     reason_codes = _reason_codes(metrics, score, sentiment_delta, snapshot.change, breakout_setup_score, pullback_risk_score, trend_profile)
     return {
         "symbol": snapshot.symbol,
@@ -3973,6 +4080,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "overallAssessment": overall_assessment,
         "strategyAssessment": strategy_assessment,
         "compositeModel": composite_model,
+        "decisionEngine": decision_engine,
         "prediction": {
             "opportunityScore": opportunity_score,
             "downsideRiskScore": downside_risk_score,
@@ -3989,7 +4097,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
             "edge": round(opportunity_score - downside_risk_score, 1),
         },
         "verdict": verdict,
-        "confidence": round(min(96, 45 + abs(score - 50) * 0.68 + metrics["quality"] * 0.2)),
+        "confidence": round(min(96, float(decision_engine.get("confidenceScore") or 0))),
         "reasons": _english_reasons(reason_codes),
         "reasonCodes": reason_codes,
         "signals": signals,
@@ -4041,7 +4149,7 @@ def _friendly_data_error(symbol: str, exc: Exception) -> str:
 
 
 def _finish_picks(picks: list[dict], auto_scan: bool = False, display_limit: int = AUTO_SCAN_RESULT_LIMIT) -> list[dict]:
-    picks.sort(key=lambda item: item["score"], reverse=True)
+    picks.sort(key=_investment_priority, reverse=True)
     if auto_scan:
         _apply_auto_scan_search_algorithm(picks)
         display_picks = _curated_auto_scan_picks_for_limit(picks, display_limit)

@@ -1489,6 +1489,26 @@ h3 {
   color: #7a4d0b;
 }
 
+.metric-row .engine-chip.accumulate,
+.metric-row .engine-chip.strong,
+.metric-row .engine-chip.usable {
+  background: #e8f4ed;
+  color: #245f46;
+}
+
+.metric-row .engine-chip.hold,
+.metric-row .engine-chip.reduce,
+.metric-row .engine-chip.thin {
+  background: #fff4d6;
+  color: #7a4d0b;
+}
+
+.metric-row .engine-chip.exit,
+.metric-row .engine-chip.weak {
+  background: #fff0ed;
+  color: #8a2d20;
+}
+
 .integrated-report {
   display: grid;
   gap: 12px;
@@ -1690,6 +1710,80 @@ h3 {
   display: block;
   margin-bottom: 10px;
   line-height: 1.35;
+}
+
+.decision-engine-panel {
+  border-color: #cddbd2;
+  background: #f8fbf8;
+}
+
+.decision-engine-panel.accumulate {
+  border-left: 5px solid #2f7d4f;
+}
+
+.decision-engine-panel.hold,
+.decision-engine-panel.reduce {
+  border-left: 5px solid #b7791f;
+}
+
+.decision-engine-panel.exit {
+  border-left: 5px solid #b42318;
+}
+
+.engine-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.engine-summary-grid div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e1e9e2;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.engine-summary-grid span,
+.engine-summary-grid small {
+  display: block;
+  color: #647069;
+  font-size: 0.78rem;
+}
+
+.engine-summary-grid b {
+  display: block;
+  margin: 2px 0;
+  color: #17211b;
+  font-size: 1.18rem;
+}
+
+.engine-gate-list,
+.engine-reason-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.engine-gate-list span,
+.engine-reason-list span {
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: #eef4ef;
+  color: #33443a;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.engine-gate-list span.warning {
+  background: #fff4d6;
+  color: #7a4d0b;
+}
+
+.engine-gate-list span.danger {
+  background: #fff0ed;
+  color: #8a2d20;
 }
 
 .t-plan-panel {
@@ -3083,7 +3177,8 @@ h3 {
 
   .research-columns,
   .financial-grid,
-  .holding-grid {
+  .holding-grid,
+  .engine-summary-grid {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -3170,7 +3265,8 @@ h3 {
 
   .research-columns,
   .financial-grid,
-  .holding-grid {
+  .holding-grid,
+  .engine-summary-grid {
     grid-template-columns: 1fr;
   }
 

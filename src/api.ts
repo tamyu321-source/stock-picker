@@ -524,6 +524,54 @@ export interface CompositeModel {
   newsFreshnessScore?: number;
 }
 
+export interface DecisionEngineGate {
+  kind: 'blockBuy' | 'forceReduce' | 'exitCandidate' | string;
+  key: string;
+  severity: 'info' | 'warning' | 'danger' | string;
+  value?: number | null;
+  threshold?: number | null;
+}
+
+export interface DecisionEngineDataQuality {
+  score: number;
+  level: 'strong' | 'usable' | 'thin' | 'weak' | string;
+  priceHistoryScore: number;
+  fundamentalCoverageScore: number;
+  financialCoverageScore: number;
+  newsCoverageScore: number;
+  factorCoverageScore: number;
+  issues: string[];
+  strengths: string[];
+}
+
+export interface DecisionEngineRegime {
+  name: string;
+  confidence: number;
+  signals: Record<string, number>;
+}
+
+export interface DecisionEngine {
+  version: string;
+  instrumentType: InstrumentType;
+  market: Market;
+  price: number;
+  regime: DecisionEngineRegime;
+  dataQuality: DecisionEngineDataQuality;
+  gates: DecisionEngineGate[];
+  caseEvidence: Record<string, number>;
+  buyScore: number;
+  sellScore: number;
+  holdScore: number;
+  rankScore: number;
+  riskRewardScore: number;
+  confidenceScore: number;
+  action: 'accumulate' | 'hold' | 'reduce' | 'exit' | string;
+  verdict: Verdict;
+  primaryReasons: string[];
+  legacyScore: number;
+  legacyWeightRole: 'secondary' | string;
+}
+
 export interface Pick {
   symbol: string;
   name: string;
@@ -544,6 +592,7 @@ export interface Pick {
   tPlan?: TTradePlan;
   fundFlow?: FundFlowProfile | null;
   compositeModel?: CompositeModel;
+  decisionEngine?: DecisionEngine;
   prediction?: {
     opportunityScore: number;
     downsideRiskScore: number;
