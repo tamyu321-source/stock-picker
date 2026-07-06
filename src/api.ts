@@ -2,6 +2,7 @@ export type Market = 'US' | 'CN' | 'HK' | 'JP' | 'KR' | 'SG' | 'TW';
 export type Verdict = 'buy' | 'watch' | 'sell';
 export type SectorRecommendation = 'overweight' | 'neutral' | 'underweight';
 export type InstrumentType = 'stock' | 'etf' | string;
+export type DisplayMode = 'simple' | 'professional';
 
 export interface StrategyWeights {
   momentum: number;
@@ -95,6 +96,58 @@ export interface MarketProfile {
   capabilities: Record<string, boolean>;
   limitations: string[];
   professionalAnchors?: string[];
+}
+
+export interface MarketRuleProfile {
+  version: string;
+  market: Market | string;
+  ruleDepth: 'deep' | 'basic' | string;
+  timezone: string;
+  currency: string;
+  sessionWindows: Array<{ label: string; start: string; end: string }>;
+  lunchBreak?: { start: string; end: string } | null;
+  openingConfirmationMinutes: number;
+  settlement?: string | null;
+  sellRule?: string | null;
+  priceLimitPct?: number | null;
+  enforcesBuySessionGate: boolean;
+  nonRealtimeBuyPolicy: string;
+  orderSizing?: MarketOrderSizing;
+  etfRiskPolicy: string;
+  sources: string[];
+}
+
+export interface MarketOrderSizing {
+  boardLotSize?: number | null;
+  buyLotSize?: number | null;
+  sellLotSize?: number | null;
+  minBuyQuantity?: number | null;
+  allowsOddLotBuy?: boolean;
+  allowsOddLotSell?: boolean;
+  oddLotPolicy?: string;
+  normalization?: string;
+  maxOrderQuantity?: number | null;
+  source?: string;
+}
+
+export interface MarketRuleState {
+  version: string;
+  profile: MarketRuleProfile;
+  market: Market | string;
+  ruleDepth: 'deep' | 'basic' | string;
+  status: 'regular' | 'opening_confirmation' | 'lunch_break' | 'closed' | 'unknown' | string;
+  trading: boolean;
+  openConfirmed: boolean;
+  allowNewBuy: boolean;
+  enforcedBuyGate: boolean;
+  reason?: string;
+  localTime?: string;
+  dataFreshness: 'realtime' | 'delayed_or_fallback' | 'unknown' | string;
+  priceSource?: string;
+  settlement?: string | null;
+  sellRule?: string | null;
+  priceLimitPct?: number | null;
+  orderSizing?: MarketOrderSizing;
 }
 
 export interface Signal {
@@ -450,6 +503,8 @@ export interface HoldingPosition {
   costAmount?: number | null;
   unrealizedPnl?: number | null;
   unrealizedPnlPct?: number | null;
+  brokerLastPrice?: number | null;
+  livePriceDriftPct?: number | null;
   openDate?: string | null;
 }
 
@@ -463,12 +518,43 @@ export interface HoldingAnalysis {
   action: HoldingAction;
   positionWeightPct: number;
   targetWeightPct?: number;
+  availableQuantity?: number;
+  blockedQuantity?: number;
+  plannedQuantityChange?: number;
   suggestedQuantityChange?: number;
+  rawQuantityChange?: number;
+  orderSizing?: MarketOrderSizing;
+  executionStatus?: 'executable' | 'blocked_today' | 'partial_t1_locked' | string;
   stopLossPrice?: number | null;
   takeProfitPrice?: number | null;
   buyScore?: number;
   sellScore?: number;
   notes: HoldingNote[];
+}
+
+export interface HoldingActionItem {
+  symbol: string;
+  name: string;
+  market?: Market | string;
+  action: HoldingAction | string;
+  bucket: 'risk_action' | 't1_locked' | 'sellable_today' | 'observe' | 'rebalance' | string;
+  executionStatus: 'executable' | 'blocked_today' | 'partial_t1_locked' | string;
+  plannedQuantityChange: number;
+  executableQuantityChange: number;
+  rawQuantityChange?: number | null;
+  orderSizing?: MarketOrderSizing;
+  availableQuantity?: number | null;
+  blockedQuantity?: number | null;
+  quantity?: number | null;
+  costPrice?: number | null;
+  lastPrice?: number | null;
+  unrealizedPnl?: number | null;
+  unrealizedPnlPct?: number | null;
+  stopLossPrice?: number | null;
+  takeProfitPrice?: number | null;
+  finalAction?: string;
+  tradableNow?: boolean;
+  primaryNoteKeys?: string[];
 }
 
 export interface PortfolioImportResponse {
@@ -484,11 +570,35 @@ export interface PortfolioImportResponse {
   totalUnrealizedPnl: number;
   totalUnrealizedPnlPct?: number | null;
   warnings: HoldingNote[];
+  actionItems?: HoldingActionItem[];
 }
 
 export interface PortfolioAnalysis extends PortfolioImportResponse {
   matchedCount: number;
   unmatchedSymbols: string[];
+}
+
+export interface PortfolioMemoryDiff {
+  added: number;
+  removed: number;
+  quantityChanged: number;
+  costChanged: number;
+  pnlChange?: number | null;
+}
+
+export interface PortfolioMemoryItem {
+  id: string;
+  savedAt: string;
+  title: string;
+  sourceName: string;
+  sourceType: string;
+  recognizedCount: number;
+  symbols: string[];
+  totalMarketValue: number;
+  totalUnrealizedPnl: number;
+  totalUnrealizedPnlPct?: number | null;
+  diff?: PortfolioMemoryDiff | null;
+  portfolio: PortfolioImportResponse | PortfolioAnalysis;
 }
 
 export type TTradeSuitability = 'candidate' | 'watch' | 'avoid';
@@ -582,11 +692,17 @@ export interface RecommendationCheckpoint {
 }
 
 export interface RecommendationTracker {
+  version?: string;
   trackingId: string;
   status: string;
   openedAt: string;
   entryPrice: number;
+  entryChangePct?: number | null;
   action: string;
+  source?: string;
+  sourceRole?: string;
+  dataQualityScore?: number;
+  gateKeys?: string[];
   expectedEdgePct: number;
   checkpoints: RecommendationCheckpoint[];
   reviewTriggers: string[];
@@ -657,6 +773,9 @@ export interface DecisionEngineDataQuality {
   factorCoverageScore: number;
   marketSupportScore?: number;
   marketCoverageTier?: string;
+  priceSource?: string;
+  sourcePenalty?: number;
+  sourceWarnings?: string[];
   issues: string[];
   strengths: string[];
 }
@@ -682,6 +801,37 @@ export interface DecisionEngineRegime {
   signals: Record<string, number>;
 }
 
+export interface MarketSessionProfile {
+  market: Market | string;
+  state: string;
+  priceSource?: string;
+  gated: boolean;
+  regularSession: boolean;
+  openConfirmed: boolean;
+  allowNewBuy: boolean;
+  localTime?: string;
+  reason?: string;
+}
+
+export interface InstrumentRiskProfile {
+  instrumentType: InstrumentType;
+  category: string;
+  riskTier: string;
+  highBeta?: boolean;
+  blockBuyDropPct?: number;
+  forceReduceDropPct?: number;
+  maxWeightPct?: number;
+  market?: Market | string;
+}
+
+export interface DiscoveryContext {
+  source: string;
+  role: string;
+  hotSource: boolean;
+  confirmationPassed: boolean;
+  volumeConfirmationScore?: number;
+}
+
 export interface DecisionEngine {
   version: string;
   instrumentType: InstrumentType;
@@ -690,6 +840,10 @@ export interface DecisionEngine {
   regime: DecisionEngineRegime;
   dataQuality: DecisionEngineDataQuality;
   marketSupport?: DecisionEngineMarketSupport;
+  marketSession?: MarketSessionProfile;
+  marketRuleState?: MarketRuleState;
+  instrumentProfile?: InstrumentRiskProfile;
+  discoveryContext?: DiscoveryContext;
   gates: DecisionEngineGate[];
   caseEvidence: Record<string, number>;
   buyScore: number;
@@ -703,6 +857,65 @@ export interface DecisionEngine {
   primaryReasons: string[];
   legacyScore: number;
   legacyWeightRole: 'secondary' | string;
+}
+
+export interface TradeExecutionProfile {
+  status: 'not_applicable' | 'executable' | 'blocked_today' | 'partial_t1_locked' | string;
+  tradableNow: boolean;
+  availableQuantity?: number | null;
+  blockedQuantity?: number | null;
+  plannedQuantityChange?: number | null;
+  executableQuantityChange?: number | null;
+  rawQuantityChange?: number | null;
+  orderSizing?: MarketOrderSizing;
+}
+
+export interface FinalDecision {
+  version: string;
+  action: 'accumulate' | 'hold' | 'reduce' | 'exit' | string;
+  verdict: Verdict;
+  source: string;
+  confidence: number;
+  execution: TradeExecutionProfile;
+  primaryReasons: string[];
+}
+
+export interface QuoteObservation {
+  source: string;
+  price: number;
+  role: 'primary' | 'backup' | 'broker' | string;
+  freshness: 'live' | 'delayed' | 'user-snapshot' | 'unknown' | string;
+}
+
+export interface QuoteConsensus {
+  version: string;
+  status: 'aligned' | 'delayed' | 'fallback' | 'divergent' | 'conflict' | string;
+  primarySource: string;
+  primaryPrice?: number | null;
+  observationCount: number;
+  maxDeviationPct: number;
+  confidence: number;
+  conflict: boolean;
+  severeConflict?: boolean;
+  observations: QuoteObservation[];
+}
+
+export interface RecommendationAudit {
+  version: string;
+  trackingId?: string;
+  openedAt: string;
+  entryPrice: number;
+  entryChangePct?: number | null;
+  action: string;
+  verdict: Verdict;
+  status: string;
+  source?: string;
+  sourceRole?: string;
+  dataQualityScore?: number;
+  confidenceScore?: number;
+  gateKeys: string[];
+  failureReviewTriggers: string[];
+  checkpoints: RecommendationCheckpoint[];
 }
 
 export interface Pick {
@@ -724,8 +937,14 @@ export interface Pick {
   tScore?: number;
   tPlan?: TTradePlan;
   fundFlow?: FundFlowProfile | null;
+  discoverySource?: string;
+  discoveryRole?: string;
   compositeModel?: CompositeModel;
   decisionEngine?: DecisionEngine;
+  marketRuleState?: MarketRuleState;
+  finalDecision?: FinalDecision;
+  quoteConsensus?: QuoteConsensus;
+  recommendationAudit?: RecommendationAudit;
   professionalAnalytics?: ProfessionalAnalytics;
   prediction?: {
     opportunityScore: number;
@@ -808,6 +1027,7 @@ export interface AnalysisResponse {
     failed: number;
     discoveryErrors: Array<{ market: string; source?: string; query?: string; error: string }>;
     marketProfiles?: Record<Market | string, MarketProfile>;
+    marketRuleProfiles?: Record<Market | string, MarketRuleProfile>;
     universe?: ScanUniverse;
   };
 }
@@ -859,6 +1079,8 @@ export interface UserState {
   settings?: Record<string, unknown>;
   savedScans?: unknown[];
   portfolio?: unknown;
+  portfolioMemory?: PortfolioMemoryItem[];
+  recommendationHistory?: unknown[];
   createdAt?: string;
   updatedAt?: string;
 }

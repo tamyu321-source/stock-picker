@@ -177,6 +177,8 @@ class AuthStore:
             "settings": {},
             "savedScans": [],
             "portfolio": None,
+            "portfolioMemory": [],
+            "recommendationHistory": [],
             "createdAt": utc_timestamp(),
             "updatedAt": utc_timestamp(),
         }
@@ -269,7 +271,7 @@ class AuthStore:
             return json.loads(json.dumps(state, ensure_ascii=False))
 
     def update_user_state(self, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"settings", "savedScans", "portfolio"}
+        allowed = {"settings", "savedScans", "portfolio", "portfolioMemory", "recommendationHistory"}
         with self._lock:
             state = self._data["states"].setdefault(user_id, self._empty_state())
             for key in allowed:

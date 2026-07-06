@@ -206,7 +206,7 @@ def build_alert_monitor(decision_engine: dict[str, Any], benchmark_relative: dic
 def build_portfolio_optimizer(pick: dict[str, Any], position: dict[str, Any] | None = None, total_market_value: float | None = None) -> dict[str, Any]:
     engine = pick.get("decisionEngine") or {}
     instrument = pick.get("instrumentType") or engine.get("instrumentType") or "stock"
-    action = engine.get("action") or (pick.get("compositeModel") or {}).get("decision") or "hold"
+    action = (pick.get("finalDecision") or {}).get("action") or engine.get("action") or (pick.get("compositeModel") or {}).get("decision") or "hold"
     max_weight = 22.0 if instrument == "etf" else 15.0
     base_target = 0.0 if action == "exit" else max_weight * 0.42 if action == "reduce" else max_weight * 0.72 if action == "accumulate" else max_weight * 0.48
     current_value = _number((position or {}).get("marketValue"), 0.0) or 0.0

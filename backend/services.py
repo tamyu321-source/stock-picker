@@ -7,7 +7,7 @@ from math import exp, log10
 from statistics import mean
 
 from backend.data import DEFAULT_SYMBOLS, MARKETS, STRATEGIES
-from backend.decision_engine import build_decision_engine
+from backend.decision_engine import build_decision_engine, market_rule_profile
 from backend.market_profiles import market_profile, market_profiles
 from backend.professional_analytics import build_portfolio_optimizer, build_professional_analytics
 from backend.providers import Article, MarketSnapshot, RssNewsCrawler, YFinanceMarketDataProvider, infer_market, instrument_type, local_company_name, volatility_score
@@ -448,6 +448,358 @@ def _decision_engine_for(pick: dict) -> dict:
     return engine if isinstance(engine, dict) else {}
 
 
+def _final_decision_for(pick: dict) -> dict:
+    decision = pick.get("finalDecision")
+    return decision if isinstance(decision, dict) else {}
+
+
+def _action_to_verdict(action: str) -> str:
+    if action == "accumulate":
+        return "buy"
+    if action == "exit":
+        return "sell"
+    return "watch"
+
+
+def _action_severity(action: str) -> int:
+    return {"accumulate": 1, "hold": 2, "reduce": 3, "exit": 4}.get(action, 2)
+
+
+def _holding_action_to_engine_action(action: str) -> str:
+    return {"add": "accumulate", "hold": "hold", "reduce": "reduce", "exit": "exit"}.get(action, "hold")
+
+
+def _quote_observation(source: str, price: float | None, role: str, freshness: str = "unknown") -> dict | None:
+    numeric = _metric_number(price)
+    if numeric is None or numeric <= 0:
+        return None
+    return {"source": source, "price": round(numeric, 4), "role": role, "freshness": freshness}
+
+
+def _quote_consensus_from_values(price: float | None, info: dict | None = None, position: dict | None = None) -> dict:
+    info = info or {}
+    observations = []
+    primary_source = str(info.get("priceSource") or info.get("quoteSource") or "provider")
+    primary = _quote_observation(primary_source, price, "primary", "live" if info.get("historyInterval") != "1d" else "delayed")
+    if primary:
+        observations.append(primary)
+
+    backup_fields = [
+        ("regularMarketPrice", "provider-regular"),
+        ("currentPrice", "provider-current"),
+        ("navPrice", "provider-nav"),
+        ("lastTradePrice", "provider-last"),
+    ]
+    for field, source in backup_fields:
+        item = _quote_observation(source, info.get(field), "backup", "unknown")
+        if item and all(abs(item["price"] - existing["price"]) > max(0.0001, item["price"] * 0.0002) for existing in observations):
+            observations.append(item)
+
+    if position:
+        broker_price = _metric_number(position.get("brokerLastPrice")) or _metric_number(position.get("lastPrice"))
+        item = _quote_observation("broker-position", broker_price, "broker", "user-snapshot")
+        if item:
+            observations.append(item)
+
+    prices = [item["price"] for item in observations]
+    primary_price = primary["price"] if primary else (_metric_number(price) or 0)
+    max_deviation = 0.0
+    if len(prices) >= 2 and primary_price:
+        max_deviation = max(abs(price - primary_price) / primary_price * 100 for price in prices)
+
+    warning_count = len(info.get("sourceWarnings") or []) if isinstance(info.get("sourceWarnings"), list) else 0
+    conflict = max_deviation >= 0.8
+    severe_conflict = max_deviation >= 3.0
+    if severe_conflict:
+        status = "conflict"
+        confidence = 35
+    elif conflict:
+        status = "divergent"
+        confidence = 55
+    elif warning_count:
+        status = "fallback"
+        confidence = 64
+    elif primary_source in {"fallback", "yahoo-chart"}:
+        status = "delayed"
+        confidence = 72
+    else:
+        status = "aligned"
+        confidence = 86
+
+    return {
+        "version": "quote-consensus-v1",
+        "status": status,
+        "primarySource": primary_source,
+        "primaryPrice": round(primary_price, 4) if primary_price else None,
+        "observationCount": len(observations),
+        "maxDeviationPct": round(max_deviation, 3),
+        "confidence": confidence,
+        "conflict": conflict,
+        "severeConflict": severe_conflict,
+        "observations": observations[:5],
+    }
+
+
+def _quote_consensus(snapshot: MarketSnapshot, position: dict | None = None) -> dict:
+    return _quote_consensus_from_values(snapshot.price, snapshot.info or {}, position)
+
+
+def _quote_consensus_for_pick(pick: dict, position: dict | None = None) -> dict:
+    engine = _decision_engine_for(pick)
+    data_quality = engine.get("dataQuality") or {}
+    info = {
+        "priceSource": data_quality.get("priceSource") or (engine.get("marketSession") or {}).get("priceSource"),
+        "sourceWarnings": data_quality.get("sourceWarnings") or [],
+        "historyInterval": data_quality.get("historyInterval"),
+    }
+    return _quote_consensus_from_values(_metric_number(pick.get("price")), info, position)
+
+
+def _apply_quote_consensus_guard(pick: dict) -> None:
+    consensus = pick.get("quoteConsensus")
+    engine = _decision_engine_for(pick)
+    if not isinstance(consensus, dict) or not engine:
+        return
+    if consensus.get("conflict"):
+        _add_engine_gate(
+            engine,
+            kind="blockBuy",
+            key="priceConsensusConflict",
+            severity="danger" if consensus.get("severeConflict") else "warning",
+            value=_metric_number(consensus.get("maxDeviationPct")),
+            threshold=0.8,
+        )
+        engine["buyScore"] = round(min(float(engine.get("buyScore") or 0), 58.0 if consensus.get("severeConflict") else 64.0), 1)
+        if consensus.get("severeConflict"):
+            engine["sellScore"] = round(max(float(engine.get("sellScore") or 0), 62.0), 1)
+        _recompute_engine_after_guard(engine)
+
+
+def _trade_execution_profile(holding_analysis: dict | None) -> dict:
+    if not isinstance(holding_analysis, dict):
+        return {"status": "not_applicable", "tradableNow": True}
+    planned = _metric_number(holding_analysis.get("plannedQuantityChange"))
+    executable = _metric_number(holding_analysis.get("suggestedQuantityChange"))
+    available = _metric_number(holding_analysis.get("availableQuantity"))
+    blocked = _metric_number(holding_analysis.get("blockedQuantity")) or 0
+    status = str(holding_analysis.get("executionStatus") or "executable")
+    return {
+        "status": status,
+        "tradableNow": status not in {"blocked_today", "partial_t1_locked"},
+        "availableQuantity": round(available, 4) if available is not None else None,
+        "blockedQuantity": round(blocked, 4),
+        "plannedQuantityChange": round(planned, 4) if planned is not None else None,
+        "executableQuantityChange": round(executable, 4) if executable is not None else None,
+        "rawQuantityChange": holding_analysis.get("rawQuantityChange"),
+        "orderSizing": holding_analysis.get("orderSizing"),
+    }
+
+
+def _recommendation_status(action: str, gates: list[dict]) -> str:
+    if action == "accumulate":
+        return "tracking_open"
+    if action in {"reduce", "exit"}:
+        return "risk_review"
+    if any(gate.get("kind") == "blockBuy" for gate in gates):
+        return "blocked_watchlist"
+    return "watch_only"
+
+
+def _recommendation_checkpoints(action: str, price: float, sell_score: float) -> list[dict]:
+    if action == "accumulate":
+        base_drawdown = max(1.2, min(5.5, 1.6 + sell_score * 0.035))
+        return [
+            {"horizon": "1H", "targetReturnPct": 0.6, "maxDrawdownPct": round(-base_drawdown * 0.45, 2)},
+            {"horizon": "Close", "targetReturnPct": 1.0, "maxDrawdownPct": round(-base_drawdown * 0.70, 2)},
+            {"horizon": "1D", "targetReturnPct": 1.8, "maxDrawdownPct": round(-base_drawdown, 2)},
+            {"horizon": "3D", "targetReturnPct": 3.2, "maxDrawdownPct": round(-base_drawdown * 1.35, 2)},
+            {"horizon": "5D", "targetReturnPct": 4.6, "maxDrawdownPct": round(-base_drawdown * 1.65, 2)},
+        ]
+    return [
+        {"horizon": "1H", "targetReturnPct": 0.0, "maxDrawdownPct": -0.8},
+        {"horizon": "Close", "targetReturnPct": 0.0, "maxDrawdownPct": -1.5},
+        {"horizon": "Next tradable session", "targetReturnPct": 0.0, "maxDrawdownPct": -2.2},
+    ]
+
+
+def _sync_recommendation_audit(pick: dict) -> None:
+    final_decision = _final_decision_for(pick)
+    if not final_decision:
+        return
+    engine = _decision_engine_for(pick)
+    gates = list(engine.get("gates") or [])
+    price = float(pick.get("price") or 0)
+    action = str(final_decision.get("action") or "hold")
+    tracker = ((pick.get("professionalAnalytics") or {}).get("recommendationTracker") or {}).copy()
+    opened_at = tracker.get("openedAt") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    audit = {
+        "version": "recommendation-audit-v1",
+        "trackingId": tracker.get("trackingId"),
+        "openedAt": opened_at,
+        "entryPrice": round(price, 4),
+        "entryChangePct": pick.get("change"),
+        "action": action,
+        "verdict": final_decision.get("verdict"),
+        "status": _recommendation_status(action, gates),
+        "source": pick.get("discoverySource"),
+        "sourceRole": pick.get("discoveryRole"),
+        "dataQualityScore": (engine.get("dataQuality") or {}).get("score"),
+        "confidenceScore": final_decision.get("confidence"),
+        "gateKeys": [gate.get("key") for gate in gates],
+        "failureReviewTriggers": [
+            "price-drops-through-checkpoint",
+            "final-action-worsens",
+            "source-quality-deteriorates",
+            "benchmark-relative-underperforms",
+        ],
+        "checkpoints": _recommendation_checkpoints(action, price, float(engine.get("sellScore") or 0)),
+    }
+    pick["recommendationAudit"] = audit
+    professional = pick.get("professionalAnalytics")
+    if isinstance(professional, dict):
+        updated_tracker = dict(professional.get("recommendationTracker") or {})
+        updated_tracker.update(
+            {
+                "version": "recommendation-tracker-v2",
+                "status": audit["status"],
+                "openedAt": opened_at,
+                "entryPrice": audit["entryPrice"],
+                "entryChangePct": audit["entryChangePct"],
+                "action": action,
+                "source": audit["source"],
+                "sourceRole": audit["sourceRole"],
+                "dataQualityScore": audit["dataQualityScore"],
+                "gateKeys": audit["gateKeys"],
+                "checkpoints": audit["checkpoints"],
+            }
+        )
+        professional["recommendationTracker"] = updated_tracker
+
+
+def _apply_final_decision(pick: dict, source: str = "decision-engine") -> None:
+    engine = _decision_engine_for(pick)
+    engine_action = str(engine.get("action") or (pick.get("compositeModel") or {}).get("decision") or "hold")
+    action = engine_action if engine_action in {"accumulate", "hold", "reduce", "exit"} else "hold"
+    reasons = list(engine.get("primaryReasons") or [])
+    holding_analysis = pick.get("holdingAnalysis") if isinstance(pick.get("holdingAnalysis"), dict) else None
+
+    if holding_analysis:
+        holding_action = _holding_action_to_engine_action(str(holding_analysis.get("action") or "hold"))
+        if _action_severity(holding_action) >= _action_severity(action):
+            action = holding_action
+            source = "holding-risk"
+            reasons = [f"holding:{note.get('key')}" for note in holding_analysis.get("notes") or []][:4] or reasons
+
+    verdict = _action_to_verdict(action)
+    confidence = round(min(96, float(engine.get("confidenceScore") or pick.get("confidence") or 0)))
+    execution = _trade_execution_profile(holding_analysis)
+    pick["finalDecision"] = {
+        "version": "final-decision-v1",
+        "action": action,
+        "verdict": verdict,
+        "source": source,
+        "confidence": confidence,
+        "execution": execution,
+        "primaryReasons": reasons[:5],
+    }
+    pick["verdict"] = verdict
+    _sync_recommendation_audit(pick)
+
+
+def _recompute_engine_after_guard(engine: dict) -> None:
+    buy_score = float(engine.get("buyScore") or 0)
+    sell_score = float(engine.get("sellScore") or 0)
+    data_score = float((engine.get("dataQuality") or {}).get("score") or 50)
+    risk_reward = _clamp_score(buy_score - sell_score + 50)
+    engine["riskRewardScore"] = round(risk_reward, 1)
+    engine["rankScore"] = round(_clamp_score(buy_score * 0.62 + risk_reward * 0.26 + data_score * 0.12), 1)
+    engine["confidenceScore"] = round(min(float(engine.get("confidenceScore") or 0), _clamp_score(data_score * 0.54 + abs(buy_score - sell_score) * 0.18)), 1)
+    if sell_score >= 78:
+        engine["action"] = "exit"
+        engine["verdict"] = "sell"
+    elif sell_score >= 62:
+        engine["action"] = "reduce"
+        engine["verdict"] = "watch"
+    elif buy_score >= 72 and sell_score <= 50 and not _decision_engine_gate_kinds({"decisionEngine": engine}) & {"blockBuy", "forceReduce", "exitCandidate"}:
+        engine["action"] = "accumulate"
+        engine["verdict"] = "buy"
+    else:
+        engine["action"] = "hold"
+        engine["verdict"] = "watch"
+
+
+def _add_engine_gate(engine: dict, *, kind: str, key: str, severity: str, value: float | None = None, threshold: float | None = None) -> None:
+    gates = engine.setdefault("gates", [])
+    if any(gate.get("key") == key and gate.get("kind") == kind for gate in gates):
+        return
+    gates.append(
+        {
+            "kind": kind,
+            "key": key,
+            "severity": severity,
+            "value": round(value, 1) if value is not None else None,
+            "threshold": round(threshold, 1) if threshold is not None else None,
+        }
+    )
+    reasons = list(engine.get("primaryReasons") or [])
+    if key not in reasons:
+        engine["primaryReasons"] = [key, *reasons][:5]
+
+
+def _hot_discovery_source(source: str) -> bool:
+    source = str(source or "")
+    return (
+        source.startswith(("local-news", "google-news"))
+        or "gainers" in source
+        or "volume-ratio" in source
+        or "turnover" in source
+    )
+
+
+def _apply_discovery_source_guard(
+    engine: dict,
+    *,
+    source: str,
+    metrics: dict[str, float],
+    trend_analysis: dict,
+    price_change: float | None,
+    breakout_setup_score: float,
+    pullback_risk_score: float,
+    fund_flow: dict | None,
+) -> None:
+    role = _scan_source_role(source)
+    hot_source = _hot_discovery_source(source)
+    change = _metric_number(price_change) or 0.0
+    volume_score = float(((trend_analysis.get("profile") or {}).get("volumeConfirmationScore")) or 50)
+    continuation = float(trend_analysis.get("continuationScore") or 50)
+    flow_score = float((fund_flow or {}).get("score") or 50)
+    confirmed = (
+        breakout_setup_score >= 74
+        and pullback_risk_score < 58
+        and continuation >= 56
+        and volume_score >= 58
+        and metrics.get("risk", 0) >= 48
+        and (flow_score >= 50 or not (fund_flow or {}).get("available"))
+    )
+    engine["discoveryContext"] = {
+        "source": source,
+        "role": role,
+        "hotSource": hot_source,
+        "confirmationPassed": confirmed,
+        "volumeConfirmationScore": round(volume_score, 1),
+    }
+    if not hot_source:
+        return
+    if change >= 5.5 or pullback_risk_score >= 62:
+        _add_engine_gate(engine, kind="blockBuy", key="hotListChaseRisk", severity="warning", value=max(change, pullback_risk_score), threshold=62)
+        engine["buyScore"] = min(float(engine.get("buyScore") or 0), 58.0)
+    elif not confirmed and engine.get("action") == "accumulate":
+        _add_engine_gate(engine, kind="blockBuy", key="hotListDiscoveryNeedsConfirmation", severity="warning", value=volume_score, threshold=58)
+        engine["buyScore"] = min(float(engine.get("buyScore") or 0), 62.0)
+    if any(gate.get("kind") == "blockBuy" for gate in engine.get("gates") or []):
+        _recompute_engine_after_guard(engine)
+
+
 def _decision_engine_gate_kinds(pick: dict) -> set[str]:
     engine = _decision_engine_for(pick)
     return {str(gate.get("kind")) for gate in engine.get("gates") or []}
@@ -458,6 +810,9 @@ def _decision_engine_blocks_buy(pick: dict) -> bool:
 
 
 def _decision_engine_buy_candidate(pick: dict) -> bool:
+    final_decision = _final_decision_for(pick)
+    if final_decision:
+        return final_decision.get("action") == "accumulate" and final_decision.get("verdict") == "buy"
     engine = _decision_engine_for(pick)
     if not engine:
         return False
@@ -472,6 +827,9 @@ def _decision_engine_buy_candidate(pick: dict) -> bool:
 
 
 def _decision_engine_exit_candidate(pick: dict, urgent: bool = False) -> bool:
+    final_decision = _final_decision_for(pick)
+    if final_decision:
+        return final_decision.get("action") == "exit" or final_decision.get("verdict") == "sell"
     engine = _decision_engine_for(pick)
     if not engine:
         return False
@@ -483,6 +841,7 @@ def _decision_engine_exit_candidate(pick: dict, urgent: bool = False) -> bool:
 
 
 def _apply_engine_verdict(pick: dict, urgent_exit_only: bool = False) -> None:
+    pick.pop("finalDecision", None)
     pick["reasonCodes"] = [reason for reason in pick["reasonCodes"] if reason["key"] != "rankedTopOpportunity"]
     if _is_buy_candidate(pick):
         pick["verdict"] = "buy"
@@ -511,6 +870,7 @@ def _apply_engine_verdict(pick: dict, urgent_exit_only: bool = False) -> None:
         pick.get("change"),
         pick.get("pullbackRiskScore"),
     )
+    _apply_final_decision(pick)
 
 
 def _relative_verdicts(picks: list[dict]) -> None:
@@ -3714,10 +4074,102 @@ def _holding_note(key: str, severity: str = "info", **params) -> dict:
     return {"key": key, "severity": severity, "params": params}
 
 
+def _quantity_int(value: float | int | None) -> int:
+    numeric = _metric_number(value)
+    return max(0, int(round(numeric or 0)))
+
+
+def _lot_size(value) -> int | None:
+    numeric = _metric_number(value)
+    if numeric is None or numeric <= 1:
+        return None
+    return int(round(numeric))
+
+
+def _order_sizing_for_pick(pick: dict) -> dict:
+    state = pick.get("marketRuleState") if isinstance(pick.get("marketRuleState"), dict) else None
+    if not state:
+        engine = _decision_engine_for(pick)
+        state = engine.get("marketRuleState") if isinstance(engine.get("marketRuleState"), dict) else None
+    profile = state.get("profile") if isinstance(state, dict) and isinstance(state.get("profile"), dict) else {}
+    sizing = profile.get("orderSizing") if isinstance(profile.get("orderSizing"), dict) else None
+    if not sizing:
+        sizing = market_rule_profile(str(pick.get("market") or ""), str(pick.get("instrumentType") or "stock")).get("orderSizing") or {}
+    return dict(sizing)
+
+
+def _exact_quantity_allowed(sizing: dict, side: str) -> bool:
+    normalization = str(sizing.get("normalization") or "")
+    if normalization in {"share_level", "advisory_only", "odd_lot_allowed"}:
+        return True
+    lot_key = "buyLotSize" if side == "buy" else "sellLotSize"
+    return _lot_size(sizing.get(lot_key)) is None
+
+
+def _floor_to_lot(amount: int, lot: int | None) -> int:
+    if not lot or lot <= 1:
+        return max(0, amount)
+    return max(0, amount // lot * lot)
+
+
+def _nearest_sell_lot(amount: int, quantity: int, lot: int | None, action: str) -> int:
+    if not lot or lot <= 1:
+        return max(0, min(amount, quantity))
+    if amount <= 0 or quantity <= 0:
+        return 0
+    if action == "exit" or amount >= quantity:
+        return quantity
+    rounded = int((amount + lot / 2) // lot) * lot
+    if rounded <= 0:
+        return 0
+    if rounded >= quantity:
+        return quantity if quantity <= lot else _floor_to_lot(quantity - 1, lot)
+    return rounded
+
+
+def _normalize_planned_trade_change(raw_change: float, action: str, quantity: float, sizing: dict) -> int:
+    raw = int(round(raw_change or 0))
+    held = _quantity_int(quantity)
+    if raw == 0:
+        return 0
+    if raw > 0:
+        if _exact_quantity_allowed(sizing, "buy"):
+            return raw
+        lot = _lot_size(sizing.get("buyLotSize"))
+        min_buy = _quantity_int(sizing.get("minBuyQuantity")) or (lot or 1)
+        adjusted = _floor_to_lot(raw, lot)
+        return adjusted if adjusted >= min_buy else 0
+    if _exact_quantity_allowed(sizing, "sell"):
+        return -min(abs(raw), held)
+    lot = _lot_size(sizing.get("sellLotSize"))
+    return -_nearest_sell_lot(abs(raw), held, lot, action)
+
+
+def _normalize_executable_sell_quantity(requested_sell: int, available_quantity: float, total_quantity: float, action: str, sizing: dict) -> int:
+    requested = max(0, int(round(requested_sell or 0)))
+    available = _quantity_int(available_quantity)
+    total = _quantity_int(total_quantity)
+    if requested <= 0 or available <= 0:
+        return 0
+    if action == "exit" and available >= total:
+        return min(requested, total)
+    if _exact_quantity_allowed(sizing, "sell"):
+        return min(requested, available)
+    lot = _lot_size(sizing.get("sellLotSize"))
+    candidate = min(requested, available)
+    if action == "exit" and available >= total:
+        return min(candidate, total)
+    return _floor_to_lot(candidate, lot)
+
+
 def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> dict:
     market_value = _metric_number(position.get("marketValue")) or 0
     position_weight = market_value / total_market_value * 100 if total_market_value else 0
     quantity = _metric_number(position.get("quantity")) or 0
+    available_quantity = _metric_number(position.get("availableQuantity"))
+    if available_quantity is None:
+        available_quantity = quantity
+    blocked_quantity = max(0.0, quantity - available_quantity)
     live_price = _metric_number(position.get("lastPrice")) or _metric_number(pick.get("price")) or 0
     cost_price = _metric_number(position.get("costPrice"))
     pnl_pct = _metric_number(position.get("unrealizedPnlPct"))
@@ -3764,13 +4216,51 @@ def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> 
         notes.append(_holding_note("holdingProfitProtect", "warning", pnlPct=round(pnl_pct, 1), risk=round(pullback_risk, 1)))
 
     target_value = total_market_value * target_weight / 100 if total_market_value and target_weight is not None else market_value
+    order_sizing = _order_sizing_for_pick(pick)
+    raw_quantity_change = 0
     suggested_quantity_change = 0
     if live_price > 0 and quantity > 0:
-        suggested_quantity_change = round((target_value - market_value) / live_price)
+        raw_quantity_change = round((target_value - market_value) / live_price)
+        suggested_quantity_change = raw_quantity_change
         if action == "exit":
-            suggested_quantity_change = -round(quantity)
+            suggested_quantity_change = -_quantity_int(quantity)
         elif action == "hold" and abs(suggested_quantity_change) < max(1, quantity * 0.05):
             suggested_quantity_change = 0
+    suggested_quantity_change = _normalize_planned_trade_change(suggested_quantity_change, action, quantity, order_sizing)
+    planned_quantity_change = suggested_quantity_change
+    execution_status = "executable"
+    if planned_quantity_change < 0:
+        sell_quantity = abs(planned_quantity_change)
+        executable_sell_quantity = _normalize_executable_sell_quantity(sell_quantity, available_quantity, quantity, action, order_sizing)
+        suggested_quantity_change = -executable_sell_quantity
+        if available_quantity <= 0:
+            execution_status = "blocked_today"
+        elif executable_sell_quantity < sell_quantity:
+            execution_status = "partial_t1_locked"
+        if blocked_quantity > 0:
+            notes.append(
+                _holding_note(
+                    "holdingT1Unavailable",
+                    "danger" if action == "exit" else "warning",
+                    available=round(available_quantity, 4),
+                    blocked=round(blocked_quantity, 4),
+                    planned=round(planned_quantity_change, 4),
+                )
+            )
+    elif planned_quantity_change > 0 and planned_quantity_change != raw_quantity_change:
+        execution_status = "order_lot_adjusted" if planned_quantity_change == 0 else execution_status
+    if raw_quantity_change != planned_quantity_change:
+        notes.append(
+            _holding_note(
+                "holdingOrderLotAdjusted",
+                "warning" if planned_quantity_change == 0 and raw_quantity_change else "info",
+                market=pick.get("market"),
+                raw=raw_quantity_change,
+                adjusted=planned_quantity_change,
+                lot=order_sizing.get("buyLotSize") if raw_quantity_change > 0 else order_sizing.get("sellLotSize"),
+                policy=order_sizing.get("oddLotPolicy") or order_sizing.get("normalization"),
+            )
+        )
     volatility_pct = float(((pick.get("tPlan") or {}).get("components") or {}).get("volatilityPct") or 3.0)
     stop_gap = min(0.12, max(0.035, volatility_pct * 0.0075 + downside_risk * 0.00045))
     take_gap = min(0.18, max(0.055, volatility_pct * 0.010 + max(0, buy_score - sell_score) * 0.0012))
@@ -3780,13 +4270,24 @@ def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> 
         cost_gap = (live_price / cost_price - 1) * 100 if cost_price else None
         if cost_gap is not None:
             notes.append(_holding_note("holdingCostGap", "info", gap=round(cost_gap, 1), cost=round(cost_price, 3)))
-    if suggested_quantity_change:
+    price_drift_pct = _metric_number(position.get("livePriceDriftPct"))
+    if price_drift_pct is not None and abs(price_drift_pct) >= 0.8:
+        notes.append(
+            _holding_note(
+                "holdingPriceSourceDrift",
+                "danger" if abs(price_drift_pct) >= 3.0 else "warning",
+                broker=round(_metric_number(position.get("brokerLastPrice")) or 0, 4),
+                live=round(live_price, 4),
+                gap=round(price_drift_pct, 1),
+            )
+        )
+    if planned_quantity_change:
         notes.append(
             _holding_note(
                 "holdingSizingPlan",
-                "danger" if action == "exit" else "warning" if suggested_quantity_change < 0 else "info",
+                "danger" if action == "exit" else "warning" if planned_quantity_change < 0 else "info",
                 target=round(target_weight, 1),
-                change=suggested_quantity_change,
+                change=planned_quantity_change,
             )
         )
     if stop_loss_price:
@@ -3798,13 +4299,94 @@ def _holding_analysis(pick: dict, position: dict, total_market_value: float) -> 
         "action": action,
         "positionWeightPct": round(position_weight, 1),
         "targetWeightPct": round(target_weight, 1),
+        "availableQuantity": round(available_quantity, 4),
+        "blockedQuantity": round(blocked_quantity, 4),
+        "plannedQuantityChange": planned_quantity_change,
         "suggestedQuantityChange": suggested_quantity_change,
+        "executionStatus": execution_status,
+        "rawQuantityChange": raw_quantity_change,
+        "orderSizing": {
+            "boardLotSize": order_sizing.get("boardLotSize"),
+            "buyLotSize": order_sizing.get("buyLotSize"),
+            "sellLotSize": order_sizing.get("sellLotSize"),
+            "oddLotPolicy": order_sizing.get("oddLotPolicy"),
+            "normalization": order_sizing.get("normalization"),
+            "source": order_sizing.get("source"),
+        },
         "stopLossPrice": stop_loss_price,
         "takeProfitPrice": take_profit_price,
         "buyScore": round(buy_score, 1),
         "sellScore": round(sell_score, 1),
         "notes": notes[:8],
     }
+
+
+def _holding_action_bucket(action: str, execution_status: str, planned_change: float, executable_change: float) -> str:
+    if execution_status == "blocked_today":
+        return "t1_locked"
+    if action in {"exit", "reduce"}:
+        return "risk_action"
+    if planned_change < 0 and executable_change < 0:
+        return "sellable_today"
+    if action == "hold":
+        return "observe"
+    return "rebalance"
+
+
+def _holding_action_item(pick: dict) -> dict | None:
+    holding = pick.get("holding") if isinstance(pick.get("holding"), dict) else None
+    analysis = pick.get("holdingAnalysis") if isinstance(pick.get("holdingAnalysis"), dict) else None
+    if not holding or not analysis:
+        return None
+    planned = _metric_number(analysis.get("plannedQuantityChange")) or 0
+    executable = _metric_number(analysis.get("suggestedQuantityChange")) or 0
+    status = str(analysis.get("executionStatus") or "executable")
+    action = str(analysis.get("action") or "hold")
+    execution = ((pick.get("finalDecision") or {}).get("execution") or {}) if isinstance(pick.get("finalDecision"), dict) else {}
+    return {
+        "symbol": pick.get("symbol"),
+        "name": pick.get("name") or holding.get("name"),
+        "market": pick.get("market") or holding.get("market"),
+        "action": action,
+        "bucket": _holding_action_bucket(action, status, planned, executable),
+        "executionStatus": status,
+        "plannedQuantityChange": round(planned, 4),
+        "executableQuantityChange": round(executable, 4),
+        "rawQuantityChange": analysis.get("rawQuantityChange"),
+        "orderSizing": analysis.get("orderSizing"),
+        "availableQuantity": analysis.get("availableQuantity"),
+        "blockedQuantity": analysis.get("blockedQuantity"),
+        "quantity": holding.get("quantity"),
+        "costPrice": holding.get("costPrice"),
+        "lastPrice": holding.get("lastPrice") or pick.get("price"),
+        "unrealizedPnl": holding.get("unrealizedPnl"),
+        "unrealizedPnlPct": holding.get("unrealizedPnlPct"),
+        "stopLossPrice": analysis.get("stopLossPrice"),
+        "takeProfitPrice": analysis.get("takeProfitPrice"),
+        "finalAction": (pick.get("finalDecision") or {}).get("action") or (pick.get("decisionEngine") or {}).get("action") or "hold",
+        "tradableNow": execution.get("tradableNow", status == "executable"),
+        "primaryNoteKeys": [note.get("key") for note in analysis.get("notes") or []][:3],
+    }
+
+
+def _portfolio_action_items(picks: list[dict]) -> list[dict]:
+    items = [item for item in (_holding_action_item(pick) for pick in picks) if item]
+    severity_rank = {
+        "risk_action": 0,
+        "t1_locked": 1,
+        "sellable_today": 2,
+        "rebalance": 3,
+        "observe": 4,
+    }
+    action_rank = {"exit": 0, "reduce": 1, "add": 2, "hold": 3}
+    return sorted(
+        items,
+        key=lambda item: (
+            severity_rank.get(str(item.get("bucket")), 9),
+            action_rank.get(str(item.get("action")), 9),
+            -abs(float(item.get("plannedQuantityChange") or 0)),
+        ),
+    )
 
 
 def _portfolio_summary(context: dict, picks: list[dict]) -> dict | None:
@@ -3830,17 +4412,22 @@ def _portfolio_summary(context: dict, picks: list[dict]) -> dict | None:
         "totalUnrealizedPnl": portfolio["totalUnrealizedPnl"],
         "totalUnrealizedPnlPct": portfolio["totalUnrealizedPnlPct"],
         "warnings": warnings[:8],
+        "actionItems": _portfolio_action_items(picks),
 }
 
 
 def _enrich_position_with_live_price(position: dict, pick: dict) -> dict:
     quantity = _metric_number(position.get("quantity")) or 0
     cost_price = _metric_number(position.get("costPrice"))
+    broker_last_price = _metric_number(position.get("lastPrice"))
     live_price = _metric_number(pick.get("price"))
     if quantity <= 0 or live_price is None:
         return position
 
     updated = dict(position)
+    if broker_last_price is not None and broker_last_price > 0:
+        updated["brokerLastPrice"] = broker_last_price
+        updated["livePriceDriftPct"] = round((live_price - broker_last_price) / broker_last_price * 100, 4)
     updated["lastPrice"] = live_price
     updated["marketValue"] = round(quantity * live_price, 4)
     if cost_price is not None:
@@ -3879,6 +4466,10 @@ def _apply_portfolio_context(context: dict, picks: list[dict]) -> dict | None:
             if item["symbol"] == pick["symbol"]:
                 portfolio["positions"][index] = enriched
                 break
+        pick["quoteConsensus"] = _quote_consensus_for_pick(pick, enriched)
+        _apply_quote_consensus_guard(pick)
+        if _decision_engine_for(pick):
+            pick["compositeModel"] = _composite_from_decision_engine(_decision_engine_for(pick))
 
     _refresh_portfolio_totals(portfolio)
     total_market_value = portfolio.get("totalMarketValue") or 0
@@ -3888,6 +4479,7 @@ def _apply_portfolio_context(context: dict, picks: list[dict]) -> dict | None:
             continue
         pick["holding"] = position
         pick["holdingAnalysis"] = _holding_analysis(pick, position, total_market_value)
+        _apply_final_decision(pick, source="holding-risk")
         professional = pick.setdefault("professionalAnalytics", {})
         professional["portfolioOptimizer"] = build_portfolio_optimizer(pick, position, total_market_value)
     return _portfolio_summary(context, picks)
@@ -4057,7 +4649,7 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         price=snapshot.price,
         change=snapshot.change,
         closes=snapshot.closes,
-        info=snapshot.info,
+        info={**snapshot.info, "symbol": snapshot.symbol},
         metrics=metrics,
         legacy_score=score,
         availability=availability,
@@ -4072,6 +4664,18 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         pullback_risk_score=pullback_risk_score,
         market_profile=market_profile(snapshot.market),
     )
+    _apply_discovery_source_guard(
+        decision_engine,
+        source=item.source,
+        metrics=metrics,
+        trend_analysis=trend_analysis,
+        price_change=snapshot.change,
+        breakout_setup_score=breakout_setup_score,
+        pullback_risk_score=pullback_risk_score,
+        fund_flow=fund_flow,
+    )
+    quote_consensus = _quote_consensus(snapshot)
+    _apply_quote_consensus_guard({"decisionEngine": decision_engine, "quoteConsensus": quote_consensus})
     composite_model = _composite_from_decision_engine(decision_engine)
     professional_analytics = build_professional_analytics(snapshot, metrics, decision_engine, financial_analysis)
     professional_analytics["portfolioOptimizer"] = build_portfolio_optimizer(
@@ -4094,6 +4698,8 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "price": snapshot.price,
         "change": snapshot.change,
         "currency": snapshot.currency,
+        "discoverySource": item.source,
+        "discoveryRole": _scan_source_role(item.source),
         "score": score,
         "opportunityScore": opportunity_score,
         "downsideRiskScore": downside_risk_score,
@@ -4108,6 +4714,8 @@ def _process_symbol(item: DiscoveredSymbol, market_provider, news_crawler, weigh
         "strategyAssessment": strategy_assessment,
         "compositeModel": composite_model,
         "decisionEngine": decision_engine,
+        "marketRuleState": decision_engine.get("marketRuleState"),
+        "quoteConsensus": quote_consensus,
         "professionalAnalytics": professional_analytics,
         "prediction": {
             "opportunityScore": opportunity_score,
@@ -4249,6 +4857,7 @@ def _scan_state(context: dict, picks: list[dict], errors: list[dict]) -> dict:
         "failed": len(errors),
         "discoveryErrors": context["discovery_errors"],
         "marketProfiles": {market: market_profile(market) for market in requested_markets},
+        "marketRuleProfiles": {market: market_rule_profile(market) for market in requested_markets},
         "universe": _scan_universe_state(context, picks, errors),
     }
 
@@ -4339,6 +4948,8 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
         symbols = context["symbols"]
 
     portfolio_summary = _apply_portfolio_context(context, display_picks)
+    if portfolio_summary:
+        display_picks = sorted(display_picks, key=_display_priority_key)
     sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
     response = {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -4391,6 +5002,8 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                         picks.append(pick)
                         display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
                         portfolio_summary = _apply_portfolio_context(context, display_picks)
+                        if portfolio_summary:
+                            display_picks = sorted(display_picks, key=_display_priority_key)
                         _refresh_scan_quality_context(context, picks)
                         sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
                         rank = next((index + 1 for index, item in enumerate(display_picks) if item["symbol"] == pick["symbol"]), len(display_picks))
@@ -4400,6 +5013,8 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                         errors.append({"symbol": symbol, "error": error_message})
                         display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
                         portfolio_summary = _apply_portfolio_context(context, display_picks)
+                        if portfolio_summary:
+                            display_picks = sorted(display_picks, key=_display_priority_key)
                         _refresh_scan_quality_context(context, picks)
                         yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(picks if context["auto_scan"] else display_picks), scan=_scan_state(context, display_picks, errors), portfolio=portfolio_summary)
             evaluated_symbols.update(item.symbol for item in pending_symbols)
@@ -4415,6 +5030,8 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
 
     display_picks = display_picks or _finish_picks(picks, context["auto_scan"], context["display_limit"])
     portfolio_summary = _apply_portfolio_context(context, display_picks)
+    if portfolio_summary:
+        display_picks = sorted(display_picks, key=_display_priority_key)
     _refresh_scan_quality_context(context, picks)
     sectors = _sector_analysis(picks if context["auto_scan"] else display_picks)
     complete_payload = {

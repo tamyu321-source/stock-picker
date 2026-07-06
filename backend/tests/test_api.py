@@ -6,7 +6,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+os.environ.pop("USER_ACCESS_KEYS", None)
+_TEST_AUTH_STORE_PATH = os.path.join(tempfile.gettempdir(), f"stock-picker-auth-store-test-{os.getpid()}.json")
+try:
+    os.remove(_TEST_AUTH_STORE_PATH)
+except FileNotFoundError:
+    pass
 os.environ["API_ACCESS_KEYS"] = ""
+os.environ["AUTH_STORE_PATH"] = _TEST_AUTH_STORE_PATH
 
 from backend.app import create_app
 from backend.auth_store import hash_secret
@@ -202,16 +209,23 @@ class ApiTestCase(unittest.TestCase):
                 "settings": {"locale": "zh-TW", "symbolText": "2330.TW"},
                 "savedScans": [{"id": "scan-1", "title": "Taiwan scan"}],
                 "portfolio": {"symbols": ["2330.TW"], "recognizedCount": 1},
+                "portfolioMemory": [{"id": "portfolio-1", "title": "TW holdings", "portfolio": {"positions": [{"symbol": "2330.TW"}]}}],
+                "recommendationHistory": [{"id": "2330.TW-1", "symbol": "2330.TW", "entryPrice": 600}],
             }
             update_response = client.put("/api/user/state", json=first_state, headers={"Authorization": f"Bearer {first_token}"})
             self.assertEqual(update_response.status_code, 200)
             self.assertEqual(update_response.get_json()["settings"]["symbolText"], "2330.TW")
+            self.assertEqual(update_response.get_json()["portfolioMemory"][0]["title"], "TW holdings")
 
             first_read = client.get("/api/user/state", headers={"Authorization": f"Bearer {first_token}"}).get_json()
             second_read = client.get("/api/user/state", headers={"Authorization": f"Bearer {second_token}"}).get_json()
             self.assertEqual(first_read["settings"]["locale"], "zh-TW")
+            self.assertEqual(first_read["portfolioMemory"][0]["id"], "portfolio-1")
+            self.assertEqual(first_read["recommendationHistory"][0]["symbol"], "2330.TW")
             self.assertEqual(second_read["settings"], {})
             self.assertEqual(second_read["savedScans"], [])
+            self.assertEqual(second_read["portfolioMemory"], [])
+            self.assertEqual(second_read["recommendationHistory"], [])
 
     def test_admin_can_manage_user_keys_and_reset_state(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -491,6 +505,7 @@ class ApiTestCase(unittest.TestCase):
                     "quantity": 100,
                     "availableQuantity": 80,
                     "costPrice": 200.0,
+                    "lastPrice": 205.0,
                 }
             ],
         }
@@ -504,6 +519,8 @@ class ApiTestCase(unittest.TestCase):
         payload = response.get_json()
         pick = payload["picks"][0]
         self.assertEqual(pick["holding"]["lastPrice"], 220.0)
+        self.assertEqual(pick["holding"]["brokerLastPrice"], 205.0)
+        self.assertAlmostEqual(pick["holding"]["livePriceDriftPct"], 7.3171)
         self.assertEqual(pick["holding"]["frozenQuantity"], 20)
         self.assertEqual(pick["holding"]["marketValue"], 22000.0)
         self.assertEqual(pick["holding"]["unrealizedPnl"], 2000.0)
@@ -513,8 +530,146 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("suggestedQuantityChange", pick["holdingAnalysis"])
         self.assertIn("stopLossPrice", pick["holdingAnalysis"])
         self.assertIn("takeProfitPrice", pick["holdingAnalysis"])
+        self.assertIn("holdingPriceSourceDrift", {note["key"] for note in pick["holdingAnalysis"]["notes"]})
+        self.assertEqual(pick["quoteConsensus"]["status"], "conflict")
+        self.assertTrue(pick["quoteConsensus"]["conflict"])
+        self.assertIn("priceConsensusConflict", {gate["key"] for gate in pick["decisionEngine"]["gates"]})
+        self.assertNotEqual(pick["finalDecision"]["action"], "accumulate")
         self.assertIn("compositeModel", pick)
         self.assertEqual(payload["portfolio"]["totalMarketValue"], 22000.0)
+        self.assertTrue(payload["portfolio"]["actionItems"])
+        self.assertEqual(payload["portfolio"]["actionItems"][0]["symbol"], "300750.SZ")
+
+    def test_deep_market_closed_session_only_allows_watchlist(self):
+        class ClosedTaiwanProvider:
+            def fetch(self, symbol):
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Taiwan Test",
+                    market="TW",
+                    sector="Technology",
+                    price=700.0,
+                    change=1.8,
+                    currency="TWD",
+                    closes=[520 + index * 1.4 for index in range(130)],
+                    info={
+                        "priceSource": "twse-openapi",
+                        "analysisTime": "2026-07-06T18:00:00+08:00",
+                        "trailingPE": 18,
+                        "returnOnEquity": 0.22,
+                        "profitMargins": 0.25,
+                        "debtToEquity": 20,
+                    },
+                )
+
+        class ManualUniverseProvider:
+            def resolve_manual_inputs(self, inputs, markets, limit=25):
+                return [DiscoveredSymbol(str(symbol).upper(), "Taiwan Test", "TW", "test-manual") for symbol in inputs], []
+
+        client = create_app(ClosedTaiwanProvider(), self.news_crawler, ManualUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["TW"], "symbols": ["2330.TW"], "strategyId": "balanced"})
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        self.assertEqual(pick["marketRuleState"]["status"], "closed")
+        self.assertTrue(pick["marketRuleState"]["enforcedBuyGate"])
+        self.assertIn("outsideTradingSession", {gate["key"] for gate in pick["decisionEngine"]["gates"]})
+        self.assertNotEqual(pick["finalDecision"]["action"], "accumulate")
+
+    def test_china_t1_locked_holding_has_zero_executable_quantity(self):
+        class FallingChinaProvider:
+            def fetch(self, symbol):
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="\u9886\u76ca\u667a\u9020",
+                    market="CN",
+                    sector="Technology",
+                    price=16.41,
+                    change=-4.8,
+                    currency="CNY",
+                    closes=[18.8 - index * 0.018 for index in range(130)],
+                    info={
+                        "priceSource": "eastmoney",
+                        "analysisTime": "2026-07-06T10:30:00+08:00",
+                        "trailingPE": 30,
+                        "returnOnEquity": 0.08,
+                        "profitMargins": 0.05,
+                        "debtToEquity": 55,
+                    },
+                )
+
+        class PortfolioUniverseProvider:
+            def resolve_manual_inputs(self, inputs, markets, limit=25):
+                return [DiscoveredSymbol(str(symbol).upper(), "\u9886\u76ca\u667a\u9020", "CN", "test-portfolio") for symbol in inputs], []
+
+        portfolio = {
+            "sourceName": "Manual holdings",
+            "sourceType": "manual-holdings",
+            "positions": [
+                {
+                    "symbol": "002600.SZ",
+                    "code": "002600",
+                    "name": "\u9886\u76ca\u667a\u9020",
+                    "market": "CN",
+                    "quantity": 100,
+                    "availableQuantity": 0,
+                    "costPrice": 17.9022,
+                    "lastPrice": 16.41,
+                }
+            ],
+        }
+        client = create_app(FallingChinaProvider(), self.news_crawler, PortfolioUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["CN"], "symbols": ["002600.SZ"], "strategyId": "balanced", "portfolio": portfolio})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        pick = payload["picks"][0]
+        self.assertEqual(pick["holdingAnalysis"]["executionStatus"], "blocked_today")
+        self.assertEqual(pick["finalDecision"]["execution"]["executableQuantityChange"], 0)
+        self.assertEqual(payload["portfolio"]["actionItems"][0]["bucket"], "t1_locked")
+        self.assertEqual(payload["portfolio"]["actionItems"][0]["executableQuantityChange"], 0)
+
+    def test_basic_markets_report_rules_without_tw_cn_session_gates(self):
+        class BasicMarketProvider:
+            def fetch(self, symbol):
+                market = infer_market(symbol)
+                currency = {"HK": "HKD", "US": "USD", "JP": "JPY", "KR": "KRW", "SG": "SGD"}.get(market, "USD")
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name=f"{market} Test",
+                    market=market,
+                    sector="Technology",
+                    price=100.0,
+                    change=1.1,
+                    currency=currency,
+                    closes=[80 + index * 0.25 for index in range(130)],
+                    info={
+                        "priceSource": "yahoo-chart",
+                        "analysisTime": "2026-07-06T20:00:00+08:00",
+                        "trailingPE": 18,
+                        "returnOnEquity": 0.18,
+                        "profitMargins": 0.20,
+                        "debtToEquity": 25,
+                    },
+                )
+
+        class ManualUniverseProvider:
+            def resolve_manual_inputs(self, inputs, markets, limit=25):
+                return [DiscoveredSymbol(str(symbol).upper(), "Basic Test", infer_market(str(symbol).upper()), "test-manual") for symbol in inputs], []
+
+        symbols = ["0005.HK", "AAPL", "7203.T", "005930.KS", "D05.SI"]
+        client = create_app(BasicMarketProvider(), self.news_crawler, ManualUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["HK", "US", "JP", "KR", "SG"], "symbols": symbols, "strategyId": "balanced"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(set(payload["scan"]["marketRuleProfiles"].keys()), {"HK", "US", "JP", "KR", "SG"})
+        for pick in payload["picks"]:
+            self.assertEqual(pick["marketRuleState"]["ruleDepth"], "basic")
+            self.assertFalse(pick["marketRuleState"]["enforcedBuyGate"])
+            gate_keys = {gate["key"] for gate in pick["decisionEngine"]["gates"]}
+            self.assertNotIn("outsideTradingSession", gate_keys)
+            self.assertNotIn("openingConfirmationPending", gate_keys)
 
     def test_ttl_cache_expires_entries(self):
         now = [100.0]
@@ -1879,7 +2034,8 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(professional["factorModel"]["version"], "professional-factor-v1")
         self.assertGreaterEqual(len(professional["factorModel"]["exposures"]), 6)
         self.assertIn(professional["benchmarkRelative"]["rank"], {"outperforming", "in-line", "lagging"})
-        self.assertEqual(len(professional["recommendationTracker"]["checkpoints"]), 3)
+        self.assertEqual(professional["recommendationTracker"]["version"], "recommendation-tracker-v2")
+        self.assertGreaterEqual(len(professional["recommendationTracker"]["checkpoints"]), 3)
         self.assertEqual(professional["attribution"]["version"], "attribution-v1")
         self.assertEqual(professional["portfolioOptimizer"]["version"], "portfolio-optimizer-v1")
         self.assertTrue(professional["alertMonitor"]["rules"])
@@ -1890,6 +2046,12 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("nextSessionReversalRiskScore", pick)
         self.assertIn("tScore", pick)
         self.assertIn("tPlan", pick)
+        self.assertIn("finalDecision", pick)
+        self.assertEqual(pick["finalDecision"]["version"], "final-decision-v1")
+        self.assertIn(pick["finalDecision"]["action"], {"accumulate", "hold", "reduce", "exit"})
+        self.assertIn("recommendationAudit", pick)
+        self.assertEqual(pick["recommendationAudit"]["version"], "recommendation-audit-v1")
+        self.assertGreaterEqual(len(pick["recommendationAudit"]["checkpoints"]), 3)
         self.assertIn(pick["tPlan"]["suitability"], {"candidate", "watch", "avoid"})
         self.assertIn("entryZone", pick["tPlan"])
         self.assertIn("takeProfitZone", pick["tPlan"])
@@ -2056,6 +2218,285 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(pick["instrumentType"], "etf")
         self.assertEqual(pick["decisionEngine"]["instrumentType"], "etf")
         self.assertIn("etfTrend", {metric["key"] for metric in pick["financialAnalysis"]["metrics"]})
+
+    def test_high_beta_cn_etf_intraday_drop_blocks_buy_and_t1_holding_is_not_executable(self):
+        class DroppingEtfProvider:
+            def fetch(self, symbol):
+                closes = [3.25 + index * 0.006 for index in range(128)] + [4.037, 3.927]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="ChiNext ETF",
+                    market="CN",
+                    sector="ETF / Fund",
+                    price=3.927,
+                    change=-2.72,
+                    currency="CNY",
+                    closes=closes,
+                    info={
+                        "quoteType": "ETF",
+                        "instrumentType": "etf",
+                        "shortName": "ChiNext ETF",
+                        "regularMarketVolume": 180_000_000,
+                        "marketCap": 35_000_000_000,
+                        "totalAssets": 35_000_000_000,
+                        "annualReportExpenseRatio": 0.005,
+                        "fiftyTwoWeekHigh": 4.45,
+                        "fiftyTwoWeekLow": 2.85,
+                        "priceSource": "eastmoney-cn-daily",
+                        "analysisTimeUtc": "2026-07-06T02:45:00Z",
+                    },
+                    instrument_type="etf",
+                )
+
+        class PortfolioUniverseProvider:
+            def resolve_manual_inputs(self, inputs, markets, limit=25):
+                return [DiscoveredSymbol(str(symbol).upper(), "ChiNext ETF", infer_market(str(symbol).upper()), "manual-resolve") for symbol in inputs], []
+
+        portfolio = {
+            "sourceName": "Screenshot holdings",
+            "sourceType": "manual-holdings",
+            "positions": [
+                {
+                    "symbol": "159915.SZ",
+                    "code": "159915",
+                    "name": "ChiNext ETF",
+                    "market": "CN",
+                    "quantity": 300,
+                    "availableQuantity": 0,
+                    "costPrice": 4.0773,
+                    "lastPrice": 3.935,
+                    "marketValue": 1180.5,
+                }
+            ],
+        }
+        client = create_app(DroppingEtfProvider(), self.news_crawler, PortfolioUniverseProvider()).test_client()
+        response = client.post(
+            "/api/analyze",
+            json={"markets": ["CN"], "symbols": ["159915.SZ"], "strategyId": "ai_smart_blend", "portfolio": portfolio},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        gate_keys = {gate["key"] for gate in pick["decisionEngine"]["gates"]}
+        self.assertEqual(pick["decisionEngine"]["instrumentProfile"]["category"], "high_beta_tactical")
+        self.assertIn("etfHighBetaIntradayDrop", gate_keys)
+        self.assertNotEqual(pick["decisionEngine"]["action"], "accumulate")
+        self.assertEqual(pick["finalDecision"]["action"], "reduce")
+        self.assertEqual(pick["finalDecision"]["verdict"], "watch")
+        self.assertEqual(pick["holdingAnalysis"]["executionStatus"], "blocked_today")
+        self.assertLess(pick["holdingAnalysis"]["plannedQuantityChange"], 0)
+        self.assertEqual(abs(pick["holdingAnalysis"]["plannedQuantityChange"]) % 100, 0)
+        self.assertEqual(pick["holdingAnalysis"]["suggestedQuantityChange"], 0)
+        self.assertEqual(pick["holdingAnalysis"]["orderSizing"]["sellLotSize"], 100)
+        self.assertIn("holdingT1Unavailable", {note["key"] for note in pick["holdingAnalysis"]["notes"]})
+
+    def test_china_a_share_holding_sell_plan_respects_100_share_lot(self):
+        class ScreenshotProvider:
+            def fetch(self, symbol):
+                if symbol == "159915.SZ":
+                    closes = [3.25 + index * 0.006 for index in range(128)] + [4.037, 3.927]
+                    return MarketSnapshot(
+                        symbol=symbol,
+                        name="ChiNext ETF",
+                        market="CN",
+                        sector="ETF / Fund",
+                        price=3.927,
+                        change=-2.72,
+                        currency="CNY",
+                        closes=closes,
+                        info={
+                            "quoteType": "ETF",
+                            "instrumentType": "etf",
+                            "shortName": "ChiNext ETF",
+                            "regularMarketVolume": 180_000_000,
+                            "marketCap": 35_000_000_000,
+                            "totalAssets": 35_000_000_000,
+                            "annualReportExpenseRatio": 0.005,
+                            "priceSource": "eastmoney-cn-daily",
+                            "analysisTimeUtc": "2026-07-06T02:45:00Z",
+                        },
+                        instrument_type="etf",
+                    )
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Lingyi iTech",
+                    market="CN",
+                    sector="Technology",
+                    price=16.41,
+                    change=-4.8,
+                    currency="CNY",
+                    closes=[18.8 - index * 0.018 for index in range(130)],
+                    info={
+                        "trailingPE": 30,
+                        "returnOnEquity": 0.08,
+                        "profitMargins": 0.05,
+                        "debtToEquity": 55,
+                        "priceSource": "eastmoney-cn-daily",
+                        "analysisTimeUtc": "2026-07-06T02:45:00Z",
+                    },
+                )
+
+        class PortfolioUniverseProvider:
+            def resolve_manual_inputs(self, inputs, markets, limit=25):
+                names = {"159915.SZ": "ChiNext ETF", "002600.SZ": "Lingyi iTech"}
+                return [DiscoveredSymbol(str(symbol).upper(), names.get(str(symbol).upper(), "Holding"), "CN", "manual-resolve") for symbol in inputs], []
+
+        portfolio = {
+            "sourceName": "Screenshot holdings",
+            "sourceType": "manual-holdings",
+            "positions": [
+                {
+                    "symbol": "002600.SZ",
+                    "code": "002600",
+                    "name": "Lingyi iTech",
+                    "market": "CN",
+                    "quantity": 100,
+                    "availableQuantity": 100,
+                    "costPrice": 17.9022,
+                    "lastPrice": 16.41,
+                    "marketValue": 1641.0,
+                },
+                {
+                    "symbol": "159915.SZ",
+                    "code": "159915",
+                    "name": "ChiNext ETF",
+                    "market": "CN",
+                    "quantity": 300,
+                    "availableQuantity": 300,
+                    "costPrice": 4.0773,
+                    "lastPrice": 3.935,
+                    "marketValue": 1180.5,
+                },
+            ],
+        }
+        client = create_app(ScreenshotProvider(), self.news_crawler, PortfolioUniverseProvider()).test_client()
+        response = client.post(
+            "/api/analyze",
+            json={"markets": ["CN"], "symbols": ["002600.SZ", "159915.SZ"], "strategyId": "ai_smart_blend", "portfolio": portfolio},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        pick = next(item for item in payload["picks"] if item["symbol"] == "159915.SZ")
+        self.assertLess(pick["holdingAnalysis"]["rawQuantityChange"], -120)
+        self.assertGreater(pick["holdingAnalysis"]["rawQuantityChange"], -160)
+        self.assertEqual(pick["holdingAnalysis"]["plannedQuantityChange"], -100)
+        self.assertEqual(pick["holdingAnalysis"]["suggestedQuantityChange"], -100)
+        self.assertIn("holdingOrderLotAdjusted", {note["key"] for note in pick["holdingAnalysis"]["notes"]})
+        action_item = next(item for item in payload["portfolio"]["actionItems"] if item["symbol"] == "159915.SZ")
+        self.assertEqual(action_item["plannedQuantityChange"], -100)
+        self.assertEqual(action_item["orderSizing"]["sellLotSize"], 100)
+
+    def test_cn_opening_confirmation_blocks_new_buy_before_market_is_confirmed(self):
+        class OpeningProvider:
+            def fetch(self, symbol):
+                closes = [20 + index * 0.08 for index in range(130)]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Opening Corp",
+                    market="CN",
+                    sector="Technology",
+                    price=30.4,
+                    change=1.8,
+                    currency="CNY",
+                    closes=closes,
+                    info={
+                        "trailingPE": 18,
+                        "returnOnEquity": 0.24,
+                        "profitMargins": 0.2,
+                        "debtToEquity": 20,
+                        "regularMarketVolume": 30_000_000,
+                        "marketCap": 20_000_000_000,
+                        "priceSource": "eastmoney-cn-daily",
+                        "analysisTimeUtc": "2026-07-06T01:35:00Z",
+                    },
+                )
+
+        client = create_app(OpeningProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["CN"], "symbols": ["300001.SZ"], "strategyId": "balanced"})
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        gate_keys = {gate["key"] for gate in pick["decisionEngine"]["gates"]}
+        self.assertIn("openingConfirmationPending", gate_keys)
+        self.assertNotEqual(pick["finalDecision"]["action"], "accumulate")
+        self.assertEqual(pick["finalDecision"]["verdict"], "watch")
+
+    def test_source_warning_lowers_confidence_and_blocks_high_confidence_new_buy(self):
+        class SourceWarningProvider:
+            def fetch(self, symbol):
+                closes = [100 + index * 0.4 for index in range(130)]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Fallback Corp",
+                    market="US",
+                    sector="Technology",
+                    price=151.6,
+                    change=2.2,
+                    currency="USD",
+                    closes=closes,
+                    info={
+                        "trailingPE": 20,
+                        "returnOnEquity": 0.25,
+                        "profitMargins": 0.2,
+                        "debtToEquity": 20,
+                        "regularMarketVolume": 20_000_000,
+                        "marketCap": 50_000_000_000,
+                        "priceSource": "fallback",
+                        "primarySourceFailed": "yfinance",
+                        "sourceWarnings": ["yfinance-primary-failed:ValueError", "quote-summary-thin"],
+                    },
+                )
+
+        client = create_app(SourceWarningProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["US"], "symbols": ["FALL"], "strategyId": "balanced"})
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        quality = pick["decisionEngine"]["dataQuality"]
+        self.assertGreaterEqual(quality["sourcePenalty"], 14)
+        self.assertIn("sourceFallbackOrStale", quality["issues"])
+        self.assertIn("sourceStackUnstable", {gate["key"] for gate in pick["decisionEngine"]["gates"]})
+        self.assertNotEqual(pick["finalDecision"]["action"], "accumulate")
+
+    def test_hot_list_discovery_requires_confirmation_before_buy(self):
+        class HotListProvider:
+            def fetch(self, symbol):
+                closes = [30 + index * 0.1 for index in range(128)] + [43, 45.7]
+                return MarketSnapshot(
+                    symbol=symbol,
+                    name="Hot List Corp",
+                    market="CN",
+                    sector="Technology",
+                    price=45.7,
+                    change=6.1,
+                    currency="CNY",
+                    closes=closes,
+                    info={
+                        "trailingPE": 22,
+                        "returnOnEquity": 0.22,
+                        "profitMargins": 0.2,
+                        "debtToEquity": 20,
+                        "regularMarketVolume": 40_000_000,
+                        "marketCap": 30_000_000_000,
+                        "priceSource": "eastmoney-cn-daily",
+                        "analysisTimeUtc": "2026-07-06T02:20:00Z",
+                    },
+                )
+
+        class HotUniverseProvider:
+            def discover(self, markets, limit_per_market=18):
+                return [DiscoveredSymbol("300001.SZ", "Hot List Corp", "CN", "eastmoney-cn-gainers-risk-review")], []
+
+        client = create_app(HotListProvider(), self.news_crawler, HotUniverseProvider()).test_client()
+        response = client.post("/api/analyze", json={"markets": ["CN"], "strategyId": "balanced"})
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        self.assertEqual(pick["discoverySource"], "eastmoney-cn-gainers-risk-review")
+        self.assertTrue(pick["decisionEngine"]["discoveryContext"]["hotSource"])
+        self.assertIn("hotListChaseRisk", {gate["key"] for gate in pick["decisionEngine"]["gates"]})
+        self.assertNotEqual(pick["finalDecision"]["action"], "accumulate")
 
     def test_response_contains_sector_analysis(self):
         response = self.client.post("/api/analyze", json={"markets": ["US"], "symbols": ["AAPL", "MSFT"], "strategyId": "balanced"})

@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, clearAuthSession, createAdminUser, currentDataMode, fetchAdminUsers, fetchConfig, fetchCurrentSession, fetchStockChart, fetchUserState, getAuthSession, importPortfolioFile, loginAdmin, loginWithAccessKey, refreshStrategyLibrary, resetAdminUserState, saveUserState, setAuthSession, updateAdminUser, type AdminUser, type AnalysisScan, type AnalysisStreamEvent, type AppConfig, type AuthSession, type DecisionPoint, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingNote, type HoldingPosition, type Market, type MarketProfile, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights, type UserState } from './api';
+import { analyzeStocksStream, clearAuthSession, createAdminUser, currentDataMode, fetchAdminUsers, fetchConfig, fetchCurrentSession, fetchStockChart, fetchUserState, getAuthSession, importPortfolioFile, loginAdmin, loginWithAccessKey, refreshStrategyLibrary, resetAdminUserState, saveUserState, setAuthSession, updateAdminUser, type AdminUser, type AnalysisScan, type AnalysisStreamEvent, type AppConfig, type AuthSession, type DecisionPoint, type DisplayMode, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingActionItem, type HoldingNote, type HoldingPosition, type Market, type MarketProfile, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type PortfolioMemoryItem, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights, type UserState } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -48,6 +48,19 @@ type SavedScan = {
   scanInfo: AnalysisScan | null;
   portfolio: PortfolioAnalysis | PortfolioImportResponse | null;
 };
+type RecommendationHistoryItem = {
+  id: string;
+  symbol: string;
+  name: string;
+  market: Market;
+  openedAt: string;
+  scanGeneratedAt: string;
+  entryPrice: number;
+  action: string;
+  verdict: Pick['verdict'];
+  confidence: number;
+  source?: string;
+};
 
 const locale = ref<Locale>('en');
 const languageMenuOpen = ref(false);
@@ -69,6 +82,7 @@ const resultMarketFilter = ref<ResultMarketFilter>('all');
 const resultVerdictFilter = ref<ResultVerdictFilter>('all');
 const resultSortKey = ref<ResultSortKey>('recommended');
 const resultSortDirection = ref<SortDirection>('desc');
+const displayMode = ref<DisplayMode>('simple');
 const dataIssues = ref<DataIssue[]>([]);
 const scanInfo = ref<AnalysisScan | null>(null);
 const loadingStartedAt = ref(0);
@@ -78,9 +92,11 @@ const scanRunId = ref(0);
 const signalRefreshStartedAt = ref('');
 const dataMode = ref(currentDataMode());
 const savedScans = ref<SavedScan[]>([]);
+const recommendationHistory = ref<RecommendationHistoryItem[]>([]);
 const portfolioFileInput = ref<HTMLInputElement | null>(null);
 const importedPortfolio = ref<PortfolioImportResponse | null>(null);
 const analysisPortfolio = ref<PortfolioAnalysis | null>(null);
+const portfolioMemory = ref<PortfolioMemoryItem[]>([]);
 const importingPortfolio = ref(false);
 const portfolioImportError = ref('');
 const manualHoldingText = ref('');
@@ -105,6 +121,8 @@ const yogurtAudioDataUris: Partial<Record<YogurtSoundCue, string>> = {};
 const SETTINGS_STORAGE_KEY = 'open-stock-picker.settings.v1';
 const SAVED_SCANS_STORAGE_KEY = 'open-stock-picker.saved-scans.v1';
 const SAVED_SCAN_LIMIT = 6;
+const PORTFOLIO_MEMORY_LIMIT = 5;
+const RECOMMENDATION_HISTORY_LIMIT = 50;
 const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
 const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 't', 'watch', 'sell'];
@@ -564,6 +582,8 @@ type PersistedSettings = {
   customWeights?: Partial<StrategyWeights>;
   symbolText?: string;
   manualHoldingText?: string;
+  displayMode?: DisplayMode;
+  defaultResultView?: 'stocks' | 'sectors';
   resultSortKey?: ResultSortKey;
   resultSortDirection?: SortDirection;
 };
@@ -748,6 +768,7 @@ const chartCandles = computed(() => {
 const marketOptions = computed(() => config.value?.markets ?? []);
 const marketProfiles = computed<Partial<Record<Market, MarketProfile>>>(() => config.value?.marketProfiles ?? {});
 const scanUniverse = computed(() => scanInfo.value?.universe ?? null);
+const isProfessionalMode = computed(() => displayMode.value === 'professional');
 const preferredMarketsLabel = computed(() => {
   const preferred = selectedMarkets.value
     .filter((market) => marketProfiles.value[market]?.preferred || marketProfiles.value[market]?.localPriority)
@@ -773,6 +794,71 @@ const decisionBucketItems = computed(() => workbenchBuckets.map((bucket) => ({
 })));
 const topHoldingPicks = computed(() => picks.value.filter((pick) => pick.holding && pick.holdingAnalysis).slice(0, 4));
 const topEtfPicks = computed(() => picks.value.filter((pick) => pick.instrumentType === 'etf').slice(0, 4));
+const holdingCommandSummary = computed(() => {
+  const holdingPicks = picks.value.filter((pick) => pick.holding && pick.holdingAnalysis);
+  const plannedSell = holdingPicks.reduce((sum, pick) => sum + Math.min(0, Number(pick.holdingAnalysis?.plannedQuantityChange ?? 0)), 0);
+  const executableSell = holdingPicks.reduce((sum, pick) => sum + Math.min(0, Number(pick.holdingAnalysis?.suggestedQuantityChange ?? 0)), 0);
+  return {
+    count: holdingPicks.length,
+    reduceCount: holdingPicks.filter((pick) => pick.holdingAnalysis?.action === 'reduce').length,
+    exitCount: holdingPicks.filter((pick) => pick.holdingAnalysis?.action === 'exit').length,
+    blockedCount: holdingPicks.filter((pick) => pick.holdingAnalysis?.executionStatus === 'blocked_today').length,
+    plannedSell,
+    executableSell
+  };
+});
+const holdingActionItems = computed<HoldingActionItem[]>(() => {
+  const apiItems = activePortfolio.value?.actionItems;
+  if (apiItems?.length) return apiItems.slice(0, 12);
+  return picks.value
+    .filter((pick) => pick.holding && pick.holdingAnalysis)
+    .map((pick) => ({
+    symbol: pick.symbol,
+    name: pick.name,
+    market: pick.market,
+    action: pick.holdingAnalysis?.action ?? 'hold',
+    bucket: pick.holdingAnalysis?.executionStatus === 'blocked_today'
+      ? 't1_locked'
+      : pick.holdingAnalysis?.action === 'exit' || pick.holdingAnalysis?.action === 'reduce'
+        ? 'risk_action'
+        : pick.holdingAnalysis?.action === 'hold'
+          ? 'observe'
+          : 'rebalance',
+    executionStatus: pick.holdingAnalysis?.executionStatus ?? 'executable',
+    plannedQuantityChange: pick.holdingAnalysis?.plannedQuantityChange ?? 0,
+    executableQuantityChange: pick.holdingAnalysis?.suggestedQuantityChange ?? 0,
+    unrealizedPnlPct: pick.holding?.unrealizedPnlPct ?? null,
+    finalAction: pick.finalDecision?.action ?? pick.decisionEngine?.action ?? 'hold'
+  }))
+  .sort((left, right) => {
+    const severity = (item: typeof left) => (item.action === 'exit' ? 4 : item.action === 'reduce' ? 3 : item.executionStatus === 'blocked_today' ? 2 : 1);
+    return severity(right) - severity(left);
+  })
+    .slice(0, 8);
+});
+const recommendationReview = computed(() => {
+  const currentBySymbol = new Map(picks.value.map((pick) => [pick.symbol, pick]));
+  const reviewed = recommendationHistory.value
+    .map((item) => {
+      const current = currentBySymbol.get(item.symbol);
+      const entry = Number(item.entryPrice ?? 0);
+      const currentPrice = Number(current?.price ?? 0);
+      const returnPct = entry > 0 && currentPrice > 0 ? (currentPrice - entry) / entry * 100 : null;
+      return { ...item, currentPrice, returnPct };
+    })
+    .filter((item) => item.returnPct !== null);
+  const wins = reviewed.filter((item) => Number(item.returnPct) > 0).length;
+  const averageReturn = reviewed.length ? reviewed.reduce((sum, item) => sum + Number(item.returnPct), 0) / reviewed.length : 0;
+  const worstReturn = reviewed.length ? Math.min(...reviewed.map((item) => Number(item.returnPct))) : 0;
+  return {
+    reviewed,
+    count: reviewed.length,
+    wins,
+    hitRate: reviewed.length ? wins / reviewed.length * 100 : 0,
+    averageReturn,
+    worstReturn,
+  };
+});
 const flattenedSignals = computed(() => filteredPicks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
 const resultFiltersActive = computed(() => activeWorkbenchBucket.value !== 'all' || resultMarketFilter.value !== 'all' || resultVerdictFilter.value !== 'all' || resultSortKey.value !== 'recommended' || resultSortDirection.value !== 'desc');
 const isDemoDataMode = computed(() => dataMode.value === 'demo');
@@ -887,6 +973,10 @@ function isSortDirection(value: unknown): value is SortDirection {
   return value === 'asc' || value === 'desc';
 }
 
+function isDisplayMode(value: unknown): value is DisplayMode {
+  return value === 'simple' || value === 'professional';
+}
+
 function normalizeWeight(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.min(40, Math.max(0, value)) : null;
 }
@@ -912,6 +1002,8 @@ function currentPersistedSettings(): PersistedSettings {
     customWeights: { ...customWeights },
     symbolText: symbolText.value,
     manualHoldingText: manualHoldingText.value,
+    displayMode: displayMode.value,
+    defaultResultView: activeView.value,
     resultSortKey: resultSortKey.value,
     resultSortDirection: resultSortDirection.value
   };
@@ -946,6 +1038,12 @@ function applyPersistedSettings(settings: PersistedSettings | Record<string, unk
   if (typeof persisted.manualHoldingText === 'string') {
     manualHoldingText.value = persisted.manualHoldingText;
   }
+  if (isDisplayMode(persisted.displayMode)) {
+    displayMode.value = persisted.displayMode;
+  }
+  if (persisted.defaultResultView === 'stocks' || persisted.defaultResultView === 'sectors') {
+    activeView.value = persisted.defaultResultView;
+  }
   if (isResultSortKey(persisted.resultSortKey)) {
     resultSortKey.value = persisted.resultSortKey;
   }
@@ -958,7 +1056,9 @@ function currentUserState(): UserState {
   return {
     settings: currentPersistedSettings() as Record<string, unknown>,
     savedScans: cloneJson(savedScans.value),
-    portfolio: activePortfolio.value ? cloneJson(activePortfolio.value) : null
+    portfolio: activePortfolio.value ? cloneJson(activePortfolio.value) : null,
+    portfolioMemory: cloneJson(portfolioMemory.value.slice(0, PORTFOLIO_MEMORY_LIMIT)),
+    recommendationHistory: cloneJson(recommendationHistory.value.slice(0, RECOMMENDATION_HISTORY_LIMIT))
   };
 }
 
@@ -1031,8 +1131,105 @@ function applySavedScans(value: unknown) {
   return true;
 }
 
+function normalizePortfolioMemoryItem(value: unknown): PortfolioMemoryItem | null {
+  if (!value || typeof value !== 'object') return null;
+  const item = value as PortfolioMemoryItem;
+  if (!item.id || !item.portfolio || !Array.isArray(item.portfolio.positions)) return null;
+  return {
+    id: String(item.id),
+    savedAt: String(item.savedAt || new Date().toISOString()),
+    title: String(item.title || item.sourceName || portfolioMemoryFallbackTitle(item.portfolio)),
+    sourceName: String(item.sourceName || item.portfolio.sourceName || portfolioText().manualTitle),
+    sourceType: String(item.sourceType || item.portfolio.sourceType || 'manual-holdings'),
+    recognizedCount: Number(item.recognizedCount || item.portfolio.recognizedCount || item.portfolio.positions.length || 0),
+    symbols: Array.isArray(item.symbols) ? item.symbols.map(String) : item.portfolio.positions.map((position) => position.symbol),
+    totalMarketValue: Number(item.totalMarketValue || item.portfolio.totalMarketValue || 0),
+    totalUnrealizedPnl: Number(item.totalUnrealizedPnl || item.portfolio.totalUnrealizedPnl || 0),
+    totalUnrealizedPnlPct: item.totalUnrealizedPnlPct ?? item.portfolio.totalUnrealizedPnlPct ?? null,
+    diff: item.diff ?? null,
+    portfolio: cloneJson(item.portfolio)
+  };
+}
+
+function applyPortfolioMemory(value: unknown) {
+  if (!Array.isArray(value)) return false;
+  portfolioMemory.value = value
+    .map(normalizePortfolioMemoryItem)
+    .filter((item): item is PortfolioMemoryItem => Boolean(item))
+    .slice(0, PORTFOLIO_MEMORY_LIMIT);
+  return true;
+}
+
+function applyRecommendationHistory(value: unknown) {
+  if (!Array.isArray(value)) return false;
+  recommendationHistory.value = value
+    .filter((item): item is RecommendationHistoryItem => Boolean(item) && typeof item.id === 'string' && typeof item.symbol === 'string')
+    .slice(0, RECOMMENDATION_HISTORY_LIMIT);
+  return true;
+}
+
+function portfolioMemoryFallbackTitle(portfolio: PortfolioImportResponse | PortfolioAnalysis) {
+  const lead = portfolio.positions[0]?.name || portfolio.positions[0]?.symbol || portfolio.sourceName;
+  return `${lead} · ${portfolio.recognizedCount || portfolio.positions.length}`;
+}
+
+function portfolioMemorySnapshot(portfolio: PortfolioImportResponse | PortfolioAnalysis): PortfolioMemoryItem {
+  const savedAt = new Date().toISOString();
+  const symbols = portfolio.symbols?.length ? portfolio.symbols : portfolio.positions.map((position) => position.symbol);
+  const previous = portfolioMemory.value[0]?.portfolio ?? null;
+  return {
+    id: `${Date.now()}-${symbols.slice(0, 3).join('-') || 'portfolio'}`,
+    savedAt,
+    title: portfolioMemoryFallbackTitle(portfolio),
+    sourceName: portfolio.sourceName,
+    sourceType: portfolio.sourceType,
+    recognizedCount: portfolio.recognizedCount,
+    symbols,
+    totalMarketValue: Number(portfolio.totalMarketValue || 0),
+    totalUnrealizedPnl: Number(portfolio.totalUnrealizedPnl || 0),
+    totalUnrealizedPnlPct: portfolio.totalUnrealizedPnlPct ?? null,
+    diff: previous ? portfolioMemoryDiff(portfolio, previous) : null,
+    portfolio: cloneJson(portfolio)
+  };
+}
+
+function portfolioMemoryDiff(current: PortfolioImportResponse | PortfolioAnalysis, previous: PortfolioImportResponse | PortfolioAnalysis) {
+  const currentMap = new Map(current.positions.map((position) => [position.symbol, position]));
+  const previousMap = new Map(previous.positions.map((position) => [position.symbol, position]));
+  let quantityChanged = 0;
+  let costChanged = 0;
+  currentMap.forEach((position, symbol) => {
+    const old = previousMap.get(symbol);
+    if (!old) return;
+    if (Number(position.quantity ?? 0) !== Number(old.quantity ?? 0)) quantityChanged += 1;
+    if (Math.abs(Number(position.costPrice ?? 0) - Number(old.costPrice ?? 0)) >= 0.0001) costChanged += 1;
+  });
+  return {
+    added: [...currentMap.keys()].filter((symbol) => !previousMap.has(symbol)).length,
+    removed: [...previousMap.keys()].filter((symbol) => !currentMap.has(symbol)).length,
+    quantityChanged,
+    costChanged,
+    pnlChange: Number((Number(current.totalUnrealizedPnl || 0) - Number(previous.totalUnrealizedPnl || 0)).toFixed(4))
+  };
+}
+
+function rememberPortfolio(portfolio: PortfolioImportResponse | PortfolioAnalysis) {
+  const snapshot = portfolioMemorySnapshot(portfolio);
+  const signature = snapshot.symbols.join('|');
+  portfolioMemory.value = [
+    snapshot,
+    ...portfolioMemory.value.filter((item) => item.symbols.join('|') !== signature)
+  ].slice(0, PORTFOLIO_MEMORY_LIMIT);
+}
+
 function applyUserState(state: UserState) {
   userStateReady.value = false;
+  if (!applyPortfolioMemory(state.portfolioMemory)) {
+    portfolioMemory.value = [];
+  }
+  if (!applyRecommendationHistory(state.recommendationHistory)) {
+    recommendationHistory.value = [];
+  }
   if (state.settings && Object.keys(state.settings).length) {
     applyPersistedSettings(state.settings);
   } else {
@@ -1050,6 +1247,7 @@ function applyUserState(state: UserState) {
       importedPortfolio.value = portfolio as PortfolioImportResponse;
       analysisPortfolio.value = null;
     }
+    if (!portfolioMemory.value.length) rememberPortfolio(portfolio);
   }
   userStateReady.value = true;
   persistSettings();
@@ -1210,6 +1408,8 @@ function logout() {
   userStateReady.value = false;
   userStateError.value = '';
   savedScans.value = [];
+  recommendationHistory.value = [];
+  portfolioMemory.value = [];
   importedPortfolio.value = null;
   analysisPortfolio.value = null;
   picks.value = [];
@@ -1547,7 +1747,7 @@ function pickMatchesWorkbenchBucket(pick: Pick, bucket: WorkbenchBucket) {
   if (bucket === 'all') return true;
   if (bucket === 'etf') return pick.instrumentType === 'etf';
   if (bucket === 'holdings') return Boolean(pick.holding && pick.holdingAnalysis);
-  const action = pick.decisionEngine?.action;
+  const action = pick.finalDecision?.action ?? pick.decisionEngine?.action;
   if (bucket === 'buy') return finalVerdictBucket(pick) === 'buy' || action === 'accumulate';
   if (bucket === 'risk') return finalVerdictBucket(pick) === 'sell' || action === 'reduce' || action === 'exit';
   if (bucket === 'hold') return finalVerdictBucket(pick) === 'watch' && action !== 'reduce' && action !== 'exit';
@@ -1598,6 +1798,173 @@ function workbenchSubtitle() {
     return '開始掃描後會按決策、ETF、持倉分流。';
   }
   return `${scanUniverseModeLabel(universe.mode)} · ${universe.candidatePoolSize} ${scanUniverseMetricLabel('candidatePoolSize')} · ${universe.deepAnalysisCount} ${scanUniverseMetricLabel('deepAnalysisCount')}`;
+}
+
+function holdingCommandTitle() {
+  return localeText({
+    en: 'Holdings command center',
+    'zh-CN': '持仓指挥台',
+    'zh-TW': '持倉指揮台',
+    ja: '保有指令パネル',
+    ko: '보유 지휘대'
+  });
+}
+
+function displayModeLabel(mode: DisplayMode = displayMode.value) {
+  if (mode === 'professional') {
+    return localeText({ en: 'Professional', 'zh-CN': '专业', 'zh-TW': '專業', ja: 'プロ', ko: '전문' });
+  }
+  return localeText({ en: 'Simple', 'zh-CN': '简洁', 'zh-TW': '簡潔', ja: '簡潔', ko: '간결' });
+}
+
+function displayModeHint() {
+  return isProfessionalMode.value
+    ? localeText({
+        en: 'Full factors and diagnostics',
+        'zh-CN': '展开完整指标和诊断',
+        'zh-TW': '展開完整指標和診斷',
+        ja: '全指標と診断を表示',
+        ko: '전체 지표와 진단 표시'
+      })
+    : localeText({
+        en: 'Conclusion first',
+        'zh-CN': '结论优先',
+        'zh-TW': '結論優先',
+        ja: '結論優先',
+        ko: '결론 우선'
+      });
+}
+
+function detailAnalysisLabel() {
+  return localeText({
+    en: 'Detailed analysis',
+    'zh-CN': '详细分析',
+    'zh-TW': '詳細分析',
+    ja: '詳細分析',
+    ko: '상세 분석'
+  });
+}
+
+function marketRuleStateLabel(pick: Pick) {
+  const state = pick.marketRuleState ?? pick.decisionEngine?.marketRuleState;
+  if (!state) return marketCoverageTierLabel(pick.decisionEngine?.marketSupport?.coverageTier);
+  const statusLabels: Record<string, LocalizedText> = {
+    regular: { en: 'Trading', 'zh-CN': '交易中', 'zh-TW': '交易中', ja: '取引中', ko: '거래 중' },
+    opening_confirmation: { en: 'Opening check', 'zh-CN': '开盘确认中', 'zh-TW': '開盤確認中', ja: '寄付き確認中', ko: '개장 확인' },
+    lunch_break: { en: 'Lunch break', 'zh-CN': '午休', 'zh-TW': '午休', ja: '昼休み', ko: '점심 휴장' },
+    closed: { en: 'Closed', 'zh-CN': '闭市', 'zh-TW': '閉市', ja: '休場/時間外', ko: '장외' },
+    unknown: { en: 'Rule basic', 'zh-CN': '基础规则', 'zh-TW': '基礎規則', ja: '基本ルール', ko: '기본 규칙' }
+  };
+  const depth = state.ruleDepth === 'deep'
+    ? localeText({ en: 'deep rules', 'zh-CN': '深度规则', 'zh-TW': '深度規則', ja: '深い規則', ko: '심층 규칙' })
+    : localeText({ en: 'basic rules', 'zh-CN': '基础规则', 'zh-TW': '基礎規則', ja: '基本規則', ko: '기본 규칙' });
+  return `${localeText(statusLabels[state.status] ?? statusLabels.unknown)} · ${depth}`;
+}
+
+function marketRuleStateTone(pick: Pick) {
+  const state = pick.marketRuleState ?? pick.decisionEngine?.marketRuleState;
+  if (!state) return 'basic';
+  if (state.status === 'regular' && state.openConfirmed) return 'regular';
+  if (state.status === 'opening_confirmation') return 'opening';
+  if (state.status === 'closed' || state.status === 'lunch_break') return 'closed';
+  return state.ruleDepth === 'deep' ? 'opening' : 'basic';
+}
+
+function decisionExecutionLabel(pick: Pick) {
+  const execution = pick.finalDecision?.execution;
+  if (!execution || execution.status === 'not_applicable') return decisionActionLabel(pick.finalDecision?.action ?? pick.decisionEngine?.action);
+  return holdingExecutionStatusLabel(execution.status);
+}
+
+function conciseReasonItems(pick: Pick) {
+  const gateReasons = pick.decisionEngine?.gates?.slice(0, 3).map((gate) => decisionGateLabel(gate.key)) ?? [];
+  if (gateReasons.length) return gateReasons;
+  const finalReasons = pick.finalDecision?.primaryReasons?.slice(0, 3).map((reason) => decisionReasonLabel(reason)) ?? [];
+  if (finalReasons.length) return finalReasons;
+  return reportSupportItems(pick).slice(0, 3);
+}
+
+function holdingCommandSubtitle() {
+  return localeText({
+    en: 'Focus on risk actions, T+1 availability, and executable share changes.',
+    'zh-CN': '优先看风险动作、T+1 可用量、以及今天真正可执行的股数。',
+    'zh-TW': '優先看風險動作、T+1 可用量，以及今天真正可執行的股數。',
+    ja: 'リスク対応、T+1 の売却可否、実行可能な数量を優先表示します。',
+    ko: '리스크 조치, T+1 가능 수량, 오늘 실행 가능한 수량을 우선 표시합니다.'
+  });
+}
+
+function holdingCommandMetricLabel(key: 'positions' | 'risk' | 'blocked' | 'planned' | 'executable') {
+  const labels: Record<typeof key, LocalizedText> = {
+    positions: { en: 'Holdings checked', 'zh-CN': '已检查持仓', 'zh-TW': '已檢查持倉', ja: '点検済み保有', ko: '점검 보유' },
+    risk: { en: 'Reduce / exit', 'zh-CN': '减仓/退出', 'zh-TW': '減倉/退出', ja: '縮小/撤退', ko: '축소/청산' },
+    blocked: { en: 'T+1 blocked', 'zh-CN': 'T+1 锁定', 'zh-TW': 'T+1 鎖定', ja: 'T+1 売却不可', ko: 'T+1 잠김' },
+    planned: { en: 'Planned sell', 'zh-CN': '计划卖出', 'zh-TW': '計劃賣出', ja: '計画売却', ko: '계획 매도' },
+    executable: { en: 'Executable today', 'zh-CN': '今日可执行', 'zh-TW': '今日可執行', ja: '本日実行可', ko: '오늘 실행' }
+  };
+  return localeText(labels[key]);
+}
+
+function holdingActionListTitle() {
+  return localeText({ en: 'Today action list', 'zh-CN': '今日操作清单', 'zh-TW': '今日操作清單', ja: '本日の操作リスト', ko: '오늘 조치 목록' });
+}
+
+function holdingActionItemLabel(item: HoldingActionItem) {
+  const action = holdingActionLabel(item.action as HoldingAction);
+  const execution = holdingExecutionStatusLabel(item.executionStatus);
+  const planned = signedQuantityLabel(item.plannedQuantityChange);
+  const executable = signedQuantityLabel(item.executableQuantityChange);
+  if (locale.value === 'en') return `${action} · planned ${planned} · executable ${executable} · ${execution}`;
+  if (locale.value === 'zh-CN') return `${action} · 计划 ${planned} · 可执行 ${executable} · ${execution}`;
+  if (locale.value === 'ja') return `${action} · 計画 ${planned} · 実行可 ${executable} · ${execution}`;
+  if (locale.value === 'ko') return `${action} · 계획 ${planned} · 실행 ${executable} · ${execution}`;
+  return `${action} · 計劃 ${planned} · 可執行 ${executable} · ${execution}`;
+}
+
+function recommendationReviewTitle() {
+  return localeText({ en: 'Recommendation review', 'zh-CN': '推荐复盘', 'zh-TW': '推薦複盤', ja: '推奨レビュー', ko: '추천 리뷰' });
+}
+
+function recommendationReviewHint() {
+  return localeText({
+    en: 'Saved buy calls compared with prices in the current scan.',
+    'zh-CN': '用当前扫描价格回看已保存买入建议。',
+    'zh-TW': '用目前掃描價格回看已保存買入建議。',
+    ja: '保存済み買い判断を現在価格で確認します。',
+    ko: '저장된 매수 판단을 현재 가격과 비교합니다.'
+  });
+}
+
+function recommendationReviewMetricLabel(key: 'reviewed' | 'wins' | 'avg' | 'worst') {
+  const labels: Record<typeof key, LocalizedText> = {
+    reviewed: { en: 'Reviewed', 'zh-CN': '已复盘', 'zh-TW': '已複盤', ja: '確認済み', ko: '검토' },
+    wins: { en: 'Positive', 'zh-CN': '为正', 'zh-TW': '為正', ja: 'プラス', ko: '플러스' },
+    avg: { en: 'Average', 'zh-CN': '平均', 'zh-TW': '平均', ja: '平均', ko: '평균' },
+    worst: { en: 'Worst', 'zh-CN': '最差', 'zh-TW': '最差', ja: '最悪', ko: '최저' }
+  };
+  return localeText(labels[key]);
+}
+
+function quoteConsensusLabel(status: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    aligned: { en: 'Quote aligned', 'zh-CN': '报价一致', 'zh-TW': '報價一致', ja: '価格一致', ko: '호가 일치' },
+    delayed: { en: 'Delayed quote', 'zh-CN': '延迟报价', 'zh-TW': '延遲報價', ja: '遅延価格', ko: '지연 호가' },
+    fallback: { en: 'Fallback quote', 'zh-CN': '备用报价', 'zh-TW': '備援報價', ja: '代替価格', ko: '대체 호가' },
+    divergent: { en: 'Quote drift', 'zh-CN': '报价偏差', 'zh-TW': '報價偏差', ja: '価格乖離', ko: '호가 편차' },
+    conflict: { en: 'Quote conflict', 'zh-CN': '报价冲突', 'zh-TW': '報價衝突', ja: '価格衝突', ko: '호가 충돌' }
+  };
+  return localeText(labels[status || 'fallback'] ?? labels.fallback);
+}
+
+function quoteConsensusHint(pick: Pick) {
+  const consensus = pick.quoteConsensus;
+  if (!consensus) return marketSourceStackLabel(pick);
+  const deviation = `${Number(consensus.maxDeviationPct || 0).toFixed(1)}%`;
+  if (locale.value === 'en') return `${consensus.primarySource} · ${consensus.observationCount} checks · max drift ${deviation}`;
+  if (locale.value === 'zh-CN') return `${consensus.primarySource} · ${consensus.observationCount} 个校验 · 最大偏差 ${deviation}`;
+  if (locale.value === 'ja') return `${consensus.primarySource} · ${consensus.observationCount} 件確認 · 最大乖離 ${deviation}`;
+  if (locale.value === 'ko') return `${consensus.primarySource} · ${consensus.observationCount}개 확인 · 최대 편차 ${deviation}`;
+  return `${consensus.primarySource} · ${consensus.observationCount} 個校驗 · 最大偏差 ${deviation}`;
 }
 
 function sourceRoleLabel(role: string | undefined) {
@@ -1672,11 +2039,15 @@ function overallSuitabilityLabel(suitability: OverallSuitability) {
 }
 
 function finalVerdictLabel(pick: Pick) {
+  if (pick.finalDecision) return decisionActionLabel(pick.finalDecision.action);
   if (pick.decisionEngine) return decisionActionLabel(pick.decisionEngine.action);
   return pick.overallAssessment ? overallSuitabilityLabel(pick.overallAssessment.suitability) : verdictLabel(pick.verdict);
 }
 
 function finalVerdictBucket(pick: Pick): Pick['verdict'] {
+  if (pick.finalDecision?.verdict) return pick.finalDecision.verdict;
+  if (pick.finalDecision?.action === 'accumulate') return 'buy';
+  if (pick.finalDecision?.action === 'exit') return 'sell';
   if (pick.decisionEngine?.action === 'accumulate') return 'buy';
   if (pick.decisionEngine?.action === 'exit') return 'sell';
   const suitability = pick.overallAssessment?.suitability;
@@ -1873,8 +2244,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingConcentration: (p) => `Position weight is ${p.weight}%; concentration risk needs active control.`,
       holdingProfitProtect: (p) => `Profit is ${p.pnlPct}%, but pullback risk is ${p.risk}/100; protect gains.`,
       holdingCostGap: (p) => `Live price is ${p.gap}% versus cost ${p.cost}.`,
+      holdingPriceSourceDrift: (p) => `Broker price ${p.broker} and live price ${p.live} differ by ${p.gap}%; verify the quote source before acting.`,
       holdingSizingPlan: (p) => `Target weight is ${p.target}%; suggested share change ${p.change}.`,
+      holdingOrderLotAdjusted: (p) => `Order size adjusted for ${p.market} lot rules: raw ${p.raw}, usable ${p.adjusted}, lot ${p.lot || 'n/a'} (${p.policy}).`,
       holdingStopLossPlan: (p) => `Review exit or reduction if price breaks ${p.price}.`,
+      holdingT1Unavailable: (p) => `T+1 lock: ${p.blocked} shares are not sellable today; planned change ${p.planned}.`,
       holdingEtfCore: () => 'ETF holding can stay as a core allocation only while trend and drawdown stay controlled.',
       portfolioTotalDrawdown: (p) => `Portfolio drawdown is ${p.pnlPct}%; prioritize risk review.`,
       portfolioConcentration: (p) => `${p.symbol} is ${p.weight}% of holdings; concentration is high.`,
@@ -1922,8 +2296,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingConcentration: (p) => `单只仓位占比 ${p.weight}%；集中度风险需要主动控制。`,
       holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，但回撤风险 ${p.risk}/100；应保护利润。`,
       holdingCostGap: (p) => `现价相对成本 ${p.cost} 的差距为 ${p.gap}%。`,
+      holdingPriceSourceDrift: (p) => `券商价 ${p.broker} 与实时价 ${p.live} 相差 ${p.gap}%；操作前先确认报价来源。`,
       holdingSizingPlan: (p) => `目标仓位 ${p.target}%；建议增减股数 ${p.change}。`,
+      holdingOrderLotAdjusted: (p) => `已按 ${p.market} 交易单位修正：原始 ${p.raw}，可用 ${p.adjusted}，每手 ${p.lot || '无'}（${p.policy}）。`,
       holdingStopLossPlan: (p) => `若价格跌破 ${p.price}，应重新评估减仓或退出。`,
+      holdingT1Unavailable: (p) => `T+1 限制：${p.blocked} 股今日不可卖；计划调整 ${p.planned}。`,
       holdingEtfCore: () => 'ETF 只有在趋势与回撤受控时，才适合作为核心配置继续持有。',
       portfolioTotalDrawdown: (p) => `持仓整体亏损 ${p.pnlPct}%；优先检查风险。`,
       portfolioConcentration: (p) => `${p.symbol} 占持仓 ${p.weight}%；集中度偏高。`,
@@ -1971,8 +2348,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingConcentration: (p) => `單檔倉位占比 ${p.weight}%；集中度風險需要主動控制。`,
       holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，但回撤風險 ${p.risk}/100；應保護利潤。`,
       holdingCostGap: (p) => `現價相對成本 ${p.cost} 的差距為 ${p.gap}%。`,
+      holdingPriceSourceDrift: (p) => `券商價 ${p.broker} 與即時價 ${p.live} 相差 ${p.gap}%；操作前先確認報價來源。`,
       holdingSizingPlan: (p) => `目標倉位 ${p.target}%；建議增減股數 ${p.change}。`,
+      holdingOrderLotAdjusted: (p) => `已按 ${p.market} 交易單位修正：原始 ${p.raw}，可用 ${p.adjusted}，每手 ${p.lot || '無'}（${p.policy}）。`,
       holdingStopLossPlan: (p) => `若價格跌破 ${p.price}，應重新評估減倉或退出。`,
+      holdingT1Unavailable: (p) => `T+1 限制：${p.blocked} 股今日不可賣；計畫調整 ${p.planned}。`,
       holdingEtfCore: () => 'ETF 只有在趨勢與回撤受控時，才適合作為核心配置繼續持有。',
       portfolioTotalDrawdown: (p) => `持倉整體虧損 ${p.pnlPct}%；優先檢查風險。`,
       portfolioConcentration: (p) => `${p.symbol} 占持倉 ${p.weight}%；集中度偏高。`,
@@ -2020,8 +2400,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingConcentration: (p) => `單檔倉位占比 ${p.weight}%；集中度風險愛控制。`,
       holdingProfitProtect: (p) => `已有 ${p.pnlPct}% 浮盈，毋過回撤風險 ${p.risk}/100；愛保護利潤。`,
       holdingCostGap: (p) => `現價比成本 ${p.cost} 差 ${p.gap}%。`,
+      holdingPriceSourceDrift: (p) => `券商價 ${p.broker} 佮即時價 ${p.live} 差 ${p.gap}%；操作前先確認報價來源。`,
       holdingSizingPlan: (p) => `目標倉位 ${p.target}%；建議增減股數 ${p.change}。`,
+      holdingOrderLotAdjusted: (p) => `已照 ${p.market} 交易單位修正：原始 ${p.raw}，會使 ${p.adjusted}，每手 ${p.lot || '無'}（${p.policy}）。`,
       holdingStopLossPlan: (p) => `若價格跌破 ${p.price}，愛重新評估減倉抑是退出。`,
+      holdingT1Unavailable: (p) => `T+1 限制：${p.blocked} 股今仔日袂當賣；計畫調整 ${p.planned}。`,
       holdingEtfCore: () => 'ETF 只有趨勢佮回撤受控，才適合繼續做核心配置。',
       portfolioTotalDrawdown: (p) => `持倉整體虧損 ${p.pnlPct}%；先檢查風險。`,
       portfolioConcentration: (p) => `${p.symbol} 占持倉 ${p.weight}%；集中度偏懸。`,
@@ -2069,8 +2452,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingConcentration: (p) => `保有比率は ${p.weight}% です。集中リスクを管理してください。`,
       holdingProfitProtect: (p) => `${p.pnlPct}% の含み益がありますが、押し戻しリスクは ${p.risk}/100 です。利益保護を優先してください。`,
       holdingCostGap: (p) => `現在値は取得単価 ${p.cost} に対して ${p.gap}% です。`,
+      holdingPriceSourceDrift: (p) => `証券会社価格 ${p.broker} とライブ価格 ${p.live} が ${p.gap}% ずれています。売買前に価格ソースを確認してください。`,
       holdingSizingPlan: (p) => `目標比率は ${p.target}%、提案株数変更は ${p.change} です。`,
+      holdingOrderLotAdjusted: (p) => `${p.market} の売買単位に合わせて調整しました: 元 ${p.raw}、使用可 ${p.adjusted}、単位 ${p.lot || 'なし'} (${p.policy})。`,
       holdingStopLossPlan: (p) => `${p.price} を割り込む場合は、縮小または撤退を再評価してください。`,
+      holdingT1Unavailable: (p) => `T+1 制限: ${p.blocked} 株は本日売却不可、計画変更は ${p.planned} です。`,
       holdingEtfCore: () => 'ETF はトレンドとドローダウンが管理されている間だけ、コア配分として保有できます。',
       portfolioTotalDrawdown: (p) => `ポートフォリオの評価損は ${p.pnlPct}% です。リスク点検を優先してください。`,
       portfolioConcentration: (p) => `${p.symbol} は保有全体の ${p.weight}% です。集中度が高いです。`,
@@ -2118,8 +2504,11 @@ const portfolioTexts: Record<Locale, PortfolioLocaleText> = {
       holdingConcentration: (p) => `보유 비중이 ${p.weight}%입니다. 집중 리스크 관리가 필요합니다.`,
       holdingProfitProtect: (p) => `${p.pnlPct}% 수익 상태지만 되돌림 리스크가 ${p.risk}/100입니다. 수익 보호를 우선하세요.`,
       holdingCostGap: (p) => `현재가는 평균 단가 ${p.cost} 대비 ${p.gap}%입니다.`,
+      holdingPriceSourceDrift: (p) => `증권사 가격 ${p.broker}과 실시간 가격 ${p.live} 차이가 ${p.gap}%입니다. 실행 전 가격 출처를 확인하세요.`,
       holdingSizingPlan: (p) => `목표 비중은 ${p.target}%이며, 제안 수량 변화는 ${p.change}주입니다.`,
+      holdingOrderLotAdjusted: (p) => `${p.market} 거래 단위에 맞춰 조정했습니다: 원시 ${p.raw}, 사용 ${p.adjusted}, 단위 ${p.lot || '없음'} (${p.policy}).`,
       holdingStopLossPlan: (p) => `${p.price} 이탈 시 축소 또는 이탈을 재평가하세요.`,
+      holdingT1Unavailable: (p) => `T+1 제한: ${p.blocked}주는 오늘 매도할 수 없으며 계획 변화는 ${p.planned}입니다.`,
       holdingEtfCore: () => 'ETF는 추세와 낙폭이 통제될 때만 핵심 배분으로 계속 보유할 수 있습니다.',
       portfolioTotalDrawdown: (p) => `포트폴리오 손실이 ${p.pnlPct}%입니다. 리스크 점검을 우선하세요.`,
       portfolioConcentration: (p) => `${p.symbol}이 보유 비중의 ${p.weight}%입니다. 집중도가 높습니다.`,
@@ -2167,6 +2556,57 @@ function portfolioImportButtonLabel() {
 
 function clearPortfolioLabel() {
   return portfolioText().clear;
+}
+
+function portfolioMemoryTitleLabel() {
+  return localeText({
+    en: 'Holdings memory',
+    'zh-CN': '持仓记忆',
+    'zh-TW': '持倉記憶',
+    ja: '保有履歴',
+    ko: '보유 기억'
+  });
+}
+
+function portfolioMemoryHintLabel() {
+  return localeText({
+    en: 'Recent versions saved under this login key.',
+    'zh-CN': '最近版本会跟随当前登录 key 保存。',
+    'zh-TW': '最近版本會跟隨目前登入 key 保存。',
+    ja: '最近の版はこのログインキーに保存されます。',
+    ko: '최근 버전은 현재 로그인 key에 저장됩니다.'
+  });
+}
+
+function restorePortfolioLabel() {
+  return localeText({ en: 'Restore', 'zh-CN': '恢复', 'zh-TW': '恢復', ja: '復元', ko: '복원' });
+}
+
+function deletePortfolioMemoryLabel() {
+  return localeText({ en: 'Delete', 'zh-CN': '删除', 'zh-TW': '刪除', ja: '削除', ko: '삭제' });
+}
+
+function portfolioMemoryMeta(item: PortfolioMemoryItem) {
+  const savedAt = new Date(item.savedAt);
+  const savedLabel = Number.isNaN(savedAt.getTime()) ? item.savedAt : savedAt.toLocaleString();
+  return `${savedLabel} · ${item.recognizedCount} · ${moneyLabel(item.totalMarketValue)} · ${percentLabel(item.totalUnrealizedPnlPct)}`;
+}
+
+function portfolioMemoryDiffLabel(item: PortfolioMemoryItem) {
+  const diff = item.diff;
+  if (!diff) {
+    return localeText({ en: 'Baseline snapshot', 'zh-CN': '基准快照', 'zh-TW': '基準快照', ja: '基準スナップショット', ko: '기준 스냅샷' });
+  }
+  const pnl = signedMoneyLabel(diff.pnlChange);
+  if (locale.value === 'en') return `+${diff.added} / -${diff.removed} · qty ${diff.quantityChanged} · cost ${diff.costChanged} · P/L ${pnl}`;
+  if (locale.value === 'zh-CN') return `新增 ${diff.added} / 移除 ${diff.removed} · 数量变 ${diff.quantityChanged} · 成本变 ${diff.costChanged} · 盈亏 ${pnl}`;
+  if (locale.value === 'ja') return `追加 ${diff.added} / 削除 ${diff.removed} · 数量 ${diff.quantityChanged} · 原価 ${diff.costChanged} · 損益 ${pnl}`;
+  if (locale.value === 'ko') return `추가 ${diff.added} / 제거 ${diff.removed} · 수량 ${diff.quantityChanged} · 원가 ${diff.costChanged} · 손익 ${pnl}`;
+  return `新增 ${diff.added} / 移除 ${diff.removed} · 數量變 ${diff.quantityChanged} · 成本變 ${diff.costChanged} · 盈虧 ${pnl}`;
+}
+
+function portfolioMemoryDiffTitle() {
+  return localeText({ en: 'Version diff', 'zh-CN': '版本差异', 'zh-TW': '版本差異', ja: '版の差分', ko: '버전 차이' });
 }
 
 function portfolioReadyLabel(portfolio: PortfolioImportResponse | PortfolioAnalysis) {
@@ -2367,6 +2807,7 @@ async function applyManualHoldings() {
   try {
     const imported = manualPortfolioFromText(manualHoldingText.value);
     importedPortfolio.value = imported;
+    rememberPortfolio(imported);
     symbolText.value = imported.symbols.join(', ');
     const importedMarkets = [...new Set(imported.positions.map((position) => position.market).filter(isMarket))];
     if (importedMarkets.length) selectedMarkets.value = importedMarkets;
@@ -2400,6 +2841,7 @@ async function onPortfolioFileSelected(event: Event) {
       portfolioImportError.value = holdingNoteLabel({ key: 'portfolioNoCurrentHolding', severity: 'warning', params: {} });
       return;
     }
+    rememberPortfolio(imported);
     symbolText.value = imported.symbols.join(', ');
     const importedMarkets = [...new Set(imported.positions.map((position) => position.market).filter(isMarket))];
     if (importedMarkets.length) selectedMarkets.value = importedMarkets;
@@ -2427,6 +2869,58 @@ function clearImportedPortfolio() {
     symbolText.value = '';
   }
   scheduleUserStateSync();
+}
+
+async function restorePortfolioMemory(item: PortfolioMemoryItem) {
+  if (loading.value || importingPortfolio.value) return;
+  const portfolio = cloneJson(item.portfolio);
+  importedPortfolio.value = portfolio;
+  analysisPortfolio.value = null;
+  portfolioImportError.value = '';
+  symbolText.value = portfolio.symbols.join(', ');
+  const importedMarkets = [...new Set(portfolio.positions.map((position) => position.market).filter(isMarket))];
+  if (importedMarkets.length) selectedMarkets.value = importedMarkets;
+  resultMarketFilter.value = 'all';
+  resultVerdictFilter.value = 'all';
+  activeInvestmentTask.value = 'portfolio';
+  activeWorkbenchBucket.value = 'holdings';
+  activeView.value = 'stocks';
+  rememberPortfolio(portfolio);
+  scheduleUserStateSync();
+  await nextTick();
+  await runAnalysis();
+}
+
+function deletePortfolioMemory(id: string) {
+  portfolioMemory.value = portfolioMemory.value.filter((item) => item.id !== id);
+  scheduleUserStateSync();
+}
+
+function recordRecommendationHistory(sourcePicks: Pick[], generatedAtIso: string) {
+  const entries = sourcePicks
+    .filter((pick) => pick.finalDecision?.action === 'accumulate' && pick.recommendationAudit?.entryPrice)
+    .map((pick) => ({
+      id: `${pick.symbol}-${pick.recommendationAudit?.openedAt || generatedAtIso}`,
+      symbol: pick.symbol,
+      name: pick.name,
+      market: pick.market,
+      openedAt: pick.recommendationAudit?.openedAt || generatedAtIso,
+      scanGeneratedAt: generatedAtIso,
+      entryPrice: Number(pick.recommendationAudit?.entryPrice ?? pick.price),
+      action: pick.finalDecision?.action || 'accumulate',
+      verdict: pick.finalDecision?.verdict || pick.verdict,
+      confidence: Number(pick.finalDecision?.confidence ?? pick.confidence ?? 0),
+      source: pick.discoverySource
+    }));
+  if (!entries.length) return;
+  const seen = new Set<string>();
+  recommendationHistory.value = [...entries, ...recommendationHistory.value]
+    .filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    })
+    .slice(0, RECOMMENDATION_HISTORY_LIMIT);
 }
 
 function savedScanTitle(scan: SavedScan) {
@@ -2739,6 +3233,36 @@ function holdingPlanTitle() {
   });
 }
 
+function holdingPlannedQuantityTitle() {
+  return localeText({
+    en: 'Planned shares',
+    'zh-CN': '计划股数',
+    'zh-TW': '計畫股數',
+    ja: '計画株数',
+    ko: '계획 수량'
+  });
+}
+
+function holdingExecutableQuantityTitle() {
+  return localeText({
+    en: 'Executable today',
+    'zh-CN': '今日可执行',
+    'zh-TW': '今日可執行',
+    ja: '本日実行可',
+    ko: '오늘 실행 가능'
+  });
+}
+
+function holdingExecutionStatusLabel(status: string | undefined) {
+  if (status === 'blocked_today') {
+    return localeText({ en: 'T+1 locked', 'zh-CN': 'T+1 今日不可卖', 'zh-TW': 'T+1 今日不可賣', ja: 'T+1 売却不可', ko: 'T+1 매도 불가' });
+  }
+  if (status === 'partial_t1_locked') {
+    return localeText({ en: 'Partially locked', 'zh-CN': '部分 T+1 锁定', 'zh-TW': '部分 T+1 鎖定', ja: '一部 T+1 制限', ko: '일부 T+1 잠김' });
+  }
+  return localeText({ en: 'Executable', 'zh-CN': '可执行', 'zh-TW': '可執行', ja: '実行可', ko: '실행 가능' });
+}
+
 function signedQuantityLabel(value: number | null | undefined) {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number) || number === 0) return '0';
@@ -2859,12 +3383,26 @@ function decisionGateLabel(key: string | undefined) {
     negativeNewsSevere: { en: 'Severe negative news', 'zh-CN': '重大负面新闻', 'zh-TW': '重大負面新聞', ja: '重大悪材料', ko: '중대 부정 뉴스' },
     liquidityTooWeak: { en: 'Liquidity too weak', 'zh-CN': '流动性不足', 'zh-TW': '流動性不足', ja: '流動性不足', ko: '유동성 부족' },
     etfLiquidityWeak: { en: 'ETF liquidity weak', 'zh-CN': 'ETF 流动性偏弱', 'zh-TW': 'ETF 流動性偏弱', ja: 'ETF流動性弱め', ko: 'ETF 유동성 약함' },
-    financialQualityWeak: { en: 'Financial quality weak', 'zh-CN': '财务质量偏弱', 'zh-TW': '財務品質偏弱', ja: '財務品質弱め', ko: '재무 품질 약함' }
+    financialQualityWeak: { en: 'Financial quality weak', 'zh-CN': '财务质量偏弱', 'zh-TW': '財務品質偏弱', ja: '財務品質弱め', ko: '재무 품질 약함' },
+    sourceStackUnstable: { en: 'Source stack unstable', 'zh-CN': '数据源不稳，阻止新买入', 'zh-TW': '資料源不穩，阻止新買入', ja: 'データソース不安定', ko: '데이터 소스 불안정' },
+    priceConsensusConflict: { en: 'Quote sources conflict', 'zh-CN': '报价来源冲突，阻止新买入', 'zh-TW': '報價來源衝突，阻止新買入', ja: '価格ソース衝突', ko: '호가 출처 충돌' },
+    outsideTradingSession: { en: 'Outside live session', 'zh-CN': '非实时交易时段', 'zh-TW': '非即時交易時段', ja: '取引時間外', ko: '실시간 장외' },
+    openingConfirmationPending: { en: 'Opening confirmation pending', 'zh-CN': '等待开盘确认', 'zh-TW': '等待開盤確認', ja: '寄り付き確認待ち', ko: '개장 확인 대기' },
+    localMarketFastDrop: { en: 'Local market fast drop', 'zh-CN': '本地市场快速下跌', 'zh-TW': '本地市場快速下跌', ja: '現地市場の急落', ko: '현지 시장 급락' },
+    localMarketIntradayDrop: { en: 'Intraday drop blocks buy', 'zh-CN': '盘中下跌阻止买入', 'zh-TW': '盤中下跌阻止買入', ja: '日中下落で買い停止', ko: '장중 하락으로 매수 제한' },
+    etfTrendBreakdown: { en: 'ETF trend breakdown', 'zh-CN': 'ETF 趋势破位', 'zh-TW': 'ETF 趨勢破位', ja: 'ETFトレンド崩れ', ko: 'ETF 추세 이탈' },
+    etfHighBetaIntradayDrop: { en: 'High-beta ETF drop', 'zh-CN': '高波动 ETF 盘中下跌', 'zh-TW': '高波動 ETF 盤中下跌', ja: '高ベータETF下落', ko: '고베타 ETF 하락' },
+    etfIntradayDrop: { en: 'ETF intraday drop', 'zh-CN': 'ETF 盘中下跌', 'zh-TW': 'ETF 盤中下跌', ja: 'ETF日中下落', ko: 'ETF 장중 하락' },
+    hotListChaseRisk: { en: 'Hot-list chase risk', 'zh-CN': '热榜追高风险', 'zh-TW': '熱榜追高風險', ja: '人気銘柄追随リスク', ko: '인기 목록 추격 리스크' },
+    hotListDiscoveryNeedsConfirmation: { en: 'Hot-list idea needs confirmation', 'zh-CN': '热榜候选需确认', 'zh-TW': '熱榜候選需確認', ja: '人気候補は確認待ち', ko: '인기 후보 확인 필요' }
   };
   return localeText(labels[key || ''] ?? { en: String(key ?? ''), 'zh-CN': String(key ?? ''), 'zh-TW': String(key ?? ''), ja: String(key ?? ''), ko: String(key ?? '') });
 }
 
 function decisionReasonLabel(reason: string) {
+  if (reason.startsWith('holding:')) {
+    return holdingNoteLabel({ key: reason.replace('holding:', ''), severity: 'info', params: {} });
+  }
   if (reason.startsWith('regime:')) return decisionRegimeLabel(reason.replace('regime:', ''));
   if (reason.startsWith('dataQuality:')) return dataQualityLabel(reason.replace('dataQuality:', ''));
   if (reason.startsWith('marketSupport:')) return `${marketSupportTitle()} · ${marketCoverageTierLabel(reason.replace('marketSupport:', ''))}`;
@@ -3089,7 +3627,7 @@ function reportWatchItems(pick: Pick) {
 
 function reportSummaryTitle(pick: Pick) {
   if (pick.decisionEngine) {
-    return `${decisionRegimeLabel(pick.decisionEngine.regime.name)} · ${decisionActionLabel(pick.decisionEngine.action)}`;
+    return `${decisionRegimeLabel(pick.decisionEngine.regime.name)} · ${finalVerdictLabel(pick)}`;
   }
   const summary = pick.overallAssessment?.summary ?? pick.decision?.summary ?? pick.actionPlan?.summary;
   return summary ? pointLabel(summary) : finalVerdictLabel(pick);
@@ -5384,6 +5922,7 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
   analysisPortfolio.value = event.portfolio ?? null;
   generatedAt.value = new Date(event.generatedAt).toLocaleString();
   loadingStepIndex.value = analysisSteps.value.length - 1;
+  recordRecommendationHistory(event.picks, event.generatedAt);
   scheduleUserStateSync();
 }
 
@@ -5430,6 +5969,8 @@ watch(
     customWeights: { ...customWeights },
     symbolText: symbolText.value,
     manualHoldingText: manualHoldingText.value,
+    displayMode: displayMode.value,
+    activeView: activeView.value,
     resultSortKey: resultSortKey.value,
     resultSortDirection: resultSortDirection.value
   }),
@@ -5615,6 +6156,11 @@ onUnmounted(() => {
         <strong>{{ t.allMarkets }}</strong>
         <small>{{ preferredMarketsLabel }}</small>
       </div>
+      <div class="mode-status">
+        <span>{{ displayModeHint() }}</span>
+        <strong>{{ displayModeLabel() }}</strong>
+        <small>{{ isProfessionalMode ? detailAnalysisLabel() : decisionToplineLabel() }}</small>
+      </div>
       <div>
         <span>{{ isAutoScan ? t.autoScan : t.refresh }}</span>
         <strong>{{ generatedAt || '-' }}</strong>
@@ -5744,6 +6290,31 @@ onUnmounted(() => {
                     {{ holdingNoteLabel(note) }}
                   </li>
                 </ul>
+              </div>
+              <div v-if="portfolioMemory.length" class="portfolio-memory">
+                <div class="portfolio-memory-heading">
+                  <strong>{{ portfolioMemoryTitleLabel() }}</strong>
+                  <span>{{ portfolioMemoryHintLabel() }}</span>
+                </div>
+                <article v-for="item in portfolioMemory" :key="item.id" class="portfolio-memory-item">
+                  <div>
+                    <strong>{{ item.title }}</strong>
+                    <small>{{ portfolioMemoryMeta(item) }}</small>
+                    <span>{{ item.symbols.slice(0, 4).join(' · ') }}</span>
+                    <details class="portfolio-memory-diff">
+                      <summary>{{ portfolioMemoryDiffTitle() }}</summary>
+                      <small>{{ portfolioMemoryDiffLabel(item) }}</small>
+                    </details>
+                  </div>
+                  <div class="portfolio-memory-actions">
+                    <button class="ghost compact" type="button" :disabled="loading || importingPortfolio" @click="restorePortfolioMemory(item)">
+                      {{ restorePortfolioLabel() }}
+                    </button>
+                    <button class="ghost compact danger" type="button" :disabled="loading || importingPortfolio" @click="deletePortfolioMemory(item.id)">
+                      {{ deletePortfolioMemoryLabel() }}
+                    </button>
+                  </div>
+                </article>
               </div>
               <p v-if="portfolioImportError" class="portfolio-error">{{ portfolioImportError }}</p>
             </div>
@@ -5892,6 +6463,32 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <div v-if="recommendationReview.count" class="recommendation-review">
+          <div>
+            <span>{{ recommendationReviewTitle() }}</span>
+            <strong>{{ recommendationReview.hitRate.toFixed(0) }}%</strong>
+            <small>{{ recommendationReviewHint() }}</small>
+          </div>
+          <div class="recommendation-review-grid">
+            <span>
+              <b>{{ recommendationReview.count }}</b>
+              {{ recommendationReviewMetricLabel('reviewed') }}
+            </span>
+            <span>
+              <b>{{ recommendationReview.wins }}</b>
+              {{ recommendationReviewMetricLabel('wins') }}
+            </span>
+            <span>
+              <b>{{ contributionLabel(recommendationReview.averageReturn) }}%</b>
+              {{ recommendationReviewMetricLabel('avg') }}
+            </span>
+            <span>
+              <b>{{ contributionLabel(recommendationReview.worstReturn) }}%</b>
+              {{ recommendationReviewMetricLabel('worst') }}
+            </span>
+          </div>
+        </div>
+
         <div v-if="activeView === 'stocks'" class="decision-workbench">
           <div class="decision-workbench-heading">
             <div>
@@ -5950,7 +6547,76 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <div v-if="activeView === 'stocks' && (activePortfolio || holdingCommandSummary.count)" class="holding-command-center">
+          <div class="holding-command-heading">
+            <div>
+              <span>{{ scanUniverseModeLabel(scanUniverse?.mode) }}</span>
+              <strong>{{ holdingCommandTitle() }}</strong>
+              <p>{{ holdingCommandSubtitle() }}</p>
+            </div>
+            <button class="ghost compact" type="button" @click="activeWorkbenchBucket = 'holdings'">
+              {{ workbenchBucketLabel('holdings') }}
+            </button>
+          </div>
+          <div class="holding-command-grid">
+            <div>
+              <span>{{ holdingCommandMetricLabel('positions') }}</span>
+              <b>{{ holdingCommandSummary.count || activePortfolio?.recognizedCount || 0 }}</b>
+              <small>{{ activePortfolio ? moneyLabel(activePortfolio.totalMarketValue) : '-' }}</small>
+            </div>
+            <div class="warning">
+              <span>{{ holdingCommandMetricLabel('risk') }}</span>
+              <b>{{ holdingCommandSummary.reduceCount + holdingCommandSummary.exitCount }}</b>
+              <small>{{ signedMoneyLabel(activePortfolio?.totalUnrealizedPnl) }} · {{ percentLabel(activePortfolio?.totalUnrealizedPnlPct) }}</small>
+            </div>
+            <div :class="{ danger: holdingCommandSummary.blockedCount > 0 }">
+              <span>{{ holdingCommandMetricLabel('blocked') }}</span>
+              <b>{{ holdingCommandSummary.blockedCount }}</b>
+              <small>T+1</small>
+            </div>
+            <div>
+              <span>{{ holdingCommandMetricLabel('planned') }}</span>
+              <b>{{ signedQuantityLabel(holdingCommandSummary.plannedSell) }}</b>
+              <small>{{ holdingCommandMetricLabel('executable') }} {{ signedQuantityLabel(holdingCommandSummary.executableSell) }}</small>
+            </div>
+          </div>
+          <ul v-if="activePortfolio?.warnings?.length" class="holding-command-warnings">
+            <li v-for="note in activePortfolio.warnings.slice(0, 3)" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
+              {{ holdingNoteLabel(note) }}
+            </li>
+          </ul>
+          <div v-if="holdingActionItems.length" class="holding-action-list">
+            <strong>{{ holdingActionListTitle() }}</strong>
+            <article v-for="item in holdingActionItems" :key="item.symbol" :class="[item.action, item.executionStatus]">
+              <div>
+                <b>{{ item.symbol }}</b>
+                <span>{{ item.name }}</span>
+              </div>
+              <small>{{ holdingActionItemLabel(item) }}</small>
+              <em>{{ percentLabel(item.unrealizedPnlPct) }}</em>
+            </article>
+          </div>
+        </div>
+
         <div v-if="activeView === 'stocks' && (picks.length || resultFiltersActive)" class="result-filter-bar">
+          <div class="display-mode-toggle" role="group" :aria-label="displayModeHint()">
+            <button
+              type="button"
+              :aria-pressed="displayMode === 'simple'"
+              :class="{ active: displayMode === 'simple' }"
+              @click="displayMode = 'simple'"
+            >
+              {{ displayModeLabel('simple') }}
+            </button>
+            <button
+              type="button"
+              :aria-pressed="displayMode === 'professional'"
+              :class="{ active: displayMode === 'professional' }"
+              @click="displayMode = 'professional'"
+            >
+              {{ displayModeLabel('professional') }}
+            </button>
+          </div>
           <label class="filter-field">
             <span>{{ t.marketCoverage }}</span>
             <select v-model="resultMarketFilter">
@@ -6025,8 +6691,11 @@ onUnmounted(() => {
                 <p>{{ sectorLabel(pick) }}</p>
               </div>
               <div class="score-pill">
-                <span>{{ primaryScoreCaption(pick) }}</span>
-                <strong>{{ pick.decisionEngine?.rankScore ?? pick.overallAssessment?.totalScore ?? pick.score }}</strong>
+                <span>{{ isProfessionalMode ? primaryScoreCaption(pick) : decisionToplineLabel() }}</span>
+                <strong>
+                  <template v-if="isProfessionalMode">{{ pick.decisionEngine?.rankScore ?? pick.overallAssessment?.totalScore ?? pick.score }}</template>
+                  <template v-else>{{ decisionActionLabel(pick.finalDecision?.action ?? pick.decisionEngine?.action) }}</template>
+                </strong>
               </div>
             </div>
             <div class="pick-toolbar">
@@ -6037,26 +6706,48 @@ onUnmounted(() => {
 
             <div class="metric-row">
               <span>{{ finalVerdictLabel(pick) }}</span>
-              <span>{{ t.confidence }} {{ pick.confidence }}%</span>
-              <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.action">{{ decisionRegimeLabel(pick.decisionEngine.regime.name) }}</span>
+              <span>{{ decisionExecutionLabel(pick) }}</span>
+              <span class="market-rule-chip" :class="marketRuleStateTone(pick)">{{ marketRuleStateLabel(pick) }}</span>
               <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.dataQuality.level">{{ dataQualityLabel(pick.decisionEngine.dataQuality.level) }} {{ formatEngineScore(pick.decisionEngine.dataQuality.score) }}</span>
-              <span v-if="pick.decisionEngine?.marketSupport" class="market-source-chip" :class="pick.decisionEngine.marketSupport.coverageTier">{{ marketCoverageTierLabel(pick.decisionEngine.marketSupport.coverageTier) }} {{ formatEngineScore(pick.decisionEngine.marketSupport.score) }}</span>
-              <span>{{ predictionScoreLabel('opportunity', pick) }}</span>
-              <span>{{ predictionScoreLabel('setup', pick) }}</span>
-              <span>{{ predictionScoreLabel('downside', pick) }}</span>
-              <span>{{ predictionScoreLabel('pullback', pick) }}</span>
-              <span v-if="pick.trendAnalysis">{{ predictionScoreLabel('continuation', pick) }}</span>
-              <span v-if="pick.trendAnalysis">{{ predictionScoreLabel('reversal', pick) }}</span>
-              <span v-if="pick.tPlan" class="t-score-chip" :class="pick.tPlan.suitability">{{ predictionScoreLabel('t', pick) }} · {{ tSuitabilityLabel(pick) }}</span>
-              <span v-if="pick.market === 'CN' || pick.fundFlow?.available" class="fund-flow-chip" :class="fundFlowTone(pick.fundFlow)">{{ fundFlowChipLabel(pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
+              <template v-if="isProfessionalMode">
+                <span>{{ t.confidence }} {{ pick.confidence }}%</span>
+                <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.action">{{ decisionRegimeLabel(pick.decisionEngine.regime.name) }}</span>
+                <span v-if="pick.decisionEngine?.marketSupport" class="market-source-chip" :class="pick.decisionEngine.marketSupport.coverageTier">{{ marketCoverageTierLabel(pick.decisionEngine.marketSupport.coverageTier) }} {{ formatEngineScore(pick.decisionEngine.marketSupport.score) }}</span>
+                <span>{{ predictionScoreLabel('opportunity', pick) }}</span>
+                <span>{{ predictionScoreLabel('setup', pick) }}</span>
+                <span>{{ predictionScoreLabel('downside', pick) }}</span>
+                <span>{{ predictionScoreLabel('pullback', pick) }}</span>
+                <span v-if="pick.trendAnalysis">{{ predictionScoreLabel('continuation', pick) }}</span>
+                <span v-if="pick.trendAnalysis">{{ predictionScoreLabel('reversal', pick) }}</span>
+                <span v-if="pick.tPlan" class="t-score-chip" :class="pick.tPlan.suitability">{{ predictionScoreLabel('t', pick) }} · {{ tSuitabilityLabel(pick) }}</span>
+                <span v-if="pick.market === 'CN' || pick.fundFlow?.available" class="fund-flow-chip" :class="fundFlowTone(pick.fundFlow)">{{ fundFlowChipLabel(pick) }}</span>
+              </template>
             </div>
 
-            <div class="decision-topline" :class="pick.decisionEngine?.action || finalVerdictBucket(pick)">
+            <div v-if="pick.quoteConsensus" class="quote-consensus-strip" :class="pick.quoteConsensus.status">
+              <div>
+                <span>{{ quoteConsensusLabel(pick.quoteConsensus.status) }}</span>
+                <strong>{{ quoteConsensusHint(pick) }}</strong>
+              </div>
+              <div class="quote-observations">
+                <span v-if="!isProfessionalMode">{{ t.confidence }} {{ pick.quoteConsensus.confidence }}%</span>
+                <template v-else>
+                  <span v-for="observation in pick.quoteConsensus.observations.slice(0, 3)" :key="observation.source + observation.role">
+                    {{ observation.source }} {{ pick.currency }} {{ observation.price }}
+                  </span>
+                </template>
+              </div>
+            </div>
+
+            <div class="decision-topline" :class="pick.finalDecision?.action || pick.decisionEngine?.action || finalVerdictBucket(pick)">
               <div class="decision-topline-copy">
                 <span>{{ decisionToplineLabel() }}</span>
                 <strong>{{ finalVerdictLabel(pick) }}</strong>
                 <p>{{ reportSummaryTitle(pick) }}</p>
+                <ul class="concise-reason-list">
+                  <li v-for="reason in conciseReasonItems(pick)" :key="reason">{{ reason }}</li>
+                </ul>
               </div>
               <div class="decision-snapshot-grid">
                 <div v-for="item in decisionSnapshotItems(pick)" :key="item.key" :class="item.tone">
@@ -6089,9 +6780,17 @@ onUnmounted(() => {
                   <span>{{ holdingPlanTitle() }}</span>
                   <b>{{ pick.holdingAnalysis.targetWeightPct }}%</b>
                 </div>
+                <div v-if="pick.holdingAnalysis.plannedQuantityChange !== undefined">
+                  <span>{{ holdingPlannedQuantityTitle() }}</span>
+                  <b>{{ signedQuantityLabel(pick.holdingAnalysis.plannedQuantityChange) }}</b>
+                </div>
                 <div v-if="pick.holdingAnalysis.suggestedQuantityChange !== undefined">
-                  <span>{{ holdingFieldLabel('quantity') }}</span>
+                  <span>{{ holdingExecutableQuantityTitle() }}</span>
                   <b>{{ signedQuantityLabel(pick.holdingAnalysis.suggestedQuantityChange) }}</b>
+                </div>
+                <div v-if="pick.holdingAnalysis.executionStatus">
+                  <span>{{ t.riskControls }}</span>
+                  <b>{{ holdingExecutionStatusLabel(pick.holdingAnalysis.executionStatus) }}</b>
                 </div>
                 <div v-if="pick.holdingAnalysis.stopLossPrice">
                   <span>{{ t.riskControls }}</span>
@@ -6119,6 +6818,12 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+
+            <details class="pick-detail-drawer" :open="isProfessionalMode">
+              <summary>
+                <strong>{{ detailAnalysisLabel() }}</strong>
+                <span>{{ marketRuleStateLabel(pick) }} · {{ quoteConsensusLabel(pick.quoteConsensus?.status) }}</span>
+              </summary>
 
             <div v-if="pick.decisionEngine" class="research-panel decision-engine-panel" :class="[pick.decisionEngine.action, pick.decisionEngine.dataQuality.level]">
               <strong>{{ decisionEngineTitle() }} · {{ decisionActionLabel(pick.decisionEngine.action) }}</strong>
@@ -6395,6 +7100,7 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+            </details>
           </article>
         </div>
 

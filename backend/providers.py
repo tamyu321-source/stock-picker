@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import html
@@ -698,8 +698,11 @@ class YFinanceMarketDataProvider:
                 if volume_surge is not None:
                     info["volumeSurge20"] = round(volume_surge, 2)
             info = _merge_market_fundamentals(symbol, info)
+            info["priceSource"] = "yfinance"
+            info["historyInterval"] = "1d"
             kind = instrument_type(symbol, info)
             info["instrumentType"] = kind
+            info["symbol"] = symbol.upper()
 
             price = closes[-1]
             previous = closes[-2] if len(closes) > 1 else price
@@ -719,8 +722,16 @@ class YFinanceMarketDataProvider:
                 info=info,
                 instrument_type=kind,
             )
-        except Exception:
-            return fallback_market_data_provider(symbol)
+        except Exception as exc:
+            snapshot = fallback_market_data_provider(symbol)
+            info = dict(snapshot.info)
+            warnings = list(info.get("sourceWarnings") or [])
+            warnings.append(f"yfinance-primary-failed:{type(exc).__name__}")
+            info["sourceWarnings"] = warnings
+            info["primarySourceFailed"] = "yfinance"
+            info.setdefault("priceSource", "fallback")
+            info["symbol"] = snapshot.symbol
+            return replace(snapshot, info=info)
 
 
 def fallback_market_data_provider(symbol: str) -> MarketSnapshot:
@@ -762,6 +773,9 @@ class EastmoneyCnMarketDataProvider:
             raise ValueError(f"No Eastmoney closing prices returned for {symbol}.")
 
         info = _eastmoney_cn_fundamentals(symbol)
+        info["priceSource"] = "eastmoney-cn-daily"
+        info["historyInterval"] = "1d"
+        info["symbol"] = upper
         volumes = [float(row["volume"] or 0) for row in rows]
         amounts = [float(row["amount"] or 0) for row in rows]
         volume_surge = _surge_ratio(volumes)
@@ -777,6 +791,8 @@ class EastmoneyCnMarketDataProvider:
             info["turnoverValue"] = latest["amount"]
         if latest.get("volume") and not info.get("regularMarketVolume"):
             info["regularMarketVolume"] = latest["volume"] * 100
+        if latest.get("date"):
+            info["lastTradeDate"] = latest["date"]
         kind = instrument_type(upper, info)
         info["instrumentType"] = kind
         price = closes[-1]
@@ -825,7 +841,8 @@ class EastmoneyCnMarketDataProvider:
         amount = _eastmoney_number(parts[6] if len(parts) > 6 else None) or 0.0
         change_percent = _eastmoney_number(parts[8] if len(parts) > 8 else None)
         turnover_rate = _eastmoney_number(parts[10] if len(parts) > 10 else None)
-        return {"close": close, "volume": volume, "amount": amount, "changePercent": change_percent, "turnoverRate": turnover_rate}
+        trade_date = parts[0] if parts else ""
+        return {"date": trade_date, "close": close, "volume": volume, "amount": amount, "changePercent": change_percent, "turnoverRate": turnover_rate}
 
 
 class YahooHttpMarketDataProvider:
@@ -849,6 +866,9 @@ class YahooHttpMarketDataProvider:
 
         info = self._quote_summary(symbol)
         fundamentals = _merge_market_fundamentals(symbol, self._fundamentals(info, meta))
+        fundamentals["priceSource"] = "yahoo-chart"
+        fundamentals["historyInterval"] = "1d"
+        fundamentals["symbol"] = symbol.upper()
         volumes = [float(value) for value in quote.get("volume", []) if value is not None]
         volume_surge = _surge_ratio(volumes)
         if volume_surge is not None:
@@ -937,6 +957,7 @@ class YahooHttpMarketDataProvider:
         fund_performance = info.get("fundPerformance", {})
         return {
             "quoteType": _raw(price_info.get("quoteType")) or meta.get("instrumentType"),
+            "regularMarketPrice": meta.get("regularMarketPrice") or _raw(price_info.get("regularMarketPrice")),
             "trailingPE": _raw(detail.get("trailingPE")),
             "forwardPE": _raw(stats.get("forwardPE")),
             "beta": _raw(detail.get("beta")),
@@ -1011,6 +1032,10 @@ class TaiwanExchangeMarketDataProvider:
                 "regularMarketVolume": volume,
                 "turnoverValue": turnover,
                 "instrumentType": kind,
+                "priceSource": "twse-openapi",
+                "regularMarketPrice": round(price, 3),
+                "historyInterval": "1d",
+                "symbol": symbol.upper(),
             },
             instrument_type=kind,
         )
@@ -1322,7 +1347,7 @@ def _eastmoney_cn_fundamentals(symbol: str) -> dict[str, Any]:
     upper = symbol.upper()
     code = upper.split(".")[0]
     secid_prefix = "1" if upper.endswith(".SS") else "0"
-    fields = "f57,f58,f47,f48,f116,f117,f162,f167,f168,f170"
+    fields = "f43,f57,f58,f47,f48,f116,f117,f162,f167,f168,f170"
     url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid_prefix}.{quote(code)}&fields={fields}"
     data = {}
     headers = {
@@ -1349,6 +1374,7 @@ def _eastmoney_cn_fundamentals(symbol: str) -> dict[str, Any]:
     volume = _eastmoney_number(data.get("f47"))
     fundamentals = {
         "shortName": data.get("f58"),
+        "regularMarketPrice": _eastmoney_scaled(data.get("f43")),
         "trailingPE": pe if pe and pe > 0 else None,
         "priceToBook": pb if pb and pb > 0 else None,
         "turnoverRate": turnover / 100 if turnover is not None else None,

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, time, timezone
 from statistics import mean
 from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - Python always ships zoneinfo in supported runtimes.
+    ZoneInfo = None
 
 
 REGIME_LABELS = {
@@ -17,6 +23,54 @@ REGIME_LABELS = {
     "sector_etf_tactical",
 }
 
+HIGH_BETA_ETF_SYMBOLS = {
+    "159915.SZ",
+    "588000.SS",
+    "512100.SS",
+    "512880.SS",
+    "159995.SZ",
+    "159949.SZ",
+    "159605.SZ",
+    "3033.HK",
+    "3088.HK",
+    "QQQ",
+    "IWM",
+    "XLK",
+    "XBI",
+    "ARKK",
+    "229200.KS",
+    "305720.KS",
+}
+
+CORE_ETF_SYMBOLS = {
+    "SPY",
+    "VOO",
+    "IVV",
+    "VTI",
+    "510300.SS",
+    "159919.SZ",
+    "2828.HK",
+    "3067.HK",
+    "0050.TW",
+    "006208.TW",
+    "1306.T",
+    "1321.T",
+    "069500.KS",
+    "102110.KS",
+    "ES3.SI",
+}
+
+DEFENSIVE_ETF_SYMBOLS = {
+    "SCHD",
+    "TLT",
+    "GLD",
+    "0056.TW",
+    "00878.TW",
+    "00713.TW",
+    "A35.SI",
+    "MBH.SI",
+}
+
 
 def _number(value, default: float | None = None) -> float | None:
     try:
@@ -29,6 +83,469 @@ def _number(value, default: float | None = None) -> float | None:
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
+
+
+def _source_warnings(info: dict[str, Any]) -> list[str]:
+    raw = info.get("sourceWarnings") or info.get("dataWarnings") or []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [str(item) for item in raw if str(item).strip()]
+    return []
+
+
+def _source_penalty(info: dict[str, Any]) -> float:
+    warnings = _source_warnings(info)
+    penalty = min(18.0, len(warnings) * 5.5)
+    if info.get("primarySourceFailed"):
+        penalty += 6.0
+    if info.get("stalePriceData"):
+        penalty += 8.0
+    return _clamp(penalty, 0, 28)
+
+
+def _parse_analysis_time(info: dict[str, Any]) -> datetime:
+    value = info.get("analysisTimeUtc")
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _local_time(market: str, now_utc: datetime) -> datetime:
+    zone_name = {
+        "CN": "Asia/Shanghai",
+        "TW": "Asia/Taipei",
+        "HK": "Asia/Hong_Kong",
+        "JP": "Asia/Tokyo",
+        "KR": "Asia/Seoul",
+        "SG": "Asia/Singapore",
+        "US": "America/New_York",
+    }.get(str(market).upper(), "UTC")
+    if ZoneInfo is None:
+        return now_utc
+    return now_utc.astimezone(ZoneInfo(zone_name))
+
+
+def _between(value: time, start: time, end: time) -> bool:
+    return start <= value <= end
+
+
+MARKET_RULE_SOURCES = {
+    "TW": ["TWSE Trading", "TWSE Service"],
+    "CN": ["SSE Trading Mechanism", "SZSE Trading Overview"],
+    "HK": ["HKEX Securities Market"],
+    "US": ["US exchange regular session"],
+    "JP": ["Japan exchange regular session"],
+    "KR": ["Korea exchange regular session"],
+    "SG": ["Singapore exchange regular session"],
+}
+
+
+MARKET_RULES: dict[str, dict[str, Any]] = {
+    "TW": {
+        "ruleDepth": "deep",
+        "timezone": "Asia/Taipei",
+        "currency": "TWD",
+        "sessionWindows": [{"label": "regular", "start": "09:00", "end": "13:30"}],
+        "openingConfirmationMinutes": 10,
+        "settlement": "T+2",
+        "sellRule": "cash-market",
+        "priceLimitPct": 10,
+        "enforcesBuySessionGate": True,
+        "nonRealtimeBuyPolicy": "watchlist",
+        "orderSizing": {
+            "boardLotSize": 1000,
+            "buyLotSize": 1000,
+            "sellLotSize": 1000,
+            "minBuyQuantity": 1,
+            "allowsOddLotBuy": True,
+            "allowsOddLotSell": True,
+            "oddLotPolicy": "separate_odd_lot_market",
+            "normalization": "odd_lot_allowed",
+            "source": "TWSE round lot plus odd lot trading",
+        },
+    },
+    "CN": {
+        "ruleDepth": "deep",
+        "timezone": "Asia/Shanghai",
+        "currency": "CNY",
+        "sessionWindows": [
+            {"label": "morning", "start": "09:30", "end": "11:30"},
+            {"label": "afternoon", "start": "13:00", "end": "15:00"},
+        ],
+        "lunchBreak": {"start": "11:30", "end": "13:00"},
+        "openingConfirmationMinutes": 15,
+        "settlement": "T+1",
+        "sellRule": "T+1",
+        "priceLimitPct": 10,
+        "enforcesBuySessionGate": True,
+        "nonRealtimeBuyPolicy": "watchlist",
+        "orderSizing": {
+            "boardLotSize": 100,
+            "buyLotSize": 100,
+            "sellLotSize": 100,
+            "minBuyQuantity": 100,
+            "allowsOddLotBuy": False,
+            "allowsOddLotSell": True,
+            "oddLotPolicy": "sell_remaining_odd_lot_once",
+            "normalization": "round_lot_except_full_exit",
+            "maxOrderQuantity": 1_000_000,
+            "source": "SSE/SZSE A-share board lot",
+        },
+    },
+    "HK": {
+        "ruleDepth": "basic",
+        "timezone": "Asia/Hong_Kong",
+        "currency": "HKD",
+        "sessionWindows": [
+            {"label": "morning", "start": "09:30", "end": "12:00"},
+            {"label": "afternoon", "start": "13:00", "end": "16:00"},
+        ],
+        "lunchBreak": {"start": "12:00", "end": "13:00"},
+        "openingConfirmationMinutes": 0,
+        "settlement": "T+2",
+        "sellRule": "market-specific",
+        "priceLimitPct": None,
+        "enforcesBuySessionGate": False,
+        "nonRealtimeBuyPolicy": "downgrade",
+        "orderSizing": {
+            "boardLotSize": None,
+            "buyLotSize": None,
+            "sellLotSize": None,
+            "minBuyQuantity": None,
+            "allowsOddLotBuy": True,
+            "allowsOddLotSell": True,
+            "oddLotPolicy": "issuer_board_lot_and_odd_lot_market",
+            "normalization": "advisory_only",
+            "source": "HKEX issuer-defined board lot",
+        },
+    },
+    "US": {
+        "ruleDepth": "basic",
+        "timezone": "America/New_York",
+        "currency": "USD",
+        "sessionWindows": [{"label": "regular", "start": "09:30", "end": "16:00"}],
+        "openingConfirmationMinutes": 0,
+        "settlement": "T+1",
+        "sellRule": "market-specific",
+        "priceLimitPct": None,
+        "enforcesBuySessionGate": False,
+        "nonRealtimeBuyPolicy": "downgrade",
+        "orderSizing": {
+            "boardLotSize": 1,
+            "buyLotSize": 1,
+            "sellLotSize": 1,
+            "minBuyQuantity": 1,
+            "allowsOddLotBuy": True,
+            "allowsOddLotSell": True,
+            "oddLotPolicy": "odd_lot_supported",
+            "normalization": "share_level",
+            "source": "US share-level odd lot orders",
+        },
+    },
+    "JP": {
+        "ruleDepth": "basic",
+        "timezone": "Asia/Tokyo",
+        "currency": "JPY",
+        "sessionWindows": [
+            {"label": "morning", "start": "09:00", "end": "11:30"},
+            {"label": "afternoon", "start": "12:30", "end": "15:30"},
+        ],
+        "lunchBreak": {"start": "11:30", "end": "12:30"},
+        "openingConfirmationMinutes": 0,
+        "settlement": "T+2",
+        "sellRule": "market-specific",
+        "priceLimitPct": None,
+        "enforcesBuySessionGate": False,
+        "nonRealtimeBuyPolicy": "downgrade",
+        "orderSizing": {
+            "boardLotSize": 100,
+            "buyLotSize": 100,
+            "sellLotSize": 100,
+            "minBuyQuantity": 100,
+            "allowsOddLotBuy": False,
+            "allowsOddLotSell": False,
+            "oddLotPolicy": "unit_share_services_outside_regular_lot",
+            "normalization": "round_lot_except_full_exit",
+            "source": "JPX 100-share trading unit",
+        },
+    },
+    "KR": {
+        "ruleDepth": "basic",
+        "timezone": "Asia/Seoul",
+        "currency": "KRW",
+        "sessionWindows": [{"label": "regular", "start": "09:00", "end": "15:30"}],
+        "openingConfirmationMinutes": 0,
+        "settlement": "T+2",
+        "sellRule": "market-specific",
+        "priceLimitPct": 30,
+        "enforcesBuySessionGate": False,
+        "nonRealtimeBuyPolicy": "downgrade",
+        "orderSizing": {
+            "boardLotSize": 1,
+            "buyLotSize": 1,
+            "sellLotSize": 1,
+            "minBuyQuantity": 1,
+            "allowsOddLotBuy": True,
+            "allowsOddLotSell": True,
+            "oddLotPolicy": "share_level",
+            "normalization": "share_level",
+            "source": "KRX share-level trading unit",
+        },
+    },
+    "SG": {
+        "ruleDepth": "basic",
+        "timezone": "Asia/Singapore",
+        "currency": "SGD",
+        "sessionWindows": [{"label": "regular", "start": "09:00", "end": "17:00"}],
+        "openingConfirmationMinutes": 0,
+        "settlement": "T+2",
+        "sellRule": "market-specific",
+        "priceLimitPct": None,
+        "enforcesBuySessionGate": False,
+        "nonRealtimeBuyPolicy": "downgrade",
+        "orderSizing": {
+            "boardLotSize": 100,
+            "buyLotSize": 100,
+            "sellLotSize": 100,
+            "minBuyQuantity": 100,
+            "allowsOddLotBuy": True,
+            "allowsOddLotSell": True,
+            "oddLotPolicy": "unit_share_market_for_odd_lots",
+            "normalization": "odd_lot_allowed",
+            "source": "SGX standard board lot plus unit share market",
+        },
+    },
+}
+
+
+def _parse_clock(value: str) -> time:
+    hour, minute = [int(part) for part in str(value).split(":", 1)]
+    return time(hour, minute)
+
+
+def _minutes_after(start: time, minutes: int) -> time:
+    total = start.hour * 60 + start.minute + max(0, int(minutes or 0))
+    return time((total // 60) % 24, total % 60)
+
+
+def market_rule_profile(market: str, instrument_type: str = "stock") -> dict[str, Any]:
+    market = str(market or "").upper()
+    base = dict(MARKET_RULES.get(market) or {})
+    if not base:
+        base = {
+            "ruleDepth": "basic",
+            "timezone": "UTC",
+            "currency": "",
+            "sessionWindows": [],
+            "openingConfirmationMinutes": 0,
+            "settlement": "market-specific",
+            "sellRule": "market-specific",
+            "priceLimitPct": None,
+            "enforcesBuySessionGate": False,
+            "nonRealtimeBuyPolicy": "downgrade",
+            "orderSizing": {
+                "boardLotSize": 1,
+                "buyLotSize": 1,
+                "sellLotSize": 1,
+                "minBuyQuantity": 1,
+                "allowsOddLotBuy": True,
+                "allowsOddLotSell": True,
+                "oddLotPolicy": "unknown_share_level",
+                "normalization": "share_level",
+                "source": "default",
+            },
+        }
+    is_etf = str(instrument_type or "stock").lower() == "etf"
+    return {
+        "version": "market-rule-v1",
+        "market": market,
+        "ruleDepth": base["ruleDepth"],
+        "timezone": base["timezone"],
+        "currency": base["currency"],
+        "sessionWindows": list(base.get("sessionWindows") or []),
+        "lunchBreak": base.get("lunchBreak"),
+        "openingConfirmationMinutes": base.get("openingConfirmationMinutes", 0),
+        "settlement": base.get("settlement"),
+        "sellRule": base.get("sellRule"),
+        "priceLimitPct": base.get("priceLimitPct"),
+        "enforcesBuySessionGate": bool(base.get("enforcesBuySessionGate")),
+        "nonRealtimeBuyPolicy": base.get("nonRealtimeBuyPolicy", "downgrade"),
+        "orderSizing": dict(base.get("orderSizing") or {}),
+        "etfRiskPolicy": "high-volatility-gates" if is_etf and market in {"CN", "TW"} else "basic-etf-liquidity-check" if is_etf else "not-etf",
+        "sources": MARKET_RULE_SOURCES.get(market, []),
+    }
+
+
+def market_session_profile(market: str, info: dict[str, Any]) -> dict[str, Any]:
+    market = str(market or "").upper()
+    source = str(info.get("priceSource") or info.get("quoteSource") or "").strip()
+    profile = market_rule_profile(market, str(info.get("instrumentType") or "stock"))
+    if info.get("marketSessionOverride"):
+        override = str(info.get("marketSessionOverride"))
+        return {
+            "market": market,
+            "state": override,
+            "priceSource": source,
+            "gated": bool(profile.get("enforcesBuySessionGate")),
+            "regularSession": override == "regular",
+            "openConfirmed": override == "regular",
+            "allowNewBuy": override == "regular" or not profile.get("enforcesBuySessionGate"),
+            "rawAllowNewBuy": override == "regular",
+            "ruleDepth": profile["ruleDepth"],
+            "timezone": profile["timezone"],
+            "reason": "override",
+        }
+    if profile.get("enforcesBuySessionGate") and not source and not info.get("analysisTime"):
+        return {
+            "market": market,
+            "state": "unknown",
+            "priceSource": source,
+            "gated": False,
+            "regularSession": True,
+            "openConfirmed": True,
+            "allowNewBuy": True,
+            "rawAllowNewBuy": True,
+            "ruleDepth": profile["ruleDepth"],
+            "timezone": profile["timezone"],
+            "reason": "missing-session-source",
+        }
+    if not profile.get("sessionWindows"):
+        return {
+            "market": market,
+            "state": "unknown",
+            "priceSource": source,
+            "gated": False,
+            "regularSession": True,
+            "openConfirmed": True,
+            "allowNewBuy": True,
+            "rawAllowNewBuy": True,
+            "ruleDepth": profile["ruleDepth"],
+            "timezone": profile["timezone"],
+            "reason": "unknown-market-rules",
+        }
+
+    now_local = _local_time(market, _parse_analysis_time(info))
+    clock = now_local.time()
+    weekday = now_local.weekday()
+    if weekday >= 5:
+        state = "closed"
+        regular = False
+        confirmed = False
+    else:
+        matched_window = None
+        for window in profile.get("sessionWindows") or []:
+            start = _parse_clock(window["start"])
+            end = _parse_clock(window["end"])
+            if _between(clock, start, end):
+                matched_window = window
+                break
+        regular = matched_window is not None
+        confirmed = False
+        if regular and matched_window:
+            start = _parse_clock(matched_window["start"])
+            confirm_at = _minutes_after(start, int(profile.get("openingConfirmationMinutes") or 0))
+            confirmed = clock >= confirm_at
+        lunch = profile.get("lunchBreak") or {}
+        in_lunch = bool(lunch) and _between(clock, _parse_clock(lunch["start"]), _parse_clock(lunch["end"]))
+        state = "regular" if confirmed else "opening_confirmation" if regular else "lunch_break" if in_lunch else "closed"
+
+    raw_allow_new_buy = regular and confirmed
+    gated = bool(profile.get("enforcesBuySessionGate"))
+
+    return {
+        "market": market,
+        "state": state,
+        "priceSource": source,
+        "gated": gated,
+        "regularSession": regular,
+        "openConfirmed": confirmed,
+        "allowNewBuy": raw_allow_new_buy if gated else True,
+        "rawAllowNewBuy": raw_allow_new_buy,
+        "localTime": now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "ruleDepth": profile["ruleDepth"],
+        "timezone": profile["timezone"],
+        "reason": "confirmed-live-session" if regular and confirmed else "wait-for-open-confirmation" if regular else "lunch-break" if state == "lunch_break" else "outside-live-session",
+    }
+
+
+def market_rule_state(market: str, info: dict[str, Any], instrument_type: str = "stock") -> dict[str, Any]:
+    enriched_info = {**(info or {}), "instrumentType": instrument_type}
+    profile = market_rule_profile(market, instrument_type)
+    session = market_session_profile(market, enriched_info)
+    source = str(enriched_info.get("priceSource") or enriched_info.get("quoteSource") or "").strip()
+    warnings = enriched_info.get("sourceWarnings") if isinstance(enriched_info.get("sourceWarnings"), list) else []
+    if session.get("state") in {"regular", "opening_confirmation"} and source and not warnings:
+        data_freshness = "realtime"
+    elif source or warnings:
+        data_freshness = "delayed_or_fallback"
+    else:
+        data_freshness = "unknown"
+    return {
+        "version": "market-rule-state-v1",
+        "profile": profile,
+        "market": profile["market"],
+        "ruleDepth": profile["ruleDepth"],
+        "status": session.get("state"),
+        "trading": bool(session.get("regularSession")),
+        "openConfirmed": bool(session.get("openConfirmed")),
+        "allowNewBuy": bool(session.get("rawAllowNewBuy")),
+        "enforcedBuyGate": bool(session.get("gated")),
+        "reason": session.get("reason"),
+        "localTime": session.get("localTime"),
+        "dataFreshness": data_freshness,
+        "priceSource": source,
+        "settlement": profile.get("settlement"),
+        "sellRule": profile.get("sellRule"),
+        "priceLimitPct": profile.get("priceLimitPct"),
+        "orderSizing": profile.get("orderSizing"),
+    }
+
+
+def etf_risk_profile(market: str, info: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(info.get("symbol") or info.get("underlyingSymbol") or "").upper()
+    text = " ".join(
+        str(info.get(key) or "")
+        for key in ["shortName", "longName", "category", "fundFamily", "quoteType", "instrumentType"]
+    ).lower()
+    high_beta_terms = ["创业", "創業", "chinext", "科创", "科創", "star", "nasdaq", "technology", "semiconductor", "battery", "biotech", "kosdaq", "1000", "growth"]
+    defensive_terms = ["dividend", "high dividend", "bond", "treasury", "gold", "low volatility", "低波", "高息", "債", "bond"]
+
+    if symbol in HIGH_BETA_ETF_SYMBOLS or any(term in text for term in high_beta_terms):
+        category = "high_beta_tactical"
+        risk_tier = "high"
+        block_buy_drop = -2.0
+        force_reduce_drop = -3.2
+    elif symbol in DEFENSIVE_ETF_SYMBOLS or any(term in text for term in defensive_terms):
+        category = "defensive_income"
+        risk_tier = "defensive"
+        block_buy_drop = -3.2
+        force_reduce_drop = -4.8
+    elif symbol in CORE_ETF_SYMBOLS:
+        category = "broad_core"
+        risk_tier = "core"
+        block_buy_drop = -2.6
+        force_reduce_drop = -4.0
+    else:
+        category = "sector_tactical"
+        risk_tier = "medium_high"
+        block_buy_drop = -2.4
+        force_reduce_drop = -3.8
+
+    return {
+        "instrumentType": "etf",
+        "category": category,
+        "riskTier": risk_tier,
+        "highBeta": risk_tier == "high",
+        "blockBuyDropPct": block_buy_drop,
+        "forceReduceDropPct": force_reduce_drop,
+        "maxWeightPct": 18 if risk_tier == "high" else 22 if risk_tier == "core" else 16,
+        "market": str(market or "").upper(),
+    }
 
 
 def _grade(score: float) -> str:
@@ -159,6 +676,7 @@ def data_quality_profile(
     factor_score = _clamp(available_factor_count / 5 * 100) if availability else 70.0
     market_support = _market_support_profile(market_profile)
 
+    source_penalty = _source_penalty(info)
     score = _clamp(
         price_score * 0.28
         + fundamental_score * 0.18
@@ -166,6 +684,7 @@ def data_quality_profile(
         + news_score * 0.16
         + factor_score * 0.13
         + market_support["score"] * 0.08
+        - source_penalty
     )
     issues: list[str] = []
     strengths: list[str] = []
@@ -189,6 +708,8 @@ def data_quality_profile(
         strengths.append("marketSourceStackStrong")
     elif market_support["score"] < 62:
         issues.append("marketSourceStackBasic")
+    if source_penalty:
+        issues.append("sourceFallbackOrStale")
 
     return {
         "score": round(score, 1),
@@ -200,6 +721,9 @@ def data_quality_profile(
         "factorCoverageScore": round(factor_score, 1),
         "marketSupportScore": market_support["score"],
         "marketCoverageTier": market_support["coverageTier"],
+        "priceSource": info.get("priceSource") or info.get("quoteSource"),
+        "sourcePenalty": round(source_penalty, 1),
+        "sourceWarnings": _source_warnings(info)[:5],
         "issues": issues,
         "strengths": strengths,
     }
@@ -275,6 +799,8 @@ def classify_regime(
 def risk_gates(
     *,
     instrument_type: str,
+    market: str,
+    info: dict[str, Any],
     metrics: dict[str, float],
     data_quality: dict[str, Any],
     news_analysis: dict[str, Any],
@@ -292,6 +818,9 @@ def risk_gates(
     liquidity = _number(((t_plan.get("components") or {}).get("liquidityScore")), metrics.get("quality", 50)) or 50.0
     financial_negatives = len(financial_analysis.get("negatives") or [])
     change = _number(price_change, 0.0) or 0.0
+    market = str(market or "").upper()
+    session = market_session_profile(market, {**info, "instrumentType": instrument_type})
+    etf_profile = etf_risk_profile(market, info) if instrument_type == "etf" else {}
 
     def add(kind: str, key: str, severity: str, value: float | None = None, threshold: float | None = None) -> None:
         gates.append(
@@ -306,10 +835,31 @@ def risk_gates(
 
     if data_quality["score"] < 45:
         add("blockBuy", "dataQualityTooWeak", "warning", data_quality["score"], 45)
+    elif data_quality.get("sourcePenalty", 0) >= 14:
+        add("blockBuy", "sourceStackUnstable", "warning", data_quality.get("sourcePenalty"), 14)
+    if session.get("gated") and not session.get("regularSession"):
+        add("blockBuy", "outsideTradingSession", "warning")
+    elif session.get("gated") and not session.get("openConfirmed"):
+        add("blockBuy", "openingConfirmationPending", "warning")
     if change <= -8.5:
         add("exitCandidate", "severePriceBreakdown", "danger", change, -8.5)
+    elif market in {"CN", "TW"} and change <= -4.2:
+        add("forceReduce", "localMarketFastDrop", "warning", change, -4.2)
     elif change <= -5:
         add("forceReduce", "largePriceBreakdown", "warning", change, -5)
+    elif market in {"CN", "TW"} and change <= -2.8:
+        add("blockBuy", "localMarketIntradayDrop", "warning", change, -2.8)
+    if instrument_type == "etf" and etf_profile:
+        if change <= float(etf_profile["forceReduceDropPct"]):
+            add("forceReduce", "etfTrendBreakdown", "warning", change, float(etf_profile["forceReduceDropPct"]))
+        elif change <= float(etf_profile["blockBuyDropPct"]):
+            add(
+                "blockBuy",
+                "etfHighBetaIntradayDrop" if etf_profile.get("highBeta") else "etfIntradayDrop",
+                "warning",
+                change,
+                float(etf_profile["blockBuyDropPct"]),
+            )
     if downside_risk_score >= 72:
         add("exitCandidate", "downsideRiskUrgent", "danger", downside_risk_score, 72)
     elif downside_risk_score >= 62:
@@ -528,6 +1078,14 @@ def build_decision_engine(
         market_profile=market_profile,
     )
     market_support = _market_support_profile(market_profile)
+    session = market_session_profile(market, {**info, "instrumentType": instrument_type})
+    rule_state = market_rule_state(market, info, instrument_type)
+    instrument_profile = etf_risk_profile(market, info) if instrument_type == "etf" else {
+        "instrumentType": "stock",
+        "category": "common_equity",
+        "riskTier": "single_stock",
+        "market": str(market or "").upper(),
+    }
     regime = classify_regime(
         instrument_type=instrument_type,
         metrics=metrics,
@@ -544,6 +1102,8 @@ def build_decision_engine(
     )
     gates = risk_gates(
         instrument_type=instrument_type,
+        market=market,
+        info=info,
         metrics=metrics,
         data_quality=data_quality,
         news_analysis=news_analysis,
@@ -591,10 +1151,15 @@ def build_decision_engine(
         sell_score = max(sell_score, 64.0)
     elif _has_gate(gates, "blockBuy"):
         buy_score = min(buy_score, 60.0)
+    if data_quality.get("sourcePenalty", 0) >= 6:
+        buy_score = min(buy_score, max(52.0, 72.0 - float(data_quality.get("sourcePenalty") or 0) * 0.7))
+        confidence_penalty = min(16.0, float(data_quality.get("sourcePenalty") or 0) * 0.8)
+    else:
+        confidence_penalty = 0.0
 
     risk_reward = _clamp(buy_score - sell_score + 50)
     rank_score = _clamp(buy_score * 0.62 + risk_reward * 0.26 + data_quality["score"] * 0.12)
-    confidence = _clamp(data_quality["score"] * 0.50 + regime["confidence"] * 0.30 + abs(buy_score - sell_score) * 0.20)
+    confidence = _clamp(data_quality["score"] * 0.50 + regime["confidence"] * 0.30 + abs(buy_score - sell_score) * 0.20 - confidence_penalty)
 
     if sell_score >= 78:
         action = "exit"
@@ -626,6 +1191,9 @@ def build_decision_engine(
         "regime": regime,
         "dataQuality": data_quality,
         "marketSupport": market_support,
+        "marketSession": session,
+        "marketRuleState": rule_state,
+        "instrumentProfile": instrument_profile,
         "gates": gates,
         "caseEvidence": {key: round(value, 1) for key, value in case["evidence"].items()},
         "buyScore": round(buy_score, 1),
