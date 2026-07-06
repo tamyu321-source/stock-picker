@@ -436,6 +436,8 @@ export interface StrategyFocusResult {
 }
 
 export interface StrategyAssessment {
+  strategyId?: string;
+  strategyName?: string;
   mode: string;
   fitScore: number;
   sortScore: number;
@@ -686,9 +688,14 @@ export interface BenchmarkRelativeScore {
 }
 
 export interface RecommendationCheckpoint {
-  horizon: string;
-  targetReturnPct: number;
-  maxDrawdownPct: number;
+  horizon?: string;
+  horizonDays?: number;
+  label?: string;
+  completed?: boolean;
+  returnPct?: number | null;
+  observedAt?: string | null;
+  targetReturnPct?: number | null;
+  maxDrawdownPct?: number | null;
 }
 
 export interface RecommendationTracker {
@@ -876,8 +883,67 @@ export interface FinalDecision {
   verdict: Verdict;
   source: string;
   confidence: number;
+  calibratedConfidence?: number | null;
   execution: TradeExecutionProfile;
   primaryReasons: string[];
+  performanceContext?: {
+    bucketKey?: string;
+    sampleStatus?: string;
+    sampleSize?: number;
+    hitRate?: number | null;
+  };
+}
+
+export interface PaperTradeRecommendation {
+  id: string;
+  symbol: string;
+  name: string;
+  market: Market;
+  instrumentType?: InstrumentType;
+  openedAt: string;
+  scanGeneratedAt: string;
+  latestObservedAt?: string | null;
+  entryPrice: number;
+  latestPrice?: number | null;
+  latestReturnPct?: number | null;
+  maxReturnPct?: number | null;
+  maxDrawdownPct?: number | null;
+  wasProfitable?: boolean;
+  stopLossTriggered?: boolean;
+  action: string;
+  verdict: Verdict;
+  confidence: number;
+  calibratedConfidence?: number | null;
+  source?: string;
+  sourceRole?: string;
+  strategyId?: string;
+  strategyName?: string;
+  dataQualityScore?: number | null;
+  quoteStatus?: string | null;
+  marketRuleStatus?: string | null;
+  gateKeys?: string[];
+  performanceBucketKey?: string;
+  finalDecision?: FinalDecision;
+  checkpoints?: RecommendationCheckpoint[];
+}
+
+export interface RecommendationPerformance {
+  sampleSize: number;
+  hitRate: number;
+  averageReturnPct: number;
+  worstReturnPct: number;
+  maxDrawdownPct: number;
+  confidenceMultiplier: number;
+  riskPenalty: number;
+  sampleStatus: 'insufficient' | 'usable' | 'weak' | string;
+}
+
+export interface StrategyCalibrationState {
+  version: string;
+  riskMode: 'capital_first' | string;
+  updatedAt: string;
+  global: RecommendationPerformance | null;
+  buckets: Record<string, RecommendationPerformance>;
 }
 
 export interface QuoteObservation {
@@ -943,6 +1009,18 @@ export interface Pick {
   decisionEngine?: DecisionEngine;
   marketRuleState?: MarketRuleState;
   finalDecision?: FinalDecision;
+  performanceContext?: {
+    version?: string;
+    bucketKey?: string;
+    sampleStatus?: string;
+    sampleSize?: number;
+    hitRate?: number | null;
+    averageReturnPct?: number | null;
+    maxDrawdownPct?: number | null;
+    confidenceMultiplier?: number;
+    capitalFirstGate?: boolean;
+    riskMode?: string;
+  };
   quoteConsensus?: QuoteConsensus;
   recommendationAudit?: RecommendationAudit;
   professionalAnalytics?: ProfessionalAnalytics;
@@ -2223,6 +2301,8 @@ export async function analyzeStocks(payload: {
   refreshStrategies?: boolean;
   refresh?: boolean;
   portfolio?: PortfolioImportResponse | PortfolioAnalysis;
+  performanceCalibration?: StrategyCalibrationState;
+  riskMode?: string;
 }): Promise<AnalysisResponse> {
   if (staticDemoBuild || usingStaticFallback) {
     return fallbackAnalysis(payload);
@@ -2254,6 +2334,8 @@ export async function analyzeStocksStream(
     refreshStrategies?: boolean;
     refresh?: boolean;
     portfolio?: PortfolioImportResponse | PortfolioAnalysis;
+    performanceCalibration?: StrategyCalibrationState;
+    riskMode?: string;
   },
   onEvent: (event: AnalysisStreamEvent) => void,
   options: { signal?: AbortSignal } = {}

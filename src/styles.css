@@ -1737,7 +1737,7 @@ button:disabled {
 
 .recommendation-review-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1756,6 +1756,29 @@ button:disabled {
   overflow-wrap: anywhere;
   color: #245f46;
   font-size: 0.96rem;
+}
+
+.recommendation-review-details {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.recommendation-review-details div {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid #e1e9e2;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.recommendation-review-details b {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: #17211b;
+  font-size: 0.86rem;
 }
 
 .decision-workbench {
@@ -2608,6 +2631,51 @@ button:disabled {
   font-size: 0.72rem;
 }
 
+.performance-context-strip {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid #e1e9e2;
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.performance-context-strip.usable {
+  border-color: #cfe3d5;
+  background: #f4fbf6;
+}
+
+.performance-context-strip.insufficient {
+  border-color: #f0d88f;
+  background: #fffaf0;
+}
+
+.performance-context-strip.weak {
+  border-color: #efc2ba;
+  background: #fff7f5;
+}
+
+.performance-context-strip div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.performance-context-strip span,
+.performance-context-strip small {
+  color: #647069;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.performance-context-strip strong {
+  overflow-wrap: anywhere;
+  color: #17211b;
+  font-size: 0.92rem;
+}
+
 .pick-heading,
 .sector-heading {
   align-items: flex-start;
@@ -2856,6 +2924,7 @@ h3 {
 .metric-row .engine-chip.accumulate,
 .metric-row .engine-chip.strong,
 .metric-row .engine-chip.usable,
+.metric-row .performance-chip.usable,
 .metric-row .market-source-chip.local-deep,
 .metric-row .market-source-chip.regional {
   background: #e8f4ed;
@@ -2865,6 +2934,7 @@ h3 {
 .metric-row .engine-chip.hold,
 .metric-row .engine-chip.reduce,
 .metric-row .engine-chip.thin,
+.metric-row .performance-chip.insufficient,
 .metric-row .market-source-chip.global {
   background: #fff4d6;
   color: #7a4d0b;
@@ -2872,6 +2942,7 @@ h3 {
 
 .metric-row .engine-chip.exit,
 .metric-row .engine-chip.weak,
+.metric-row .performance-chip.weak,
 .metric-row .market-source-chip.basic {
   background: #fff0ed;
   color: #8a2d20;
@@ -3644,6 +3715,29 @@ h3 {
   color: #17211b;
   font-size: 0.92rem;
   line-height: 1.25;
+}
+
+.holding-change-note {
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border: 1px solid #e1e9e2;
+  border-radius: 8px;
+  background: #fff;
+  color: #46534a;
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
+.holding-change-note.better {
+  border-color: #cfe4d7;
+  background: #f4fbf6;
+  color: #245f46;
+}
+
+.holding-change-note.worse {
+  border-color: #efc2ba;
+  background: #fff7f5;
+  color: #8a2d20;
 }
 
 .holding-notes {
@@ -4829,11 +4923,16 @@ h3 {
   }
 
   .quote-consensus-strip,
+  .performance-context-strip,
   .portfolio-action-table article,
   .portfolio-workbench-heading,
   .portfolio-section-heading,
   .recommendation-review {
     grid-template-columns: 1fr;
+  }
+
+  .performance-context-strip {
+    flex-direction: column;
   }
 
   .portfolio-workbench-heading,
@@ -4850,6 +4949,11 @@ h3 {
   }
 
   .decision-snapshot-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .recommendation-review-grid,
+  .recommendation-review-details {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -4949,6 +5053,7 @@ h3 {
   .portfolio-dashboard-grid,
   .portfolio-holding-metrics,
   .recommendation-review-grid,
+  .recommendation-review-details,
   .report-metric-strip,
   .research-columns,
   .financial-grid,

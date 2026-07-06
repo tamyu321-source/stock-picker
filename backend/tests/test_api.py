@@ -2083,6 +2083,48 @@ class ApiTestCase(unittest.TestCase):
         self.assertIn("actionPlan", pick)
         self.assertIn("steps", pick["actionPlan"])
 
+    def test_weak_paper_trade_performance_blocks_new_accumulate(self):
+        client = create_app(LowRiskFakeMarketProvider(), self.news_crawler, FakeUniverseProvider()).test_client()
+        calibration = {
+            "version": "strategy-calibration-v1",
+            "riskMode": "capital_first",
+            "updatedAt": "2026-07-06T12:00:00Z",
+            "global": None,
+            "buckets": {
+                "market:US|instrument:stock": {
+                    "sampleSize": 9,
+                    "hitRate": 22.2,
+                    "averageReturnPct": -1.4,
+                    "worstReturnPct": -7.8,
+                    "maxDrawdownPct": -8.9,
+                    "confidenceMultiplier": 0.62,
+                    "riskPenalty": 14,
+                    "sampleStatus": "weak",
+                }
+            },
+        }
+        response = client.post(
+            "/api/analyze",
+            json={
+                "markets": ["US"],
+                "symbols": ["AAPL"],
+                "strategyId": "balanced",
+                "riskMode": "capital_first",
+                "performanceCalibration": calibration,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        pick = response.get_json()["picks"][0]
+        gate_keys = {gate["key"] for gate in pick["decisionEngine"]["gates"]}
+        self.assertIn("performanceUnderReview", gate_keys)
+        self.assertEqual(pick["performanceContext"]["sampleStatus"], "weak")
+        self.assertEqual(pick["performanceContext"]["sampleSize"], 9)
+        self.assertTrue(pick["performanceContext"]["capitalFirstGate"])
+        self.assertNotEqual(pick["finalDecision"]["action"], "accumulate")
+        self.assertEqual(pick["finalDecision"]["source"], "performance-calibration")
+        self.assertLess(pick["finalDecision"]["calibratedConfidence"], pick["finalDecision"]["confidence"])
+
     def test_decision_engine_risk_gate_overrides_positive_weight_score(self):
         class PriceBreakdownProvider:
             def fetch(self, symbol):

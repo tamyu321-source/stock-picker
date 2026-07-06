@@ -27,6 +27,10 @@ AUTO_SCAN_BUY_LIMIT = 14
 AUTO_SCAN_TRADE_LIMIT = 14
 AUTO_SCAN_SELL_LIMIT = 8
 AUTO_SCAN_WATCH_LIMIT = 16
+PERFORMANCE_MIN_SAMPLE = 5
+PERFORMANCE_LOW_HIT_RATE = 42.0
+PERFORMANCE_BAD_AVERAGE_RETURN = -0.35
+PERFORMANCE_BAD_DRAWDOWN = -4.5
 SEVERE_PRICE_DROP_PCT = -8.5
 LARGE_PRICE_DROP_PCT = -5.0
 STRICT_BUY_SCORE_FLOOR = 68
@@ -573,6 +577,155 @@ def _apply_quote_consensus_guard(pick: dict) -> None:
         if consensus.get("severeConflict"):
             engine["sellScore"] = round(max(float(engine.get("sellScore") or 0), 62.0), 1)
         _recompute_engine_after_guard(engine)
+
+
+def _normalise_performance_item(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    sample_size = int(_metric_number(value.get("sampleSize")) or 0)
+    hit_rate = _metric_number(value.get("hitRate"))
+    average_return = _metric_number(value.get("averageReturnPct"))
+    max_drawdown = _metric_number(value.get("maxDrawdownPct"))
+    risk_penalty = _metric_number(value.get("riskPenalty"))
+    confidence_multiplier = _metric_number(value.get("confidenceMultiplier"))
+    return {
+        "sampleSize": sample_size,
+        "hitRate": round(hit_rate, 2) if hit_rate is not None else None,
+        "averageReturnPct": round(average_return, 3) if average_return is not None else None,
+        "maxDrawdownPct": round(max_drawdown, 3) if max_drawdown is not None else None,
+        "worstReturnPct": value.get("worstReturnPct"),
+        "confidenceMultiplier": max(0.45, min(1.05, confidence_multiplier if confidence_multiplier is not None else 1.0)),
+        "riskPenalty": max(0.0, min(30.0, risk_penalty if risk_penalty is not None else 0.0)),
+        "sampleStatus": value.get("sampleStatus") or ("enough" if sample_size >= PERFORMANCE_MIN_SAMPLE else "insufficient"),
+    }
+
+
+def _performance_calibration_from_payload(payload: dict) -> dict:
+    raw = payload.get("performanceCalibration")
+    if not isinstance(raw, dict):
+        return {"version": "strategy-calibration-v1", "riskMode": payload.get("riskMode") or "capital_first", "buckets": {}, "global": None}
+    buckets = {}
+    raw_buckets = raw.get("buckets") if isinstance(raw.get("buckets"), dict) else {}
+    for key, value in raw_buckets.items():
+        item = _normalise_performance_item(value)
+        if item:
+            buckets[str(key)] = item
+    return {
+        "version": raw.get("version") or "strategy-calibration-v1",
+        "riskMode": raw.get("riskMode") or payload.get("riskMode") or "capital_first",
+        "buckets": buckets,
+        "global": _normalise_performance_item(raw.get("global")),
+        "updatedAt": raw.get("updatedAt"),
+    }
+
+
+def _performance_bucket_keys(pick: dict) -> list[str]:
+    market = str(pick.get("market") or "")
+    instrument = str(pick.get("instrumentType") or "stock")
+    strategy = str((pick.get("strategyAssessment") or {}).get("strategyId") or "")
+    quote_status = str((pick.get("quoteConsensus") or {}).get("status") or "")
+    rule_state = str((pick.get("marketRuleState") or {}).get("status") or "")
+    keys = [
+        f"market:{market}|instrument:{instrument}",
+        f"market:{market}",
+        f"instrument:{instrument}",
+    ]
+    if quote_status:
+        keys.insert(0, f"market:{market}|instrument:{instrument}|quote:{quote_status}")
+    if rule_state:
+        keys.insert(0, f"market:{market}|instrument:{instrument}|session:{rule_state}")
+    if strategy:
+        keys.insert(0, f"strategy:{strategy}|market:{market}|instrument:{instrument}")
+    keys.append("global")
+    return keys
+
+
+def _performance_match(calibration: dict, pick: dict) -> tuple[str, dict | None]:
+    buckets = calibration.get("buckets") if isinstance(calibration, dict) else {}
+    if not isinstance(buckets, dict):
+        buckets = {}
+    for key in _performance_bucket_keys(pick):
+        if key == "global":
+            item = calibration.get("global") if isinstance(calibration, dict) else None
+        else:
+            item = buckets.get(key)
+        if isinstance(item, dict):
+            return key, item
+    return "none", None
+
+
+def _performance_is_weak(performance: dict | None) -> bool:
+    if not performance:
+        return False
+    if int(performance.get("sampleSize") or 0) < PERFORMANCE_MIN_SAMPLE:
+        return False
+    hit_rate = _metric_number(performance.get("hitRate"))
+    average_return = _metric_number(performance.get("averageReturnPct"))
+    max_drawdown = _metric_number(performance.get("maxDrawdownPct"))
+    return (
+        (hit_rate is not None and hit_rate < PERFORMANCE_LOW_HIT_RATE)
+        or (average_return is not None and average_return < PERFORMANCE_BAD_AVERAGE_RETURN)
+        or (max_drawdown is not None and max_drawdown < PERFORMANCE_BAD_DRAWDOWN)
+    )
+
+
+def _performance_context_for_pick(calibration: dict, pick: dict) -> dict:
+    key, performance = _performance_match(calibration, pick)
+    sample_size = int((performance or {}).get("sampleSize") or 0)
+    weak = _performance_is_weak(performance)
+    sample_status = "insufficient" if sample_size < PERFORMANCE_MIN_SAMPLE else "weak" if weak else "usable"
+    multiplier = float((performance or {}).get("confidenceMultiplier") or 1.0)
+    if weak:
+        multiplier = min(multiplier, 0.74)
+    elif sample_status == "insufficient":
+        multiplier = min(multiplier, 0.92)
+    return {
+        "version": "performance-context-v1",
+        "bucketKey": key,
+        "sampleStatus": sample_status,
+        "sampleSize": sample_size,
+        "hitRate": (performance or {}).get("hitRate"),
+        "averageReturnPct": (performance or {}).get("averageReturnPct"),
+        "maxDrawdownPct": (performance or {}).get("maxDrawdownPct"),
+        "confidenceMultiplier": round(multiplier, 3),
+        "riskMode": calibration.get("riskMode") or "capital_first",
+        "capitalFirstGate": bool(weak and (calibration.get("riskMode") or "capital_first") == "capital_first"),
+    }
+
+
+def _apply_performance_calibration(picks: list[dict], calibration: dict | None) -> None:
+    if not calibration:
+        return
+    for pick in picks:
+        engine = _decision_engine_for(pick)
+        if not engine:
+            continue
+        context = _performance_context_for_pick(calibration, pick)
+        pick["performanceContext"] = context
+        if context["capitalFirstGate"] and engine.get("action") == "accumulate":
+            _add_engine_gate(
+                engine,
+                kind="blockBuy",
+                key="performanceUnderReview",
+                severity="warning",
+                value=_metric_number(context.get("hitRate")),
+                threshold=PERFORMANCE_LOW_HIT_RATE,
+            )
+            penalty = max(6.0, float(context.get("sampleSize") or 0) * 0.8)
+            engine["buyScore"] = round(min(float(engine.get("buyScore") or 0), max(54.0, float(engine.get("buyScore") or 0) - penalty)), 1)
+            engine["confidenceScore"] = round(max(20.0, float(engine.get("confidenceScore") or 0) * float(context.get("confidenceMultiplier") or 1.0)), 1)
+            _recompute_engine_after_guard(engine)
+            _apply_final_decision(pick, source="performance-calibration")
+        final_decision = _final_decision_for(pick)
+        if final_decision:
+            base_confidence = float(final_decision.get("confidence") or 0)
+            final_decision["calibratedConfidence"] = round(max(1.0, min(96.0, base_confidence * float(context.get("confidenceMultiplier") or 1.0))), 1)
+            final_decision["performanceContext"] = {
+                "bucketKey": context["bucketKey"],
+                "sampleStatus": context["sampleStatus"],
+                "sampleSize": context["sampleSize"],
+                "hitRate": context["hitRate"],
+            }
 
 
 def _trade_execution_profile(holding_analysis: dict | None) -> dict:
@@ -3107,6 +3260,8 @@ def _strategy_assessment(
             metric["score"] = adjusted_score
     updated_overall["metrics"] = updated_metrics
     assessment = {
+        "strategyId": (strategy or {}).get("id"),
+        "strategyName": (strategy or {}).get("name"),
         "mode": behavior.get("mode") or "balanced",
         "fitScore": fit_score,
         "sortScore": sort_score,
@@ -4528,6 +4683,7 @@ def _analysis_context(payload: dict, market_provider=None, news_crawler=None, un
         "universe_source": universe_source,
         "discovery_limit": discovery_limit,
         "portfolio": portfolio_context,
+        "performance_calibration": _performance_calibration_from_payload(payload),
     }
 
 
@@ -4884,13 +5040,24 @@ def _friendly_data_error(symbol: str, exc: Exception) -> str:
     return message or f"行情资料暂时不可用，已跳过 {symbol}。"
 
 
-def _finish_picks(picks: list[dict], auto_scan: bool = False, display_limit: int = AUTO_SCAN_RESULT_LIMIT) -> list[dict]:
+def _rerank_buy_reasons(picks: list[dict]) -> None:
+    for pick in picks:
+        pick["reasonCodes"] = [reason for reason in pick.get("reasonCodes", []) if reason.get("key") != "rankedTopOpportunity"]
+    for index, pick in enumerate(sorted([item for item in picks if item.get("verdict") == "buy"], key=_investment_priority, reverse=True), start=1):
+        pick["reasonCodes"].append({"key": "rankedTopOpportunity", "params": {"rank": index}})
+
+
+def _finish_picks(picks: list[dict], auto_scan: bool = False, display_limit: int = AUTO_SCAN_RESULT_LIMIT, performance_calibration: dict | None = None) -> list[dict]:
     picks.sort(key=_investment_priority, reverse=True)
     if auto_scan:
         _apply_auto_scan_search_algorithm(picks)
+        _apply_performance_calibration(picks, performance_calibration)
+        _rerank_buy_reasons(picks)
         display_picks = _curated_auto_scan_picks_for_limit(picks, display_limit)
     else:
         _relative_verdicts(picks)
+        _apply_performance_calibration(picks, performance_calibration)
+        _rerank_buy_reasons(picks)
         display_picks = sorted(picks, key=_display_priority_key)
     for pick in display_picks:
         pick["reasons"] = _english_reasons(pick["reasonCodes"])
@@ -4938,7 +5105,7 @@ def analyze(payload: dict, market_provider=None, news_crawler=None, universe_pro
             errors.extend(batch_errors)
             evaluated_symbols.update(item.symbol for item in pending_symbols)
 
-        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
+        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"], context["performance_calibration"])
         _refresh_scan_quality_context(context, picks)
         next_limit = _next_auto_scan_limit(context, picks)
         if next_limit is None:
@@ -5000,7 +5167,7 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                     try:
                         pick = future.result()
                         picks.append(pick)
-                        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
+                        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"], context["performance_calibration"])
                         portfolio_summary = _apply_portfolio_context(context, display_picks)
                         if portfolio_summary:
                             display_picks = sorted(display_picks, key=_display_priority_key)
@@ -5011,7 +5178,7 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                     except Exception as exc:
                         error_message = _friendly_data_error(symbol, exc)
                         errors.append({"symbol": symbol, "error": error_message})
-                        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
+                        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"], context["performance_calibration"])
                         portfolio_summary = _apply_portfolio_context(context, display_picks)
                         if portfolio_summary:
                             display_picks = sorted(display_picks, key=_display_priority_key)
@@ -5019,7 +5186,7 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
                         yield event("error", symbol=symbol, error=error_message, sectors=_sector_analysis(picks if context["auto_scan"] else display_picks), scan=_scan_state(context, display_picks, errors), portfolio=portfolio_summary)
             evaluated_symbols.update(item.symbol for item in pending_symbols)
 
-        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"])
+        display_picks = _finish_picks(picks, context["auto_scan"], context["display_limit"], context["performance_calibration"])
         _refresh_scan_quality_context(context, picks)
         next_limit = _next_auto_scan_limit(context, picks)
         if next_limit is None:
@@ -5028,7 +5195,7 @@ def stream_analyze(payload: dict, market_provider=None, news_crawler=None, unive
             break
         symbols = context["symbols"]
 
-    display_picks = display_picks or _finish_picks(picks, context["auto_scan"], context["display_limit"])
+    display_picks = display_picks or _finish_picks(picks, context["auto_scan"], context["display_limit"], context["performance_calibration"])
     portfolio_summary = _apply_portfolio_context(context, display_picks)
     if portfolio_summary:
         display_picks = sorted(display_picks, key=_display_priority_key)

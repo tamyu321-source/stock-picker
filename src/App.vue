@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { analyzeStocksStream, clearAuthSession, createAdminUser, currentDataMode, fetchAdminUsers, fetchConfig, fetchCurrentSession, fetchStockChart, fetchUserState, getAuthSession, importPortfolioFile, loginAdmin, loginWithAccessKey, refreshStrategyLibrary, resetAdminUserState, saveUserState, setAuthSession, updateAdminUser, type AdminUser, type AnalysisScan, type AnalysisStreamEvent, type AppConfig, type AuthSession, type DecisionPoint, type DisplayMode, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingActionItem, type HoldingNote, type HoldingPosition, type Market, type MarketProfile, type NewsEvent, type OverallSuitability, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type PortfolioMemoryItem, type ReasonCode, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights, type UserState } from './api';
+import { analyzeStocksStream, clearAuthSession, createAdminUser, currentDataMode, fetchAdminUsers, fetchConfig, fetchCurrentSession, fetchStockChart, fetchUserState, getAuthSession, importPortfolioFile, loginAdmin, loginWithAccessKey, refreshStrategyLibrary, resetAdminUserState, saveUserState, setAuthSession, updateAdminUser, type AdminUser, type AnalysisScan, type AnalysisStreamEvent, type AppConfig, type AuthSession, type DecisionPoint, type DisplayMode, type FinancialMetric, type FundFlowProfile, type HoldingAction, type HoldingActionItem, type HoldingNote, type HoldingPosition, type Market, type MarketProfile, type NewsEvent, type OverallSuitability, type PaperTradeRecommendation, type Pick, type PortfolioAnalysis, type PortfolioImportResponse, type PortfolioMemoryItem, type ReasonCode, type RecommendationCheckpoint, type RecommendationPerformance, type SectorAnalysis, type SectorRecommendation, type StockChartPoint, type StockChartResponse, type Strategy, type StrategyCalibrationState, type StrategyCheckResult, type StrategyFocusResult, type StrategyLibrary, type StrategyWeights, type UserState } from './api';
 import { messages, strategyText, type Locale } from './i18n';
 import ugoodaysLogo from './assets/ugoodays-logo.jpg';
 
@@ -12,6 +12,7 @@ type ResultVerdictFilter = 'all' | Pick['verdict'] | 't';
 type InvestmentTask = 'discover' | 'portfolio' | 'etf' | 'shortTerm';
 type WorkbenchBucket = 'all' | 'buy' | 'hold' | 'risk' | 'etf' | 'holdings';
 type PortfolioDashboardMetricKey = 'marketValue' | 'pnl' | 'sellable' | 'locked' | 'risk' | 'observe';
+type RiskMode = 'capital_first';
 type ResultSortKey =
   | 'recommended'
   | 'overall'
@@ -30,6 +31,7 @@ type SortDirection = 'desc' | 'asc';
 type DataMode = ReturnType<typeof currentDataMode>;
 type DataIssue = { symbol: string; error: string };
 type ChartTab = 'intraday' | 'daily';
+type PerformanceTone = 'insufficient' | 'usable' | 'weak';
 type SavedScan = {
   id: string;
   title: string;
@@ -49,19 +51,7 @@ type SavedScan = {
   scanInfo: AnalysisScan | null;
   portfolio: PortfolioAnalysis | PortfolioImportResponse | null;
 };
-type RecommendationHistoryItem = {
-  id: string;
-  symbol: string;
-  name: string;
-  market: Market;
-  openedAt: string;
-  scanGeneratedAt: string;
-  entryPrice: number;
-  action: string;
-  verdict: Pick['verdict'];
-  confidence: number;
-  source?: string;
-};
+type RecommendationHistoryItem = PaperTradeRecommendation;
 type HoldingRowView = {
   symbol: string;
   name: string;
@@ -108,6 +98,7 @@ const resultVerdictFilter = ref<ResultVerdictFilter>('all');
 const resultSortKey = ref<ResultSortKey>('recommended');
 const resultSortDirection = ref<SortDirection>('desc');
 const displayMode = ref<DisplayMode>('simple');
+const riskMode = ref<RiskMode>('capital_first');
 const dataIssues = ref<DataIssue[]>([]);
 const scanInfo = ref<AnalysisScan | null>(null);
 const loadingStartedAt = ref(0);
@@ -147,7 +138,17 @@ const SETTINGS_STORAGE_KEY = 'open-stock-picker.settings.v1';
 const SAVED_SCANS_STORAGE_KEY = 'open-stock-picker.saved-scans.v1';
 const SAVED_SCAN_LIMIT = 6;
 const PORTFOLIO_MEMORY_LIMIT = 5;
-const RECOMMENDATION_HISTORY_LIMIT = 50;
+const RECOMMENDATION_HISTORY_LIMIT = 200;
+const PAPER_TRADE_MIN_SAMPLE = 5;
+const PERFORMANCE_LOW_HIT_RATE = 42;
+const PERFORMANCE_BAD_AVERAGE_RETURN = -0.35;
+const PERFORMANCE_BAD_DRAWDOWN = -4.5;
+const PAPER_TRADE_HORIZONS: Array<{ days: number; label: string }> = [
+  { days: 1, label: '1D' },
+  { days: 3, label: '3D' },
+  { days: 5, label: '5D' },
+  { days: 20, label: '20D' }
+];
 const defaultMarkets: Market[] = ['US', 'CN', 'HK', 'JP', 'KR', 'SG', 'TW'];
 const weightKeys: Array<keyof StrategyWeights> = ['momentum', 'value', 'sentiment', 'risk', 'quality'];
 const verdictFilterOptions: ResultVerdictFilter[] = ['all', 'buy', 't', 'watch', 'sell'];
@@ -608,6 +609,7 @@ type PersistedSettings = {
   symbolText?: string;
   manualHoldingText?: string;
   displayMode?: DisplayMode;
+  riskMode?: RiskMode;
   defaultTaskMode?: InvestmentTask;
   defaultResultView?: 'stocks' | 'sectors';
   resultSortKey?: ResultSortKey;
@@ -863,20 +865,30 @@ const holdingActionItems = computed<HoldingActionItem[]>(() => {
   })
     .slice(0, 8);
 });
+const recommendationPerformanceState = computed<StrategyCalibrationState>(() => buildStrategyCalibrationState(recommendationHistory.value));
+const blockedReasonRanking = computed(() => {
+  const counts = new Map<string, number>();
+  picks.value.forEach((pick) => {
+    const gates = pick.decisionEngine?.gates ?? [];
+    gates
+      .filter((gate) => gate.kind === 'blockBuy' || gate.kind === 'forceReduce' || gate.kind === 'exitCandidate')
+      .forEach((gate) => counts.set(gate.key, (counts.get(gate.key) ?? 0) + 1));
+  });
+  return Array.from(counts.entries())
+    .map(([key, count]) => ({ key, count, label: decisionGateLabel(key) }))
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 5);
+});
 const recommendationReview = computed(() => {
-  const currentBySymbol = new Map(picks.value.map((pick) => [pick.symbol, pick]));
-  const reviewed = recommendationHistory.value
-    .map((item) => {
-      const current = currentBySymbol.get(item.symbol);
-      const entry = Number(item.entryPrice ?? 0);
-      const currentPrice = Number(current?.price ?? 0);
-      const returnPct = entry > 0 && currentPrice > 0 ? (currentPrice - entry) / entry * 100 : null;
-      return { ...item, currentPrice, returnPct };
-    })
-    .filter((item) => item.returnPct !== null);
-  const wins = reviewed.filter((item) => Number(item.returnPct) > 0).length;
-  const averageReturn = reviewed.length ? reviewed.reduce((sum, item) => sum + Number(item.returnPct), 0) / reviewed.length : 0;
-  const worstReturn = reviewed.length ? Math.min(...reviewed.map((item) => Number(item.returnPct))) : 0;
+  const reviewed = recommendationHistory.value.filter((item) => item.latestReturnPct !== null && item.latestReturnPct !== undefined);
+  const wins = reviewed.filter((item) => isRecommendationHit(item)).length;
+  const directionalReturns = reviewed.map(recommendationDirectionalReturn).filter((value) => Number.isFinite(value));
+  const averageReturn = directionalReturns.length ? directionalReturns.reduce((sum, value) => sum + value, 0) / directionalReturns.length : 0;
+  const worstReturn = directionalReturns.length ? Math.min(...directionalReturns) : 0;
+  const maxDrawdown = reviewed.length ? Math.min(...reviewed.map((item) => Number(item.maxDrawdownPct ?? item.latestReturnPct ?? 0))) : 0;
+  const best = reviewed.slice().sort((left, right) => recommendationDirectionalReturn(right) - recommendationDirectionalReturn(left))[0] ?? null;
+  const worst = reviewed.slice().sort((left, right) => recommendationDirectionalReturn(left) - recommendationDirectionalReturn(right))[0] ?? null;
+  const globalPerformance = recommendationPerformanceState.value.global;
   return {
     reviewed,
     count: reviewed.length,
@@ -884,6 +896,11 @@ const recommendationReview = computed(() => {
     hitRate: reviewed.length ? wins / reviewed.length * 100 : 0,
     averageReturn,
     worstReturn,
+    maxDrawdown,
+    best,
+    worst,
+    sampleStatus: globalPerformance?.sampleStatus ?? 'insufficient',
+    globalPerformance,
   };
 });
 const flattenedSignals = computed(() => filteredPicks.value.flatMap((pick) => pick.signals.map((signal) => ({ ...signal, symbol: pick.symbol }))));
@@ -1099,6 +1116,17 @@ function isMarket(value: unknown): value is Market {
   return defaultMarkets.includes(value as Market);
 }
 
+function inferMarketFromSymbol(symbol: string): Market {
+  const upper = symbol.toUpperCase();
+  if (upper.endsWith('.TW') || upper.endsWith('.TWO')) return 'TW';
+  if (upper.endsWith('.SS') || upper.endsWith('.SZ')) return 'CN';
+  if (upper.endsWith('.HK')) return 'HK';
+  if (upper.endsWith('.T')) return 'JP';
+  if (upper.endsWith('.KS') || upper.endsWith('.KQ')) return 'KR';
+  if (upper.endsWith('.SI')) return 'SG';
+  return 'US';
+}
+
 function isResultSortKey(value: unknown): value is ResultSortKey {
   return resultSortOptions.includes(value as ResultSortKey);
 }
@@ -1109,6 +1137,10 @@ function isSortDirection(value: unknown): value is SortDirection {
 
 function isDisplayMode(value: unknown): value is DisplayMode {
   return value === 'simple' || value === 'professional';
+}
+
+function isRiskMode(value: unknown): value is RiskMode {
+  return value === 'capital_first';
 }
 
 function isInvestmentTask(value: unknown): value is InvestmentTask {
@@ -1141,6 +1173,7 @@ function currentPersistedSettings(): PersistedSettings {
     symbolText: symbolText.value,
     manualHoldingText: manualHoldingText.value,
     displayMode: displayMode.value,
+    riskMode: riskMode.value,
     defaultTaskMode: activeTaskMode.value,
     defaultResultView: activeView.value,
     resultSortKey: resultSortKey.value,
@@ -1179,6 +1212,9 @@ function applyPersistedSettings(settings: PersistedSettings | Record<string, unk
   }
   if (isDisplayMode(persisted.displayMode)) {
     displayMode.value = persisted.displayMode;
+  }
+  if (isRiskMode(persisted.riskMode)) {
+    riskMode.value = persisted.riskMode;
   }
   if (isInvestmentTask(persisted.defaultTaskMode)) {
     activeInvestmentTask.value = persisted.defaultTaskMode;
@@ -1302,10 +1338,65 @@ function applyPortfolioMemory(value: unknown) {
   return true;
 }
 
+function defaultRecommendationCheckpoints(): RecommendationCheckpoint[] {
+  return PAPER_TRADE_HORIZONS.map((horizon) => ({
+    horizonDays: horizon.days,
+    label: horizon.label,
+    completed: false,
+    returnPct: null,
+    observedAt: null,
+    targetReturnPct: horizon.days === 1 ? 1.2 : horizon.days === 3 ? 2.4 : horizon.days === 5 ? 3.2 : 6,
+    maxDrawdownPct: horizon.days === 1 ? -2.5 : horizon.days === 3 ? -3.8 : horizon.days === 5 ? -4.8 : -7,
+  }));
+}
+
+function normalizeRecommendationHistoryItem(value: unknown): RecommendationHistoryItem | null {
+  if (!value || typeof value !== 'object') return null;
+  const item = value as Partial<RecommendationHistoryItem>;
+  if (!item.id || !item.symbol) return null;
+  const entryPrice = Number(item.entryPrice ?? 0);
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
+  const latestReturnPct = item.latestReturnPct === null || item.latestReturnPct === undefined ? null : Number(item.latestReturnPct);
+  const normalizedLatestReturnPct = Number.isFinite(latestReturnPct) ? Number(latestReturnPct) : null;
+  return {
+    id: String(item.id),
+    symbol: String(item.symbol),
+    name: String(item.name || item.symbol),
+    market: isMarket(item.market) ? item.market : inferMarketFromSymbol(String(item.symbol)),
+    instrumentType: item.instrumentType,
+    openedAt: String(item.openedAt || item.scanGeneratedAt || new Date().toISOString()),
+    scanGeneratedAt: String(item.scanGeneratedAt || item.openedAt || new Date().toISOString()),
+    latestObservedAt: item.latestObservedAt ?? null,
+    entryPrice,
+    latestPrice: item.latestPrice ?? null,
+    latestReturnPct: normalizedLatestReturnPct,
+    maxReturnPct: item.maxReturnPct ?? normalizedLatestReturnPct,
+    maxDrawdownPct: item.maxDrawdownPct ?? (normalizedLatestReturnPct !== null ? Math.min(0, normalizedLatestReturnPct) : null),
+    wasProfitable: Boolean(item.wasProfitable),
+    stopLossTriggered: Boolean(item.stopLossTriggered),
+    action: String(item.action || 'accumulate'),
+    verdict: item.verdict ?? 'watch',
+    confidence: Number(item.confidence ?? 0),
+    calibratedConfidence: item.calibratedConfidence ?? null,
+    source: item.source,
+    sourceRole: item.sourceRole,
+    strategyId: item.strategyId,
+    strategyName: item.strategyName,
+    dataQualityScore: item.dataQualityScore ?? null,
+    quoteStatus: item.quoteStatus ?? null,
+    marketRuleStatus: item.marketRuleStatus ?? null,
+    gateKeys: Array.isArray(item.gateKeys) ? item.gateKeys.map(String) : [],
+    performanceBucketKey: item.performanceBucketKey || recommendationBucketKey({ market: item.market, instrumentType: item.instrumentType } as Pick),
+    finalDecision: item.finalDecision,
+    checkpoints: Array.isArray(item.checkpoints) && item.checkpoints.length ? item.checkpoints : defaultRecommendationCheckpoints()
+  };
+}
+
 function applyRecommendationHistory(value: unknown) {
   if (!Array.isArray(value)) return false;
   recommendationHistory.value = value
-    .filter((item): item is RecommendationHistoryItem => Boolean(item) && typeof item.id === 'string' && typeof item.symbol === 'string')
+    .map(normalizeRecommendationHistoryItem)
+    .filter((item): item is RecommendationHistoryItem => Boolean(item))
     .slice(0, RECOMMENDATION_HISTORY_LIMIT);
   return true;
 }
@@ -2149,27 +2240,147 @@ function holdingActionItemLabel(item: HoldingActionItem) {
 }
 
 function recommendationReviewTitle() {
-  return localeText({ en: 'Recommendation review', 'zh-CN': '推荐复盘', 'zh-TW': '推薦複盤', ja: '推奨レビュー', ko: '추천 리뷰' });
+  return localeText({ en: 'Algorithm performance', 'zh-CN': '算法成绩', 'zh-TW': '算法成績', ja: 'アルゴリズム成績', ko: '알고리즘 성과' });
 }
 
 function recommendationReviewHint() {
   return localeText({
-    en: 'Saved buy calls compared with prices in the current scan.',
-    'zh-CN': '用当前扫描价格回看已保存买入建议。',
-    'zh-TW': '用目前掃描價格回看已保存買入建議。',
-    ja: '保存済み買い判断を現在価格で確認します。',
-    ko: '저장된 매수 판단을 현재 가격과 비교합니다.'
+    en: 'Paper trades update on each scan and feed the next risk gate.',
+    'zh-CN': '每次扫描更新纸交易表现，并反向影响下一次风控。',
+    'zh-TW': '每次掃描更新紙交易表現，並反向影響下一次風控。',
+    ja: '各スキャンで紙上取引を更新し、次のリスク判定に反映します。',
+    ko: '각 스캔마다 모의 거래 성과를 업데이트하고 다음 리스크 게이트에 반영합니다.'
   });
 }
 
-function recommendationReviewMetricLabel(key: 'reviewed' | 'wins' | 'avg' | 'worst') {
+function recommendationReviewMetricLabel(key: 'reviewed' | 'wins' | 'avg' | 'worst' | 'drawdown' | 'best') {
   const labels: Record<typeof key, LocalizedText> = {
     reviewed: { en: 'Reviewed', 'zh-CN': '已复盘', 'zh-TW': '已複盤', ja: '確認済み', ko: '검토' },
     wins: { en: 'Positive', 'zh-CN': '为正', 'zh-TW': '為正', ja: 'プラス', ko: '플러스' },
     avg: { en: 'Average', 'zh-CN': '平均', 'zh-TW': '平均', ja: '平均', ko: '평균' },
-    worst: { en: 'Worst', 'zh-CN': '最差', 'zh-TW': '最差', ja: '最悪', ko: '최저' }
+    worst: { en: 'Worst', 'zh-CN': '最差', 'zh-TW': '最差', ja: '最悪', ko: '최저' },
+    drawdown: { en: 'Max DD', 'zh-CN': '最大回撤', 'zh-TW': '最大回撤', ja: '最大DD', ko: '최대 낙폭' },
+    best: { en: 'Best', 'zh-CN': '最佳', 'zh-TW': '最佳', ja: '最良', ko: '최고' }
   };
   return localeText(labels[key]);
+}
+
+function recommendationSampleStatusLabel(status: string | undefined) {
+  const labels: Record<string, LocalizedText> = {
+    insufficient: { en: 'Sample insufficient', 'zh-CN': '样本不足', 'zh-TW': '樣本不足', ja: 'サンプル不足', ko: '표본 부족' },
+    usable: { en: 'Usable sample', 'zh-CN': '样本可用', 'zh-TW': '樣本可用', ja: '利用可能', ko: '표본 사용 가능' },
+    weak: { en: 'Under review', 'zh-CN': '表现偏弱', 'zh-TW': '表現偏弱', ja: '要見直し', ko: '성과 약함' }
+  };
+  return localeText(labels[status || 'insufficient'] ?? labels.insufficient);
+}
+
+function blockedReasonRankingTitle() {
+  return localeText({ en: 'Top buy blocks', 'zh-CN': '不可买原因排行', 'zh-TW': '不可買原因排行', ja: '買い停止理由', ko: '매수 제한 이유' });
+}
+
+function recommendationExtremeLabel(kind: 'best' | 'worst') {
+  return kind === 'best'
+    ? localeText({ en: 'Best paper trade', 'zh-CN': '最佳纸交易', 'zh-TW': '最佳紙交易', ja: '最良の紙上取引', ko: '최고 모의 거래' })
+    : localeText({ en: 'Worst paper trade', 'zh-CN': '最差纸交易', 'zh-TW': '最差紙交易', ja: '最悪の紙上取引', ko: '최악 모의 거래' });
+}
+
+function recommendationItemSummary(item: RecommendationHistoryItem | null | undefined) {
+  if (!item) return recommendationSampleStatusLabel('insufficient');
+  const direction = contributionLabel(recommendationDirectionalReturn(item));
+  return `${item.symbol} · ${decisionActionLabel(item.action)} · ${direction}%`;
+}
+
+function performanceContextTitle() {
+  return localeText({ en: 'Similar history', 'zh-CN': '同类历史表现', 'zh-TW': '同類歷史表現', ja: '類似履歴', ko: '유사 이력' });
+}
+
+function performanceContextLabel(pick: Pick) {
+  const context = performanceForPick(pick);
+  if (!context || !context.sampleSize) return recommendationSampleStatusLabel('insufficient');
+  const status = recommendationSampleStatusLabel(context.sampleStatus);
+  const hitRate = context.hitRate === null || context.hitRate === undefined ? '--' : `${Number(context.hitRate).toFixed(0)}%`;
+  return `${status} · ${context.sampleSize} · ${hitRate}`;
+}
+
+function performanceContextHint(pick: Pick) {
+  const context = performanceForPick(pick);
+  if (!context || !context.sampleSize) {
+    return localeText({
+      en: 'Not enough verified paper trades yet.',
+      'zh-CN': '还没有足够实盘纸交易样本。',
+      'zh-TW': '還沒有足夠實盤紙交易樣本。',
+      ja: '検証済み紙上取引がまだ不足しています。',
+      ko: '검증된 모의 거래 표본이 아직 부족합니다.'
+    });
+  }
+  return localeText({
+    en: `Avg ${contributionLabel(context.averageReturnPct ?? 0)}%, max DD ${contributionLabel(context.maxDrawdownPct ?? 0)}%.`,
+    'zh-CN': `平均 ${contributionLabel(context.averageReturnPct ?? 0)}%，最大回撤 ${contributionLabel(context.maxDrawdownPct ?? 0)}%。`,
+    'zh-TW': `平均 ${contributionLabel(context.averageReturnPct ?? 0)}%，最大回撤 ${contributionLabel(context.maxDrawdownPct ?? 0)}%。`,
+    ja: `平均 ${contributionLabel(context.averageReturnPct ?? 0)}%、最大DD ${contributionLabel(context.maxDrawdownPct ?? 0)}%。`,
+    ko: `평균 ${contributionLabel(context.averageReturnPct ?? 0)}%, 최대 낙폭 ${contributionLabel(context.maxDrawdownPct ?? 0)}%.`
+  });
+}
+
+function actionRiskLevel(action: string | undefined) {
+  const value = String(action || 'hold');
+  if (value === 'exit') return 4;
+  if (value === 'reduce') return 3;
+  if (value === 'hold') return 2;
+  if (value === 'accumulate') return 1;
+  return 2;
+}
+
+function previousRecommendationForPick(pick: Pick) {
+  const openedAt = pick.recommendationAudit?.openedAt;
+  return recommendationHistory.value.find((item) => item.symbol === pick.symbol && item.openedAt !== openedAt) ?? null;
+}
+
+function recommendationChangeForPick(pick: Pick): { tone: 'better' | 'worse' | 'same'; label: string } | null {
+  const previous = previousRecommendationForPick(pick);
+  if (!previous || !pick.finalDecision) return null;
+  const currentAction = pick.finalDecision.action;
+  const currentLevel = actionRiskLevel(currentAction);
+  const previousLevel = actionRiskLevel(previous.action);
+  const currentGates = new Set(pick.recommendationAudit?.gateKeys ?? pick.decisionEngine?.gates?.map((gate) => gate.key) ?? []);
+  const previousGates = new Set(previous.gateKeys ?? []);
+  const newGate = Array.from(currentGates).find((key) => !previousGates.has(key));
+  const actionText = `${decisionActionLabel(previous.action)} -> ${decisionActionLabel(currentAction)}`;
+  const reasonText = newGate ? ` · ${decisionGateLabel(newGate)}` : '';
+  if (currentLevel > previousLevel) {
+    return {
+      tone: 'worse',
+      label: localeText({
+        en: `More defensive than last time · ${actionText}${reasonText}`,
+        'zh-CN': `比上次更保守 · ${actionText}${reasonText}`,
+        'zh-TW': `比上次更保守 · ${actionText}${reasonText}`,
+        ja: `前回より防御的 · ${actionText}${reasonText}`,
+        ko: `지난번보다 방어적 · ${actionText}${reasonText}`
+      })
+    };
+  }
+  if (currentLevel < previousLevel) {
+    return {
+      tone: 'better',
+      label: localeText({
+        en: `Less defensive than last time · ${actionText}${reasonText}`,
+        'zh-CN': `比上次更积极 · ${actionText}${reasonText}`,
+        'zh-TW': `比上次更積極 · ${actionText}${reasonText}`,
+        ja: `前回より積極的 · ${actionText}${reasonText}`,
+        ko: `지난번보다 적극적 · ${actionText}${reasonText}`
+      })
+    };
+  }
+  return {
+    tone: 'same',
+    label: localeText({
+      en: `Same action as last time · ${actionText}${reasonText}`,
+      'zh-CN': `与上次动作一致 · ${actionText}${reasonText}`,
+      'zh-TW': `與上次動作一致 · ${actionText}${reasonText}`,
+      ja: `前回と同じ判断 · ${actionText}${reasonText}`,
+      ko: `지난번과 같은 판단 · ${actionText}${reasonText}`
+    })
+  };
 }
 
 function quoteConsensusLabel(status: string | undefined) {
@@ -3204,25 +3415,238 @@ function deletePortfolioMemory(id: string) {
   scheduleUserStateSync();
 }
 
+function daysBetween(startIso: string, endIso: string) {
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.max(0, (end - start) / 86400000);
+}
+
+function rawReturnPct(entryPrice: number, latestPrice: number) {
+  return entryPrice > 0 && latestPrice > 0 ? (latestPrice - entryPrice) / entryPrice * 100 : null;
+}
+
+function recommendationDirectionalReturn(item: RecommendationHistoryItem) {
+  const raw = Number(item.latestReturnPct ?? 0);
+  if (item.action === 'reduce' || item.action === 'exit') return -raw;
+  if (item.action === 'hold') return raw >= -1 ? Math.max(0, 1 + raw) : raw;
+  return raw;
+}
+
+function isRecommendationHit(item: RecommendationHistoryItem) {
+  return recommendationDirectionalReturn(item) > 0;
+}
+
+function recommendationAdverseDrawdown(item: RecommendationHistoryItem) {
+  const latest = Number(item.latestReturnPct ?? 0);
+  const maxReturn = Number(item.maxReturnPct ?? latest);
+  const maxDrawdown = Number(item.maxDrawdownPct ?? latest);
+  if (item.action === 'reduce' || item.action === 'exit') {
+    return -Math.max(0, maxReturn);
+  }
+  return Math.min(0, maxDrawdown, latest);
+}
+
+function recommendationBucketKey(input: Pick | { market?: Market | string; instrumentType?: string }) {
+  return `market:${input.market || 'US'}|instrument:${input.instrumentType || 'stock'}`;
+}
+
+function recommendationBucketKeys(item: RecommendationHistoryItem) {
+  const market = item.market || 'US';
+  const instrument = item.instrumentType || 'stock';
+  const keys = new Set<string>([
+    item.performanceBucketKey || `market:${market}|instrument:${instrument}`,
+    `market:${market}`,
+    `instrument:${instrument}`
+  ]);
+  if (item.quoteStatus) keys.add(`market:${market}|instrument:${instrument}|quote:${item.quoteStatus}`);
+  if (item.marketRuleStatus) keys.add(`market:${market}|instrument:${instrument}|session:${item.marketRuleStatus}`);
+  if (item.strategyId) keys.add(`strategy:${item.strategyId}|market:${market}|instrument:${instrument}`);
+  return Array.from(keys);
+}
+
+function recommendationPerformanceFromGroup(items: RecommendationHistoryItem[]): RecommendationPerformance | null {
+  const reviewed = items.filter((item) => item.latestReturnPct !== null && item.latestReturnPct !== undefined);
+  if (!reviewed.length) return null;
+  const returns = reviewed.map(recommendationDirectionalReturn).filter((value) => Number.isFinite(value));
+  if (!returns.length) return null;
+  const sampleSize = returns.length;
+  const wins = reviewed.filter(isRecommendationHit).length;
+  const hitRate = wins / sampleSize * 100;
+  const averageReturnPct = returns.reduce((sum, value) => sum + value, 0) / sampleSize;
+  const worstReturnPct = Math.min(...returns);
+  const maxDrawdownPct = Math.min(...reviewed.map(recommendationAdverseDrawdown));
+  const sampleStatus: RecommendationPerformance['sampleStatus'] = sampleSize < PAPER_TRADE_MIN_SAMPLE
+    ? 'insufficient'
+    : hitRate < PERFORMANCE_LOW_HIT_RATE || averageReturnPct < PERFORMANCE_BAD_AVERAGE_RETURN || maxDrawdownPct < PERFORMANCE_BAD_DRAWDOWN
+      ? 'weak'
+      : 'usable';
+  const confidenceMultiplier = sampleStatus === 'weak'
+    ? Math.max(0.45, Math.min(0.74, 0.54 + hitRate / 220))
+    : sampleStatus === 'insufficient'
+      ? 0.92
+      : Math.max(0.94, Math.min(1.05, 0.9 + hitRate / 500 + Math.max(-0.03, averageReturnPct / 200)));
+  const riskPenalty = sampleStatus === 'weak'
+    ? Math.min(30, Math.max(6, (PERFORMANCE_LOW_HIT_RATE - hitRate) * 0.28 + Math.abs(Math.min(0, averageReturnPct)) * 2.2 + Math.abs(Math.min(0, maxDrawdownPct + PERFORMANCE_BAD_DRAWDOWN)) * 1.1))
+    : sampleStatus === 'insufficient'
+      ? 2
+      : 0;
+  return {
+    sampleSize,
+    hitRate: Number(hitRate.toFixed(2)),
+    averageReturnPct: Number(averageReturnPct.toFixed(3)),
+    worstReturnPct: Number(worstReturnPct.toFixed(3)),
+    maxDrawdownPct: Number(maxDrawdownPct.toFixed(3)),
+    confidenceMultiplier: Number(confidenceMultiplier.toFixed(3)),
+    riskPenalty: Number(riskPenalty.toFixed(2)),
+    sampleStatus
+  };
+}
+
+function buildStrategyCalibrationState(history: RecommendationHistoryItem[]): StrategyCalibrationState {
+  const reviewed = history.filter((item) => item.latestReturnPct !== null && item.latestReturnPct !== undefined);
+  const bucketMap = new Map<string, RecommendationHistoryItem[]>();
+  reviewed.forEach((item) => {
+    recommendationBucketKeys(item).forEach((key) => {
+      const existing = bucketMap.get(key) ?? [];
+      existing.push(item);
+      bucketMap.set(key, existing);
+    });
+  });
+  const buckets: Record<string, RecommendationPerformance> = {};
+  bucketMap.forEach((items, key) => {
+    const performance = recommendationPerformanceFromGroup(items);
+    if (performance) buckets[key] = performance;
+  });
+  return {
+    version: 'strategy-calibration-v1',
+    riskMode: riskMode.value,
+    updatedAt: new Date().toISOString(),
+    global: recommendationPerformanceFromGroup(reviewed),
+    buckets
+  };
+}
+
+function performanceForPick(pick: Pick): (RecommendationPerformance & { bucketKey?: string }) | Pick['performanceContext'] | null {
+  if (pick.performanceContext) return pick.performanceContext;
+  const bucketKey = recommendationBucketKey(pick);
+  const performance = recommendationPerformanceState.value.buckets[bucketKey];
+  return performance ? { ...performance, bucketKey } : null;
+}
+
+function performanceToneFromStatus(status: string | undefined): PerformanceTone {
+  if (status === 'weak') return 'weak';
+  if (status === 'usable') return 'usable';
+  return 'insufficient';
+}
+
+function performanceToneForPick(pick: Pick): PerformanceTone {
+  return performanceToneFromStatus(performanceForPick(pick)?.sampleStatus);
+}
+
+function checkpointFromAudit(pick: Pick, horizonDays: number) {
+  const checkpoints = pick.recommendationAudit?.checkpoints ?? [];
+  const horizonLabel = `${horizonDays}D`;
+  return checkpoints.find((item) => String((item as RecommendationCheckpoint & { horizon?: string }).horizon).toUpperCase() === horizonLabel);
+}
+
+function recommendationCheckpointsForPick(pick: Pick): RecommendationCheckpoint[] {
+  return PAPER_TRADE_HORIZONS.map((horizon) => {
+    const audit = checkpointFromAudit(pick, horizon.days);
+    return {
+      horizonDays: horizon.days,
+      label: horizon.label,
+      completed: false,
+      returnPct: null,
+      observedAt: null,
+      targetReturnPct: audit?.targetReturnPct ?? (horizon.days === 1 ? 1.2 : horizon.days === 3 ? 2.4 : horizon.days === 5 ? 3.2 : 6),
+      maxDrawdownPct: audit?.maxDrawdownPct ?? (horizon.days === 1 ? -2.5 : horizon.days === 3 ? -3.8 : horizon.days === 5 ? -4.8 : -7),
+    };
+  });
+}
+
+function updateRecommendationWithPick(item: RecommendationHistoryItem, pick: Pick, observedAtIso: string): RecommendationHistoryItem {
+  const latestPrice = Number(pick.price ?? 0);
+  const nextReturn = rawReturnPct(Number(item.entryPrice), latestPrice);
+  if (nextReturn === null) return item;
+  const elapsedDays = daysBetween(item.openedAt, observedAtIso);
+  const checkpoints = (item.checkpoints?.length ? item.checkpoints : defaultRecommendationCheckpoints()).map((checkpoint) => {
+    const horizonDays = Number(checkpoint.horizonDays ?? 9999);
+    if (checkpoint.completed || elapsedDays < horizonDays) return checkpoint;
+    return {
+      ...checkpoint,
+      completed: true,
+      returnPct: Number(nextReturn.toFixed(3)),
+      observedAt: observedAtIso,
+    };
+  });
+  const stopLossLine = Math.min(...checkpoints.map((checkpoint) => Number(checkpoint.maxDrawdownPct ?? -7)), -5);
+  return {
+    ...item,
+    latestObservedAt: observedAtIso,
+    latestPrice,
+    latestReturnPct: Number(nextReturn.toFixed(3)),
+    maxReturnPct: Math.max(Number(item.maxReturnPct ?? nextReturn), nextReturn),
+    maxDrawdownPct: Math.min(Number(item.maxDrawdownPct ?? nextReturn), nextReturn),
+    wasProfitable: Boolean(item.wasProfitable || nextReturn > 0),
+    stopLossTriggered: Boolean(item.stopLossTriggered || (item.action === 'accumulate' && nextReturn <= stopLossLine)),
+    checkpoints,
+  };
+}
+
+function paperTradeFromPick(pick: Pick, generatedAtIso: string): RecommendationHistoryItem | null {
+  const finalDecision = pick.finalDecision;
+  if (!finalDecision || !['accumulate', 'hold', 'reduce', 'exit'].includes(String(finalDecision.action))) return null;
+  const openedAt = pick.recommendationAudit?.openedAt || generatedAtIso;
+  const entryPrice = Number(pick.recommendationAudit?.entryPrice ?? pick.price ?? 0);
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
+  const gateKeys = pick.recommendationAudit?.gateKeys ?? pick.decisionEngine?.gates?.map((gate) => gate.key) ?? [];
+  return {
+    id: `${pick.symbol}-${openedAt}-${finalDecision.action}`,
+    symbol: pick.symbol,
+    name: pick.name,
+    market: pick.market,
+    instrumentType: pick.instrumentType,
+    openedAt,
+    scanGeneratedAt: generatedAtIso,
+    latestObservedAt: generatedAtIso,
+    entryPrice,
+    latestPrice: pick.price,
+    latestReturnPct: 0,
+    maxReturnPct: 0,
+    maxDrawdownPct: 0,
+    wasProfitable: false,
+    stopLossTriggered: false,
+    action: finalDecision.action,
+    verdict: finalDecision.verdict,
+    confidence: Number(finalDecision.confidence ?? pick.confidence ?? 0),
+    calibratedConfidence: finalDecision.calibratedConfidence ?? null,
+    source: pick.discoverySource,
+    sourceRole: pick.discoveryRole,
+    strategyId: selectedStrategyId.value,
+    strategyName: selectedStrategy.value ? strategyName(selectedStrategy.value) : selectedStrategyId.value,
+    dataQualityScore: pick.decisionEngine?.dataQuality?.score ?? null,
+    quoteStatus: pick.quoteConsensus?.status ?? null,
+    marketRuleStatus: pick.marketRuleState?.status ?? pick.decisionEngine?.marketRuleState?.status ?? null,
+    gateKeys,
+    performanceBucketKey: recommendationBucketKey(pick),
+    finalDecision: cloneJson(finalDecision),
+    checkpoints: recommendationCheckpointsForPick(pick),
+  };
+}
+
 function recordRecommendationHistory(sourcePicks: Pick[], generatedAtIso: string) {
+  const currentBySymbol = new Map(sourcePicks.map((pick) => [pick.symbol, pick]));
+  const updatedHistory = recommendationHistory.value.map((item) => {
+    const pick = currentBySymbol.get(item.symbol);
+    return pick ? updateRecommendationWithPick(item, pick, generatedAtIso) : item;
+  });
   const entries = sourcePicks
-    .filter((pick) => pick.finalDecision?.action === 'accumulate' && pick.recommendationAudit?.entryPrice)
-    .map((pick) => ({
-      id: `${pick.symbol}-${pick.recommendationAudit?.openedAt || generatedAtIso}`,
-      symbol: pick.symbol,
-      name: pick.name,
-      market: pick.market,
-      openedAt: pick.recommendationAudit?.openedAt || generatedAtIso,
-      scanGeneratedAt: generatedAtIso,
-      entryPrice: Number(pick.recommendationAudit?.entryPrice ?? pick.price),
-      action: pick.finalDecision?.action || 'accumulate',
-      verdict: pick.finalDecision?.verdict || pick.verdict,
-      confidence: Number(pick.finalDecision?.confidence ?? pick.confidence ?? 0),
-      source: pick.discoverySource
-    }));
-  if (!entries.length) return;
+    .map((pick) => paperTradeFromPick(pick, generatedAtIso))
+    .filter((item): item is RecommendationHistoryItem => Boolean(item));
+  if (!entries.length && updatedHistory === recommendationHistory.value) return;
   const seen = new Set<string>();
-  recommendationHistory.value = [...entries, ...recommendationHistory.value]
+  recommendationHistory.value = [...entries, ...updatedHistory]
     .filter((item) => {
       if (seen.has(item.id)) return false;
       seen.add(item.id);
@@ -3677,7 +4101,10 @@ function professionalFactorRows(pick: Pick) {
 
 function professionalCheckpointLabel(pick: Pick) {
   const checkpoints = pick.professionalAnalytics?.recommendationTracker.checkpoints ?? [];
-  return checkpoints.map((item) => `${item.horizon} ${item.targetReturnPct > 0 ? '+' : ''}${item.targetReturnPct}%`).join(' · ');
+  return checkpoints.map((item) => {
+    const target = Number(item.targetReturnPct ?? 0);
+    return `${item.horizon ?? item.label ?? '--'} ${target > 0 ? '+' : ''}${target}%`;
+  }).join(' · ');
 }
 
 function decisionActionLabel(action: string | undefined) {
@@ -6294,7 +6721,9 @@ async function runAnalysis() {
       strategyId: useCustom.value ? undefined : selectedStrategyId.value,
       customWeights: useCustom.value ? { ...customWeights } : undefined,
       refresh: true,
-      portfolio: portfolioForRequest
+      portfolio: portfolioForRequest,
+      performanceCalibration: recommendationPerformanceState.value,
+      riskMode: riskMode.value
     }, handleAnalysisEvent, { signal: controller.signal });
   } catch (cause) {
     error.value = isAnalysisAbort(cause) ? t.value.scanCancelled : (cause instanceof Error ? cause.message : 'Unknown error');
@@ -6317,6 +6746,7 @@ watch(
     symbolText: symbolText.value,
     manualHoldingText: manualHoldingText.value,
     displayMode: displayMode.value,
+    riskMode: riskMode.value,
     activeInvestmentTask: activeTaskMode.value,
     activeView: activeView.value,
     resultSortKey: resultSortKey.value,
@@ -6821,7 +7251,7 @@ onUnmounted(() => {
         <div v-if="recommendationReview.count" class="recommendation-review">
           <div>
             <span>{{ recommendationReviewTitle() }}</span>
-            <strong>{{ recommendationReview.hitRate.toFixed(0) }}%</strong>
+            <strong>{{ recommendationReview.sampleStatus === 'insufficient' ? recommendationSampleStatusLabel(recommendationReview.sampleStatus) : `${recommendationReview.hitRate.toFixed(0)}%` }}</strong>
             <small>{{ recommendationReviewHint() }}</small>
           </div>
           <div class="recommendation-review-grid">
@@ -6841,6 +7271,28 @@ onUnmounted(() => {
               <b>{{ contributionLabel(recommendationReview.worstReturn) }}%</b>
               {{ recommendationReviewMetricLabel('worst') }}
             </span>
+            <span>
+              <b>{{ contributionLabel(recommendationReview.maxDrawdown) }}%</b>
+              {{ recommendationReviewMetricLabel('drawdown') }}
+            </span>
+            <span>
+              <b>{{ recommendationReview.best ? contributionLabel(recommendationDirectionalReturn(recommendationReview.best)) + '%' : '--' }}</b>
+              {{ recommendationReviewMetricLabel('best') }}
+            </span>
+          </div>
+          <div class="recommendation-review-details">
+            <div>
+              <span>{{ recommendationExtremeLabel('best') }}</span>
+              <b>{{ recommendationItemSummary(recommendationReview.best) }}</b>
+            </div>
+            <div>
+              <span>{{ recommendationExtremeLabel('worst') }}</span>
+              <b>{{ recommendationItemSummary(recommendationReview.worst) }}</b>
+            </div>
+            <div v-if="blockedReasonRanking.length">
+              <span>{{ blockedReasonRankingTitle() }}</span>
+              <b>{{ blockedReasonRanking.map((item) => `${item.label} ${item.count}`).join(' · ') }}</b>
+            </div>
           </div>
         </div>
 
@@ -7141,6 +7593,7 @@ onUnmounted(() => {
               <span>{{ decisionExecutionLabel(pick) }}</span>
               <span class="market-rule-chip" :class="marketRuleStateTone(pick)">{{ marketRuleStateLabel(pick) }}</span>
               <span v-if="pick.decisionEngine" class="engine-chip" :class="pick.decisionEngine.dataQuality.level">{{ dataQualityLabel(pick.decisionEngine.dataQuality.level) }} {{ formatEngineScore(pick.decisionEngine.dataQuality.score) }}</span>
+              <span class="performance-chip" :class="performanceToneForPick(pick)">{{ performanceContextLabel(pick) }}</span>
               <span>{{ pick.currency }} {{ pick.price }} · {{ pick.change > 0 ? '+' : '' }}{{ pick.change }}%</span>
               <template v-if="isProfessionalMode">
                 <span>{{ t.confidence }} {{ pick.confidence }}%</span>
@@ -7170,6 +7623,14 @@ onUnmounted(() => {
                   </span>
                 </template>
               </div>
+            </div>
+
+            <div class="performance-context-strip" :class="performanceToneForPick(pick)">
+              <div>
+                <span>{{ performanceContextTitle() }}</span>
+                <strong>{{ performanceContextLabel(pick) }}</strong>
+              </div>
+              <small>{{ performanceContextHint(pick) }}</small>
             </div>
 
             <div class="decision-topline" :class="pick.finalDecision?.action || pick.decisionEngine?.action || finalVerdictBucket(pick)">
@@ -7232,6 +7693,9 @@ onUnmounted(() => {
                   <span>{{ t.actionPlan }}</span>
                   <b>{{ pick.currency }} {{ pick.holdingAnalysis.takeProfitPrice }}</b>
                 </div>
+              </div>
+              <div v-if="recommendationChangeForPick(pick)" class="holding-change-note" :class="recommendationChangeForPick(pick)?.tone">
+                {{ recommendationChangeForPick(pick)?.label }}
               </div>
               <ul class="holding-notes">
                 <li v-for="note in pick.holdingAnalysis.notes" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
