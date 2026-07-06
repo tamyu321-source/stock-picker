@@ -6701,7 +6701,9 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
 
 async function runAnalysis() {
   if (loading.value) return;
-  const portfolioForRequest = importedPortfolio.value ?? analysisPortfolio.value ?? undefined;
+  const portfolioForRequest = activeTaskMode.value === 'portfolio'
+    ? importedPortfolio.value ?? analysisPortfolio.value ?? undefined
+    : undefined;
   const controller = new AbortController();
   analysisAbortController = controller;
   scanRunId.value += 1;
