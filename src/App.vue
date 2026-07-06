@@ -11,6 +11,7 @@ type ResultMarketFilter = 'all' | Market;
 type ResultVerdictFilter = 'all' | Pick['verdict'] | 't';
 type InvestmentTask = 'discover' | 'portfolio' | 'etf' | 'shortTerm';
 type WorkbenchBucket = 'all' | 'buy' | 'hold' | 'risk' | 'etf' | 'holdings';
+type PortfolioDashboardMetricKey = 'marketValue' | 'pnl' | 'sellable' | 'locked' | 'risk' | 'observe';
 type ResultSortKey =
   | 'recommended'
   | 'overall'
@@ -60,6 +61,30 @@ type RecommendationHistoryItem = {
   verdict: Pick['verdict'];
   confidence: number;
   source?: string;
+};
+type HoldingRowView = {
+  symbol: string;
+  name: string;
+  market?: Market | string;
+  currency?: string;
+  quantity: number | null;
+  availableQuantity: number | null;
+  blockedQuantity: number | null;
+  costPrice: number | null;
+  lastPrice: number | null;
+  unrealizedPnl: number | null;
+  unrealizedPnlPct: number | null;
+  action: HoldingAction | string;
+  executionStatus?: string;
+  plannedQuantityChange: number | null;
+  executableQuantityChange: number | null;
+  stopLossPrice: number | null;
+  takeProfitPrice: number | null;
+  orderSizing?: HoldingActionItem['orderSizing'];
+  livePriceDriftPct?: number | null;
+  quoteStatus?: string | null;
+  notes: HoldingNote[];
+  pick?: Pick;
 };
 
 const locale = ref<Locale>('en');
@@ -583,6 +608,7 @@ type PersistedSettings = {
   symbolText?: string;
   manualHoldingText?: string;
   displayMode?: DisplayMode;
+  defaultTaskMode?: InvestmentTask;
   defaultResultView?: 'stocks' | 'sectors';
   resultSortKey?: ResultSortKey;
   resultSortDirection?: SortDirection;
@@ -792,17 +818,18 @@ const decisionBucketItems = computed(() => workbenchBuckets.map((bucket) => ({
   count: picks.value.filter((pick) => pickMatchesWorkbenchBucket(pick, bucket)).length,
   tone: bucket === 'buy' ? 'buy' : bucket === 'risk' ? 'sell' : bucket === 'etf' ? 'etf' : bucket === 'holdings' ? 'holding' : 'watch'
 })));
+const activeTaskMode = computed(() => activeInvestmentTask.value);
 const topHoldingPicks = computed(() => picks.value.filter((pick) => pick.holding && pick.holdingAnalysis).slice(0, 4));
 const topEtfPicks = computed(() => picks.value.filter((pick) => pick.instrumentType === 'etf').slice(0, 4));
+const holdingPicks = computed(() => picks.value.filter((pick) => pick.holding && pick.holdingAnalysis));
 const holdingCommandSummary = computed(() => {
-  const holdingPicks = picks.value.filter((pick) => pick.holding && pick.holdingAnalysis);
-  const plannedSell = holdingPicks.reduce((sum, pick) => sum + Math.min(0, Number(pick.holdingAnalysis?.plannedQuantityChange ?? 0)), 0);
-  const executableSell = holdingPicks.reduce((sum, pick) => sum + Math.min(0, Number(pick.holdingAnalysis?.suggestedQuantityChange ?? 0)), 0);
+  const plannedSell = holdingPicks.value.reduce((sum, pick) => sum + Math.min(0, Number(pick.holdingAnalysis?.plannedQuantityChange ?? 0)), 0);
+  const executableSell = holdingPicks.value.reduce((sum, pick) => sum + Math.min(0, Number(pick.holdingAnalysis?.suggestedQuantityChange ?? 0)), 0);
   return {
-    count: holdingPicks.length,
-    reduceCount: holdingPicks.filter((pick) => pick.holdingAnalysis?.action === 'reduce').length,
-    exitCount: holdingPicks.filter((pick) => pick.holdingAnalysis?.action === 'exit').length,
-    blockedCount: holdingPicks.filter((pick) => pick.holdingAnalysis?.executionStatus === 'blocked_today').length,
+    count: holdingPicks.value.length,
+    reduceCount: holdingPicks.value.filter((pick) => pick.holdingAnalysis?.action === 'reduce').length,
+    exitCount: holdingPicks.value.filter((pick) => pick.holdingAnalysis?.action === 'exit').length,
+    blockedCount: holdingPicks.value.filter((pick) => pick.holdingAnalysis?.executionStatus === 'blocked_today').length,
     plannedSell,
     executableSell
   };
@@ -870,6 +897,113 @@ const isUserSession = computed(() => authSession.value?.role === 'user');
 const isAdminSession = computed(() => authSession.value?.role === 'admin');
 const authUserLabel = computed(() => authSession.value?.user.label || authSession.value?.user.id || '');
 const portfolioSymbols = computed(() => importedPortfolio.value?.symbols ?? []);
+const primaryActionDisabled = computed(() => activeTaskMode.value === 'portfolio' && !activePortfolio.value);
+const primaryActionLabel = computed(() => {
+  if (loading.value) return t.value.loading;
+  const labels: Record<InvestmentTask, LocalizedText> = {
+    discover: { en: 'Scan full market', 'zh-CN': '开始全市场扫描', 'zh-TW': '開始全市場掃描', ja: '市場全体をスキャン', ko: '전체 시장 스캔' },
+    portfolio: { en: 'Check current holdings', 'zh-CN': '检查目前持仓', 'zh-TW': '檢查目前持倉', ja: '現在の保有を点検', ko: '현재 보유 점검' },
+    etf: { en: 'Screen ETFs', 'zh-CN': '筛选 ETF', 'zh-TW': '篩選 ETF', ja: 'ETFを選別', ko: 'ETF 선별' },
+    shortTerm: { en: 'Build short-term watchlist', 'zh-CN': '生成短线观察', 'zh-TW': '生成短線觀察', ja: '短期ウォッチを作成', ko: '단기 관찰 생성' }
+  };
+  return localeText(labels[activeTaskMode.value]);
+});
+const portfolioDashboardStats = computed(() => {
+  const portfolio = activePortfolio.value;
+  const positions = portfolio?.positions ?? [];
+  const items = holdingActionItems.value;
+  const sellableQuantity = items.length
+    ? items.reduce((sum, item) => sum + (item.availableQuantity !== undefined && item.availableQuantity !== null ? nonNegativeQuantity(item.availableQuantity) : quantityMagnitude(item.executableQuantityChange)), 0)
+    : positions.reduce((sum, position) => sum + nonNegativeQuantity(position.availableQuantity ?? position.quantity), 0);
+  const lockedQuantity = items.length
+    ? items.reduce((sum, item) => sum + nonNegativeQuantity(item.blockedQuantity ?? (item.executionStatus === 'blocked_today' ? item.quantity ?? item.plannedQuantityChange : 0)), 0)
+    : positions.reduce((sum, position) => sum + Math.max(0, Number(position.quantity ?? 0) - Number(position.availableQuantity ?? position.quantity ?? 0)), 0);
+  const riskActionCount = items.filter((item) => item.action === 'reduce' || item.action === 'exit' || item.bucket === 'risk_action').length || holdingCommandSummary.value.reduceCount + holdingCommandSummary.value.exitCount;
+  const observeCount = items.filter((item) => item.action === 'hold' || item.bucket === 'observe').length;
+  return {
+    positions: holdingPicks.value.length || portfolio?.recognizedCount || positions.length || 0,
+    marketValue: portfolio?.totalMarketValue ?? 0,
+    pnl: portfolio?.totalUnrealizedPnl ?? 0,
+    pnlPct: portfolio?.totalUnrealizedPnlPct ?? null,
+    sellableQuantity,
+    lockedQuantity,
+    riskActionCount,
+    observeCount
+  };
+});
+const portfolioDashboardMetrics = computed(() => {
+  const stats = portfolioDashboardStats.value;
+  return [
+    { key: 'marketValue' as const, tone: 'neutral', value: moneyLabel(stats.marketValue), detail: `${stats.positions} ${portfolioPositionUnitLabel()}` },
+    { key: 'pnl' as const, tone: Number(stats.pnl) < 0 ? 'danger' : 'positive', value: signedMoneyLabel(stats.pnl), detail: percentLabel(stats.pnlPct) },
+    { key: 'sellable' as const, tone: 'positive', value: quantityAbsLabel(stats.sellableQuantity), detail: holdingCommandMetricLabel('executable') },
+    { key: 'locked' as const, tone: stats.lockedQuantity > 0 ? 'danger' : 'neutral', value: quantityAbsLabel(stats.lockedQuantity), detail: 'T+1' },
+    { key: 'risk' as const, tone: stats.riskActionCount > 0 ? 'danger' : 'neutral', value: String(stats.riskActionCount), detail: holdingCommandMetricLabel('risk') },
+    { key: 'observe' as const, tone: 'neutral', value: String(stats.observeCount), detail: portfolioObserveDetailLabel() }
+  ];
+});
+const holdingRows = computed<HoldingRowView[]>(() => {
+  const actionBySymbol = new Map(holdingActionItems.value.map((item) => [item.symbol, item]));
+  const rows: HoldingRowView[] = [];
+  const seen = new Set<string>();
+  holdingPicks.value.forEach((pick) => {
+    if (!pick.holding || !pick.holdingAnalysis) return;
+    const item = actionBySymbol.get(pick.symbol);
+    rows.push({
+      symbol: pick.symbol,
+      name: pick.holding.name || pick.name,
+      market: pick.market,
+      currency: pick.currency,
+      quantity: pick.holding.quantity ?? null,
+      availableQuantity: item?.availableQuantity ?? pick.holdingAnalysis.availableQuantity ?? pick.holding.availableQuantity ?? null,
+      blockedQuantity: item?.blockedQuantity ?? pick.holdingAnalysis.blockedQuantity ?? null,
+      costPrice: pick.holding.costPrice ?? null,
+      lastPrice: pick.holding.brokerLastPrice ?? pick.holding.lastPrice ?? pick.price ?? null,
+      unrealizedPnl: pick.holding.unrealizedPnl ?? null,
+      unrealizedPnlPct: pick.holding.unrealizedPnlPct ?? null,
+      action: item?.action ?? pick.holdingAnalysis.action,
+      executionStatus: item?.executionStatus ?? pick.holdingAnalysis.executionStatus,
+      plannedQuantityChange: item?.plannedQuantityChange ?? pick.holdingAnalysis.plannedQuantityChange ?? null,
+      executableQuantityChange: item?.executableQuantityChange ?? pick.holdingAnalysis.suggestedQuantityChange ?? null,
+      stopLossPrice: item?.stopLossPrice ?? pick.holdingAnalysis.stopLossPrice ?? null,
+      takeProfitPrice: item?.takeProfitPrice ?? pick.holdingAnalysis.takeProfitPrice ?? null,
+      orderSizing: item?.orderSizing ?? pick.holdingAnalysis.orderSizing,
+      livePriceDriftPct: pick.holding.livePriceDriftPct ?? null,
+      quoteStatus: pick.quoteConsensus?.status ?? null,
+      notes: pick.holdingAnalysis.notes ?? [],
+      pick
+    });
+    seen.add(pick.symbol);
+  });
+  (activePortfolio.value?.positions ?? []).forEach((position) => {
+    if (seen.has(position.symbol)) return;
+    const item = actionBySymbol.get(position.symbol);
+    rows.push({
+      symbol: position.symbol,
+      name: position.name || position.symbol,
+      market: position.market,
+      currency: marketCurrency(position.market),
+      quantity: position.quantity ?? null,
+      availableQuantity: item?.availableQuantity ?? position.availableQuantity ?? null,
+      blockedQuantity: item?.blockedQuantity ?? Math.max(0, Number(position.quantity ?? 0) - Number(position.availableQuantity ?? position.quantity ?? 0)),
+      costPrice: position.costPrice ?? null,
+      lastPrice: position.brokerLastPrice ?? position.lastPrice ?? null,
+      unrealizedPnl: position.unrealizedPnl ?? null,
+      unrealizedPnlPct: position.unrealizedPnlPct ?? null,
+      action: item?.action ?? 'hold',
+      executionStatus: item?.executionStatus ?? 'executable',
+      plannedQuantityChange: item?.plannedQuantityChange ?? 0,
+      executableQuantityChange: item?.executableQuantityChange ?? 0,
+      stopLossPrice: item?.stopLossPrice ?? null,
+      takeProfitPrice: item?.takeProfitPrice ?? null,
+      orderSizing: item?.orderSizing,
+      livePriceDriftPct: position.livePriceDriftPct ?? null,
+      quoteStatus: null,
+      notes: []
+    });
+  });
+  return rows.sort((left, right) => holdingRowSeverity(right) - holdingRowSeverity(left));
+});
 const yogurtSecretLocalized = computed(() => locale.value === 'zh-TW' || locale.value === 'nan-TW');
 const yogurtSecretTriggerLabel = computed(() => (locale.value === 'nan-TW' ? '活菌雷達' : '菌群雷達'));
 const yogurtSecretClueLabel = computed(() => {
@@ -891,7 +1025,7 @@ const symbols = computed(() => symbolText.value.split(/[\s,;]+/).map((symbol) =>
 const isAutoScan = computed(() => symbols.value.length === 0);
 const scanLabel = computed(() => {
   if (!scanInfo.value) {
-    if (activePortfolio.value?.recognizedCount) return portfolioScanLabel(activePortfolio.value.recognizedCount);
+    if (activeTaskMode.value === 'portfolio' && activePortfolio.value?.recognizedCount) return portfolioScanLabel(activePortfolio.value.recognizedCount);
     if (isAutoScan.value) return t.value.autoScan;
     if (locale.value === 'en') return `${symbols.value.length} narrowed`;
     if (locale.value === 'zh-CN') return `限定 ${symbols.value.length} 只`;
@@ -977,6 +1111,10 @@ function isDisplayMode(value: unknown): value is DisplayMode {
   return value === 'simple' || value === 'professional';
 }
 
+function isInvestmentTask(value: unknown): value is InvestmentTask {
+  return investmentTasks.includes(value as InvestmentTask);
+}
+
 function normalizeWeight(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.min(40, Math.max(0, value)) : null;
 }
@@ -1003,6 +1141,7 @@ function currentPersistedSettings(): PersistedSettings {
     symbolText: symbolText.value,
     manualHoldingText: manualHoldingText.value,
     displayMode: displayMode.value,
+    defaultTaskMode: activeTaskMode.value,
     defaultResultView: activeView.value,
     resultSortKey: resultSortKey.value,
     resultSortDirection: resultSortDirection.value
@@ -1040,6 +1179,9 @@ function applyPersistedSettings(settings: PersistedSettings | Record<string, unk
   }
   if (isDisplayMode(persisted.displayMode)) {
     displayMode.value = persisted.displayMode;
+  }
+  if (isInvestmentTask(persisted.defaultTaskMode)) {
+    activeInvestmentTask.value = persisted.defaultTaskMode;
   }
   if (persisted.defaultResultView === 'stocks' || persisted.defaultResultView === 'sectors') {
     activeView.value = persisted.defaultResultView;
@@ -1643,8 +1785,17 @@ function marketLabel(market: Market) {
 
 function selectInvestmentTask(task: InvestmentTask) {
   activeInvestmentTask.value = task;
-  if (task === 'portfolio') activeWorkbenchBucket.value = 'holdings';
-  if (task === 'etf') activeWorkbenchBucket.value = 'etf';
+  activeView.value = 'stocks';
+  if (task !== 'shortTerm' && resultVerdictFilter.value === 't') resultVerdictFilter.value = 'all';
+  if (task === 'portfolio') {
+    activeWorkbenchBucket.value = 'holdings';
+    resultMarketFilter.value = 'all';
+    resultSortKey.value = 'decision';
+  }
+  if (task === 'etf') {
+    activeWorkbenchBucket.value = 'etf';
+    resultSortKey.value = 'decision';
+  }
   if (task === 'shortTerm') {
     activeWorkbenchBucket.value = 'all';
     resultVerdictFilter.value = 't';
@@ -1652,7 +1803,6 @@ function selectInvestmentTask(task: InvestmentTask) {
   }
   if (task === 'discover') {
     activeWorkbenchBucket.value = 'buy';
-    if (resultVerdictFilter.value === 't') resultVerdictFilter.value = 'all';
     resultSortKey.value = 'decision';
   }
 }
@@ -1669,20 +1819,20 @@ function controlPanelTitle() {
 
 function investmentTaskLabel(task: InvestmentTask) {
   const labels: Record<InvestmentTask, LocalizedText> = {
-    discover: { en: 'Find buys', 'zh-CN': '寻找可买', 'zh-TW': '尋找可買', ja: '買い候補', ko: '매수 후보' },
-    portfolio: { en: 'Review holdings', 'zh-CN': '检查持仓', 'zh-TW': '檢查持倉', ja: '保有点検', ko: '보유 점검' },
+    discover: { en: 'Full-market ideas', 'zh-CN': '全市场找股', 'zh-TW': '全市場找股', ja: '市場全体探索', ko: '전체 시장 탐색' },
+    portfolio: { en: 'Holdings workbench', 'zh-CN': '持仓工作台', 'zh-TW': '持倉工作台', ja: '保有ワークベンチ', ko: '보유 워크벤치' },
     etf: { en: 'ETF screen', 'zh-CN': 'ETF 筛选', 'zh-TW': 'ETF 篩選', ja: 'ETF選別', ko: 'ETF 선별' },
-    shortTerm: { en: 'T / next day', 'zh-CN': '做T/次日', 'zh-TW': '做T/隔日', ja: 'T/翌日', ko: 'T/다음날' }
+    shortTerm: { en: 'Short-term / T+1', 'zh-CN': '短线/T+1', 'zh-TW': '短線/T+1', ja: '短期/T+1', ko: '단기/T+1' }
   };
   return localeText(labels[task]);
 }
 
 function investmentTaskHint(task: InvestmentTask) {
   const labels: Record<InvestmentTask, LocalizedText> = {
-    discover: { en: 'Market-wide candidates', 'zh-CN': '全市场候选池', 'zh-TW': '全市場候選池', ja: '市場全体候補', ko: '시장 전체 후보' },
-    portfolio: { en: 'Cost and sizing', 'zh-CN': '成本与仓位', 'zh-TW': '成本與倉位', ja: 'コストと配分', ko: '원가와 비중' },
-    etf: { en: 'Core or tactical', 'zh-CN': '核心或战术', 'zh-TW': '核心或戰術', ja: 'コア/戦術', ko: '핵심/전술' },
-    shortTerm: { en: 'Liquidity and exit', 'zh-CN': '流动性与卖点', 'zh-TW': '流動性與賣點', ja: '流動性と出口', ko: '유동성과 청산' }
+    discover: { en: 'Find investable candidates', 'zh-CN': '寻找值得研究的优质候选', 'zh-TW': '尋找值得研究的優質候選', ja: '投資候補を探す', ko: '투자 후보 찾기' },
+    portfolio: { en: 'Today actions and risk', 'zh-CN': '今日动作与风险', 'zh-TW': '今日動作與風險', ja: '本日の対応とリスク', ko: '오늘 조치와 리스크' },
+    etf: { en: 'Core or tactical funds', 'zh-CN': '核心或战术 ETF', 'zh-TW': '核心或戰術 ETF', ja: 'コア/戦術ETF', ko: '핵심/전술 ETF' },
+    shortTerm: { en: 'Liquidity and execution', 'zh-CN': '流动性与执行限制', 'zh-TW': '流動性與執行限制', ja: '流動性と執行制限', ko: '유동성과 실행 제한' }
   };
   return localeText(labels[task]);
 }
@@ -1736,11 +1886,16 @@ function marketSourceStackLabel(pick: Pick) {
 }
 
 function taskInputTitle() {
-  if (activeInvestmentTask.value === 'portfolio') return portfolioImportTitle();
-  if (activeInvestmentTask.value === 'etf') {
-    return localeText({ en: 'ETF and holdings', 'zh-CN': 'ETF 与持仓', 'zh-TW': 'ETF 與持倉', ja: 'ETFと保有', ko: 'ETF와 보유' });
+  if (activeInvestmentTask.value === 'portfolio') {
+    return localeText({ en: 'Holdings source', 'zh-CN': '持仓来源', 'zh-TW': '持倉來源', ja: '保有データ元', ko: '보유 출처' });
   }
-  return localeText({ en: 'Universe and holdings', 'zh-CN': '股票池与持仓', 'zh-TW': '股票池與持倉', ja: 'ユニバースと保有', ko: '유니버스와 보유' });
+  if (activeInvestmentTask.value === 'etf') {
+    return localeText({ en: 'ETF universe', 'zh-CN': 'ETF 股票池', 'zh-TW': 'ETF 股票池', ja: 'ETFユニバース', ko: 'ETF 유니버스' });
+  }
+  if (activeInvestmentTask.value === 'shortTerm') {
+    return localeText({ en: 'Short-term universe', 'zh-CN': '短线观察池', 'zh-TW': '短線觀察池', ja: '短期ウォッチ対象', ko: '단기 관찰군' });
+  }
+  return localeText({ en: 'Market universe', 'zh-CN': '全市场股票池', 'zh-TW': '全市場股票池', ja: '市場ユニバース', ko: '시장 유니버스' });
 }
 
 function pickMatchesWorkbenchBucket(pick: Pick, bucket: WorkbenchBucket) {
@@ -1802,12 +1957,84 @@ function workbenchSubtitle() {
 
 function holdingCommandTitle() {
   return localeText({
-    en: 'Holdings command center',
-    'zh-CN': '持仓指挥台',
-    'zh-TW': '持倉指揮台',
-    ja: '保有指令パネル',
-    ko: '보유 지휘대'
+    en: 'Holdings workbench',
+    'zh-CN': '持仓工作台',
+    'zh-TW': '持倉工作台',
+    ja: '保有ワークベンチ',
+    ko: '보유 워크벤치'
   });
+}
+
+function activeResultTitle() {
+  if (activeTaskMode.value === 'portfolio') return holdingCommandTitle();
+  if (activeTaskMode.value === 'etf') return localeText({ en: 'ETF candidates', 'zh-CN': 'ETF 候选', 'zh-TW': 'ETF 候選', ja: 'ETF候補', ko: 'ETF 후보' });
+  if (activeTaskMode.value === 'shortTerm') return localeText({ en: 'Short-term watchlist', 'zh-CN': '短线观察', 'zh-TW': '短線觀察', ja: '短期ウォッチ', ko: '단기 관찰' });
+  return t.value.topIdeas;
+}
+
+function portfolioWorkbenchSubtitle() {
+  if (activePortfolio.value) return holdingCommandSubtitle();
+  return localeText({
+    en: 'Import or restore holdings first, then run a holdings check.',
+    'zh-CN': '先导入或恢复持仓，再检查今天能做什么。',
+    'zh-TW': '先匯入或恢復持倉，再檢查今天能做什麼。',
+    ja: '保有を取り込むか復元してから、本日の対応を点検します。',
+    ko: '보유를 가져오거나 복원한 뒤 오늘 가능한 조치를 점검합니다.'
+  });
+}
+
+function portfolioEmptyTitle() {
+  return localeText({
+    en: 'No holdings loaded',
+    'zh-CN': '还没有持仓数据',
+    'zh-TW': '還沒有持倉資料',
+    ja: '保有データがありません',
+    ko: '보유 데이터가 없습니다'
+  });
+}
+
+function portfolioEmptyHint() {
+  return localeText({
+    en: 'Use the holdings source panel to paste, upload, or restore a recent snapshot.',
+    'zh-CN': '请在左侧持仓来源中粘贴、上传，或恢复最近快照。',
+    'zh-TW': '請在左側持倉來源中貼上、上傳，或恢復最近快照。',
+    ja: '左側の保有データ元で貼り付け、アップロード、または最近のスナップショットを復元してください。',
+    ko: '왼쪽 보유 출처에서 붙여넣기, 업로드 또는 최근 스냅샷 복원을 사용하세요.'
+  });
+}
+
+function portfolioSourceCtaLabel() {
+  return portfolioMemory.value.length
+    ? localeText({ en: 'Restore a snapshot or import new holdings', 'zh-CN': '恢复快照或导入新持仓', 'zh-TW': '恢復快照或匯入新持倉', ja: 'スナップショット復元または新規取込', ko: '스냅샷 복원 또는 새 보유 가져오기' })
+    : localeText({ en: 'Import holdings to start', 'zh-CN': '导入持仓后开始', 'zh-TW': '匯入持倉後開始', ja: '保有を取り込んで開始', ko: '보유를 가져와 시작' });
+}
+
+function portfolioDashboardMetricLabel(key: PortfolioDashboardMetricKey) {
+  const labels: Record<PortfolioDashboardMetricKey, LocalizedText> = {
+    marketValue: { en: 'Market value', 'zh-CN': '总市值', 'zh-TW': '總市值', ja: '評価額', ko: '평가금액' },
+    pnl: { en: 'Total P/L', 'zh-CN': '总盈亏', 'zh-TW': '總損益', ja: '総損益', ko: '총 손익' },
+    sellable: { en: 'Sellable today', 'zh-CN': '今日可卖', 'zh-TW': '今日可賣', ja: '本日売却可', ko: '오늘 매도 가능' },
+    locked: { en: 'T+1 locked', 'zh-CN': 'T+1 锁定', 'zh-TW': 'T+1 鎖定', ja: 'T+1 制限', ko: 'T+1 잠김' },
+    risk: { en: 'Reduce / exit', 'zh-CN': '建议减仓/退出', 'zh-TW': '建議減倉/退出', ja: '縮小/撤退推奨', ko: '축소/청산 제안' },
+    observe: { en: 'Observe', 'zh-CN': '只观察', 'zh-TW': '只觀察', ja: '観察のみ', ko: '관찰만' }
+  };
+  return localeText(labels[key]);
+}
+
+function portfolioPositionUnitLabel() {
+  return localeText({ en: 'positions', 'zh-CN': '只持仓', 'zh-TW': '檔持倉', ja: '保有', ko: '보유' });
+}
+
+function portfolioObserveDetailLabel() {
+  return localeText({ en: 'no action', 'zh-CN': '无需操作', 'zh-TW': '無需操作', ja: '対応不要', ko: '조치 없음' });
+}
+
+function portfolioActionBoardTitle() {
+  return localeText({ en: 'Today operations', 'zh-CN': '今日持仓操作台', 'zh-TW': '今日持倉操作台', ja: '本日の保有操作', ko: '오늘 보유 작업대' });
+}
+
+function portfolioHoldingRowsTitle() {
+  return localeText({ en: 'Holding details', 'zh-CN': '个股持仓明细', 'zh-TW': '個股持倉明細', ja: '保有明細', ko: '보유 상세' });
 }
 
 function displayModeLabel(mode: DisplayMode = displayMode.value) {
@@ -1910,10 +2137,10 @@ function holdingActionListTitle() {
 }
 
 function holdingActionItemLabel(item: HoldingActionItem) {
-  const action = holdingActionLabel(item.action as HoldingAction);
+  const action = holdingActionDisplayLabel(item.action);
   const execution = holdingExecutionStatusLabel(item.executionStatus);
-  const planned = signedQuantityLabel(item.plannedQuantityChange);
-  const executable = signedQuantityLabel(item.executableQuantityChange);
+  const planned = holdingPlannedQuantityDisplay(item.plannedQuantityChange);
+  const executable = holdingExecutableQuantityDisplay(item.executableQuantityChange, item.executionStatus);
   if (locale.value === 'en') return `${action} · planned ${planned} · executable ${executable} · ${execution}`;
   if (locale.value === 'zh-CN') return `${action} · 计划 ${planned} · 可执行 ${executable} · ${execution}`;
   if (locale.value === 'ja') return `${action} · 計画 ${planned} · 実行可 ${executable} · ${execution}`;
@@ -2617,6 +2844,23 @@ function portfolioCurrency() {
   return 'CNY';
 }
 
+function marketCurrency(market: Market | string | undefined) {
+  const currencies: Record<string, string> = {
+    CN: 'CNY',
+    TW: 'TWD',
+    HK: 'HKD',
+    US: 'USD',
+    JP: 'JPY',
+    KR: 'KRW',
+    SG: 'SGD'
+  };
+  return currencies[String(market || '')] ?? portfolioCurrency();
+}
+
+function currentPriceLabel() {
+  return localeText({ en: 'Current price', 'zh-CN': '当前价格', 'zh-TW': '目前價格', ja: '現在値', ko: '현재가' });
+}
+
 function moneyLabel(value: number | null | undefined, currency = portfolioCurrency()) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   return `${currency} ${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
@@ -2627,6 +2871,22 @@ function percentLabel(value: number | null | undefined) {
   return `${Number(value) > 0 ? '+' : ''}${Number(value).toFixed(1)}%`;
 }
 
+function nonNegativeQuantity(value: number | null | undefined) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, number);
+}
+
+function quantityMagnitude(value: number | null | undefined) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number)) return 0;
+  return Math.abs(number);
+}
+
+function quantityAbsLabel(value: number | null | undefined) {
+  return quantityMagnitude(value).toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
+
 function signedMoneyLabel(value: number | null | undefined, currency = portfolioCurrency()) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
   return `${Number(value) > 0 ? '+' : ''}${moneyLabel(value, currency)}`;
@@ -2634,6 +2894,54 @@ function signedMoneyLabel(value: number | null | undefined, currency = portfolio
 
 function holdingActionLabel(action: HoldingAction) {
   return portfolioText().actions[action];
+}
+
+function holdingActionDisplayLabel(action: HoldingAction | string) {
+  return holdingActionLabel(action as HoldingAction) || String(action || '-');
+}
+
+function holdingActionTone(action: HoldingAction | string | undefined) {
+  if (action === 'exit') return 'exit';
+  if (action === 'reduce') return 'reduce';
+  if (action === 'add') return 'add';
+  return 'hold';
+}
+
+function holdingPlannedQuantityDisplay(value: number | null | undefined) {
+  return quantityAbsLabel(value);
+}
+
+function holdingExecutableQuantityDisplay(value: number | null | undefined, status?: string) {
+  if (status === 'blocked_today') return '0';
+  return quantityAbsLabel(value);
+}
+
+function holdingRuleLabel(orderSizing: HoldingActionItem['orderSizing'] | undefined, market?: Market | string) {
+  const lot = orderSizing?.sellLotSize ?? orderSizing?.boardLotSize ?? orderSizing?.buyLotSize;
+  if (lot && lot > 1) {
+    if (locale.value === 'en') return `${lot} shares / lot`;
+    if (locale.value === 'zh-CN') return `${lot} 股一手`;
+    if (locale.value === 'ja') return `${lot}株単位`;
+    if (locale.value === 'ko') return `${lot}주 단위`;
+    return `${lot} 股一手`;
+  }
+  if (orderSizing?.allowsOddLotSell || orderSizing?.allowsOddLotBuy) {
+    return localeText({ en: 'Odd lots allowed', 'zh-CN': '支持零股', 'zh-TW': '支援零股', ja: '単元未満可', ko: '단주 가능' });
+  }
+  if (market === 'CN') return localeText({ en: 'A-share lot rules', 'zh-CN': 'A 股手数规则', 'zh-TW': 'A 股手數規則', ja: 'A株単位規則', ko: 'A주 단위 규칙' });
+  return localeText({ en: 'Market lot rules', 'zh-CN': '市场手数规则', 'zh-TW': '市場手數規則', ja: '市場単位規則', ko: '시장 단위 규칙' });
+}
+
+function holdingActionRuleLabel(item: HoldingActionItem) {
+  return holdingRuleLabel(item.orderSizing, item.market);
+}
+
+function holdingActionItemReasonLabel(item: HoldingActionItem) {
+  if (item.executionStatus === 'blocked_today') return holdingExecutionStatusLabel(item.executionStatus);
+  if (item.executionStatus === 'partial_t1_locked') return holdingExecutionStatusLabel(item.executionStatus);
+  if (item.tradableNow === false) return localeText({ en: 'Market not tradable now', 'zh-CN': '当前市场不可交易', 'zh-TW': '目前市場不可交易', ja: '現在は取引不可', ko: '현재 거래 불가' });
+  if (item.primaryNoteKeys?.length) return item.primaryNoteKeys.slice(0, 2).join(' · ');
+  return holdingExecutionStatusLabel(item.executionStatus);
 }
 
 function holdingFieldLabel(field: HoldingFieldKey) {
@@ -3267,6 +3575,44 @@ function signedQuantityLabel(value: number | null | undefined) {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number) || number === 0) return '0';
   return `${number > 0 ? '+' : ''}${number}`;
+}
+
+function holdingRowSeverity(row: HoldingRowView) {
+  if (row.action === 'exit') return 5;
+  if (row.action === 'reduce') return 4;
+  if (row.executionStatus === 'blocked_today' || row.executionStatus === 'partial_t1_locked') return 3;
+  if (Number(row.livePriceDriftPct ?? 0) >= 1) return 2;
+  return 1;
+}
+
+function holdingRowAvailableLabel(row: HoldingRowView) {
+  const available = row.availableQuantity !== null && row.availableQuantity !== undefined
+    ? quantityAbsLabel(row.availableQuantity)
+    : '-';
+  const blocked = nonNegativeQuantity(row.blockedQuantity);
+  if (blocked <= 0) return available;
+  return `${available} / T+1 ${quantityAbsLabel(blocked)}`;
+}
+
+function holdingRowPriceSourceLabel(row: HoldingRowView) {
+  if (row.livePriceDriftPct !== null && row.livePriceDriftPct !== undefined) {
+    const drift = percentLabel(row.livePriceDriftPct);
+    if (locale.value === 'en') return `Broker drift ${drift}`;
+    if (locale.value === 'zh-CN') return `券商/实时偏差 ${drift}`;
+    if (locale.value === 'ja') return `証券/リアル差 ${drift}`;
+    if (locale.value === 'ko') return `증권/실시간 차이 ${drift}`;
+    return `券商/即時偏差 ${drift}`;
+  }
+  if (row.quoteStatus) return quoteConsensusLabel(row.quoteStatus);
+  return localeText({ en: 'Price source ok', 'zh-CN': '价格源正常', 'zh-TW': '價格源正常', ja: '価格ソース正常', ko: '가격 출처 정상' });
+}
+
+function holdingRowDetailTitle() {
+  return localeText({ en: 'Rules and notes', 'zh-CN': '规则与原因', 'zh-TW': '規則與原因', ja: '規則と理由', ko: '규칙과 사유' });
+}
+
+function holdingRowRuleLabel(row: HoldingRowView) {
+  return holdingRuleLabel(row.orderSizing, row.market);
 }
 
 function decisionEngineTitle() {
@@ -5928,6 +6274,7 @@ function handleAnalysisEvent(event: AnalysisStreamEvent) {
 
 async function runAnalysis() {
   if (loading.value) return;
+  const portfolioForRequest = importedPortfolio.value ?? analysisPortfolio.value ?? undefined;
   const controller = new AbortController();
   analysisAbortController = controller;
   scanRunId.value += 1;
@@ -5947,7 +6294,7 @@ async function runAnalysis() {
       strategyId: useCustom.value ? undefined : selectedStrategyId.value,
       customWeights: useCustom.value ? { ...customWeights } : undefined,
       refresh: true,
-      portfolio: importedPortfolio.value ?? undefined
+      portfolio: portfolioForRequest
     }, handleAnalysisEvent, { signal: controller.signal });
   } catch (cause) {
     error.value = isAnalysisAbort(cause) ? t.value.scanCancelled : (cause instanceof Error ? cause.message : 'Unknown error');
@@ -5970,6 +6317,7 @@ watch(
     symbolText: symbolText.value,
     manualHoldingText: manualHoldingText.value,
     displayMode: displayMode.value,
+    activeInvestmentTask: activeTaskMode.value,
     activeView: activeView.value,
     resultSortKey: resultSortKey.value,
     resultSortDirection: resultSortDirection.value
@@ -6221,32 +6569,34 @@ onUnmounted(() => {
               <h2>{{ taskInputTitle() }}</h2>
               <span class="mode-pill">{{ scanLabel }}</span>
             </div>
-            <div class="scan-purpose">
-              <strong>{{ t.symbolsBlank }}</strong>
-              <span>{{ t.scanPurpose }}</span>
-            </div>
-            <div class="scan-universe-card">
-              <div>
-                <span>{{ scanUniverseModeLabel(scanUniverse?.mode) }}</span>
-                <strong>{{ fullMarketAssuranceLabel() }}</strong>
+            <template v-if="activeTaskMode !== 'portfolio'">
+              <div class="scan-purpose">
+                <strong>{{ t.symbolsBlank }}</strong>
+                <span>{{ t.scanPurpose }}</span>
               </div>
-              <div class="scan-universe-grid">
-                <span>
-                  <b>{{ scanUniverse?.candidatePoolSize ?? 0 }}</b>
-                  {{ scanUniverseMetricLabel('candidatePoolSize') }}
-                </span>
-                <span>
-                  <b>{{ scanUniverse?.deepAnalysisCount ?? 0 }}</b>
-                  {{ scanUniverseMetricLabel('deepAnalysisCount') }}
-                </span>
-                <span>
-                  <b>{{ scanUniverse?.displayedCount ?? picks.length }}</b>
-                  {{ scanUniverseMetricLabel('displayedCount') }}
-                </span>
+              <div class="scan-universe-card">
+                <div>
+                  <span>{{ scanUniverseModeLabel(scanUniverse?.mode) }}</span>
+                  <strong>{{ fullMarketAssuranceLabel() }}</strong>
+                </div>
+                <div class="scan-universe-grid">
+                  <span>
+                    <b>{{ scanUniverse?.candidatePoolSize ?? 0 }}</b>
+                    {{ scanUniverseMetricLabel('candidatePoolSize') }}
+                  </span>
+                  <span>
+                    <b>{{ scanUniverse?.deepAnalysisCount ?? 0 }}</b>
+                    {{ scanUniverseMetricLabel('deepAnalysisCount') }}
+                  </span>
+                  <span>
+                    <b>{{ scanUniverse?.displayedCount ?? picks.length }}</b>
+                    {{ scanUniverseMetricLabel('displayedCount') }}
+                  </span>
+                </div>
+                <small>{{ scanUniverseSourcePreview() }} · {{ scanUniverseFallbackLabel() }}</small>
               </div>
-              <small>{{ scanUniverseSourcePreview() }} · {{ scanUniverseFallbackLabel() }}</small>
-            </div>
-            <div class="portfolio-import">
+            </template>
+            <div v-else class="portfolio-import portfolio-source-card">
               <div>
                 <strong>{{ portfolioImportTitle() }}</strong>
                 <span>{{ portfolioImportHint() }}</span>
@@ -6291,6 +6641,10 @@ onUnmounted(() => {
                   </li>
                 </ul>
               </div>
+              <div v-else class="portfolio-source-status">
+                <strong>{{ portfolioSourceCtaLabel() }}</strong>
+                <span>{{ portfolioEmptyHint() }}</span>
+              </div>
               <div v-if="portfolioMemory.length" class="portfolio-memory">
                 <div class="portfolio-memory-heading">
                   <strong>{{ portfolioMemoryTitleLabel() }}</strong>
@@ -6318,7 +6672,7 @@ onUnmounted(() => {
               </div>
               <p v-if="portfolioImportError" class="portfolio-error">{{ portfolioImportError }}</p>
             </div>
-            <details class="optional-symbols" @toggle="keepOptionalSymbolsVisible">
+            <details v-if="activeTaskMode !== 'portfolio'" class="optional-symbols" @toggle="keepOptionalSymbolsVisible">
               <summary>{{ t.optionalSymbols }}</summary>
               <textarea v-model="symbolText" rows="4" spellcheck="false" :placeholder="t.symbolsPlaceholder"></textarea>
               <p class="strategy-copy">{{ t.symbolsHint }}</p>
@@ -6415,9 +6769,9 @@ onUnmounted(() => {
 
         <div class="control-actions">
           <div class="action-row">
-            <button class="primary-action" type="button" :disabled="loading" @click="runAnalysis">
+            <button class="primary-action" type="button" :disabled="loading || primaryActionDisabled" @click="runAnalysis">
               <span v-if="loading" class="spinner" aria-hidden="true"></span>
-              {{ loading ? t.loading : t.analyze }}
+              {{ primaryActionLabel }}
             </button>
             <button v-if="loading" class="ghost cancel-action" type="button" @click="cancelAnalysis">{{ t.cancelScan }}</button>
           </div>
@@ -6431,9 +6785,9 @@ onUnmounted(() => {
 
       <section class="results">
         <div class="section-row">
-          <h2>{{ activeView === 'stocks' ? t.topIdeas : t.sectorIdeas }}</h2>
+          <h2>{{ activeView === 'stocks' ? activeResultTitle() : t.sectorIdeas }}</h2>
           <div class="result-actions">
-            <div class="view-toggle" role="tablist" aria-label="Result view">
+            <div v-if="activeTaskMode !== 'portfolio'" class="view-toggle" role="tablist" aria-label="Result view">
               <button :class="{ active: activeView === 'stocks' }" type="button" @click="activeView = 'stocks'">
                 {{ t.stockView }} <span>{{ filteredPicks.length }}</span>
               </button>
@@ -6441,10 +6795,11 @@ onUnmounted(() => {
                 {{ t.sectorView }} <span>{{ sectors.length }}</span>
               </button>
             </div>
+            <span v-else class="mode-pill">{{ activePortfolio ? portfolioReadyLabel(activePortfolio) : portfolioEmptyTitle() }}</span>
             <button class="ghost" :disabled="!canSaveScan" type="button" @click="saveCurrentScan">{{ t.saveScan }}</button>
             <button class="ghost" :disabled="!canSaveScan" type="button" @click="exportMarkdown">{{ t.exportMarkdown }}</button>
             <button class="ghost" :disabled="!canSaveScan" type="button" @click="exportJson">{{ t.exportJson }}</button>
-            <button class="ghost" :disabled="loading" @click="runAnalysis">{{ t.refresh }}</button>
+            <button v-if="picks.length || scanInfo" class="ghost" :disabled="loading" @click="runAnalysis">{{ t.refresh }}</button>
           </div>
         </div>
 
@@ -6489,7 +6844,135 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div v-if="activeView === 'stocks'" class="decision-workbench">
+        <div v-if="activeView === 'stocks' && activeTaskMode === 'portfolio'" class="portfolio-workbench">
+          <div class="portfolio-workbench-heading">
+            <div>
+              <span>{{ portfolioActionBoardTitle() }}</span>
+              <strong>{{ holdingCommandTitle() }}</strong>
+              <p>{{ portfolioWorkbenchSubtitle() }}</p>
+            </div>
+            <button v-if="activePortfolio" class="ghost compact" type="button" :disabled="loading" @click="runAnalysis">
+              {{ t.refresh }}
+            </button>
+          </div>
+
+          <div v-if="!activePortfolio" class="portfolio-empty-state">
+            <strong>{{ portfolioEmptyTitle() }}</strong>
+            <p>{{ portfolioEmptyHint() }}</p>
+            <button class="ghost compact" type="button" :disabled="loading || importingPortfolio" @click="triggerPortfolioImport">
+              {{ portfolioImportButtonLabel() }}
+            </button>
+          </div>
+
+          <template v-else>
+            <div class="portfolio-dashboard-grid">
+              <article v-for="metric in portfolioDashboardMetrics" :key="metric.key" :class="metric.tone">
+                <span>{{ portfolioDashboardMetricLabel(metric.key) }}</span>
+                <strong>{{ metric.value }}</strong>
+                <small>{{ metric.detail }}</small>
+              </article>
+            </div>
+
+            <ul v-if="activePortfolio.warnings?.length" class="holding-command-warnings">
+              <li v-for="note in activePortfolio.warnings.slice(0, 4)" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
+                {{ holdingNoteLabel(note) }}
+              </li>
+            </ul>
+
+            <section v-if="holdingActionItems.length" class="portfolio-action-board">
+              <div class="portfolio-section-heading">
+                <strong>{{ holdingActionListTitle() }}</strong>
+                <span>{{ holdingCommandSubtitle() }}</span>
+              </div>
+              <div class="portfolio-action-table">
+                <article v-for="item in holdingActionItems" :key="item.symbol" :class="[holdingActionTone(item.action), item.executionStatus]">
+                  <div class="portfolio-action-symbol">
+                    <b>{{ item.symbol }}</b>
+                    <span>{{ item.name }}</span>
+                  </div>
+                  <span class="portfolio-action-chip" :class="holdingActionTone(item.action)">
+                    {{ holdingActionDisplayLabel(item.action) }}
+                  </span>
+                  <div>
+                    <small>{{ holdingPlannedQuantityTitle() }}</small>
+                    <b>{{ holdingPlannedQuantityDisplay(item.plannedQuantityChange) }}</b>
+                  </div>
+                  <div>
+                    <small>{{ holdingExecutableQuantityTitle() }}</small>
+                    <b>{{ holdingExecutableQuantityDisplay(item.executableQuantityChange, item.executionStatus) }}</b>
+                  </div>
+                  <div>
+                    <small>{{ t.riskControls }}</small>
+                    <b>{{ holdingActionRuleLabel(item) }}</b>
+                  </div>
+                  <p>{{ holdingActionItemReasonLabel(item) }}</p>
+                </article>
+              </div>
+            </section>
+
+            <section class="portfolio-holding-board">
+              <div class="portfolio-section-heading">
+                <strong>{{ portfolioHoldingRowsTitle() }}</strong>
+                <span>{{ holdingRows.length }} {{ portfolioPositionUnitLabel() }}</span>
+              </div>
+              <div class="portfolio-holding-list">
+                <article v-for="row in holdingRows" :key="row.symbol" :class="[holdingActionTone(row.action), row.executionStatus]">
+                  <div class="portfolio-holding-main">
+                    <div>
+                      <strong>{{ row.symbol }}</strong>
+                      <span>{{ row.name }}</span>
+                    </div>
+                    <span class="portfolio-action-chip" :class="holdingActionTone(row.action)">
+                      {{ holdingActionDisplayLabel(row.action) }}
+                    </span>
+                  </div>
+                  <div class="portfolio-holding-metrics">
+                    <span>
+                      <small>{{ holdingFieldLabel('quantity') }}</small>
+                      <b>{{ quantityAbsLabel(row.quantity) }}</b>
+                    </span>
+                    <span>
+                      <small>{{ holdingExecutableQuantityTitle() }}</small>
+                      <b>{{ holdingRowAvailableLabel(row) }}</b>
+                    </span>
+                    <span>
+                      <small>{{ holdingFieldLabel('cost') }}</small>
+                      <b>{{ moneyLabel(row.costPrice, row.currency) }}</b>
+                    </span>
+                    <span>
+                      <small>{{ currentPriceLabel() }}</small>
+                      <b>{{ moneyLabel(row.lastPrice, row.currency) }}</b>
+                    </span>
+                    <span>
+                      <small>{{ holdingFieldLabel('pnl') }}</small>
+                      <b>{{ signedMoneyLabel(row.unrealizedPnl, row.currency) }} · {{ percentLabel(row.unrealizedPnlPct) }}</b>
+                    </span>
+                    <span>
+                      <small>{{ t.riskControls }}</small>
+                      <b>{{ holdingExecutionStatusLabel(row.executionStatus) }}</b>
+                    </span>
+                  </div>
+                  <details class="portfolio-holding-detail">
+                    <summary>{{ holdingRowDetailTitle() }}</summary>
+                    <div>
+                      <span>{{ holdingRowRuleLabel(row) }}</span>
+                      <span>{{ holdingRowPriceSourceLabel(row) }}</span>
+                      <span v-if="row.stopLossPrice">{{ t.riskControls }} {{ moneyLabel(row.stopLossPrice, row.currency) }}</span>
+                      <span v-if="row.takeProfitPrice">{{ t.actionPlan }} {{ moneyLabel(row.takeProfitPrice, row.currency) }}</span>
+                    </div>
+                    <ul v-if="row.notes.length">
+                      <li v-for="note in row.notes.slice(0, 4)" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
+                        {{ holdingNoteLabel(note) }}
+                      </li>
+                    </ul>
+                  </details>
+                </article>
+              </div>
+            </section>
+          </template>
+        </div>
+
+        <div v-if="activeView === 'stocks' && activeTaskMode !== 'portfolio'" class="decision-workbench">
           <div class="decision-workbench-heading">
             <div>
               <span>{{ scanUniverseModeLabel(scanUniverse?.mode) }}</span>
@@ -6536,65 +7019,14 @@ onUnmounted(() => {
           </div>
 
           <div v-if="topHoldingPicks.length || topEtfPicks.length" class="decision-shortcuts">
-            <button v-if="topHoldingPicks.length" class="holding" type="button" @click="activeWorkbenchBucket = 'holdings'">
-              <strong>{{ workbenchBucketLabel('holdings') }}</strong>
+            <button v-if="topHoldingPicks.length" class="holding" type="button" @click="selectInvestmentTask('portfolio')">
+              <strong>{{ holdingCommandTitle() }}</strong>
               <span>{{ topHoldingPicks.map((pick) => pick.symbol).join(' · ') }}</span>
             </button>
             <button v-if="topEtfPicks.length" class="etf" type="button" @click="activeWorkbenchBucket = 'etf'">
               <strong>{{ workbenchBucketLabel('etf') }}</strong>
               <span>{{ topEtfPicks.map((pick) => pick.symbol).join(' · ') }}</span>
             </button>
-          </div>
-        </div>
-
-        <div v-if="activeView === 'stocks' && (activePortfolio || holdingCommandSummary.count)" class="holding-command-center">
-          <div class="holding-command-heading">
-            <div>
-              <span>{{ scanUniverseModeLabel(scanUniverse?.mode) }}</span>
-              <strong>{{ holdingCommandTitle() }}</strong>
-              <p>{{ holdingCommandSubtitle() }}</p>
-            </div>
-            <button class="ghost compact" type="button" @click="activeWorkbenchBucket = 'holdings'">
-              {{ workbenchBucketLabel('holdings') }}
-            </button>
-          </div>
-          <div class="holding-command-grid">
-            <div>
-              <span>{{ holdingCommandMetricLabel('positions') }}</span>
-              <b>{{ holdingCommandSummary.count || activePortfolio?.recognizedCount || 0 }}</b>
-              <small>{{ activePortfolio ? moneyLabel(activePortfolio.totalMarketValue) : '-' }}</small>
-            </div>
-            <div class="warning">
-              <span>{{ holdingCommandMetricLabel('risk') }}</span>
-              <b>{{ holdingCommandSummary.reduceCount + holdingCommandSummary.exitCount }}</b>
-              <small>{{ signedMoneyLabel(activePortfolio?.totalUnrealizedPnl) }} · {{ percentLabel(activePortfolio?.totalUnrealizedPnlPct) }}</small>
-            </div>
-            <div :class="{ danger: holdingCommandSummary.blockedCount > 0 }">
-              <span>{{ holdingCommandMetricLabel('blocked') }}</span>
-              <b>{{ holdingCommandSummary.blockedCount }}</b>
-              <small>T+1</small>
-            </div>
-            <div>
-              <span>{{ holdingCommandMetricLabel('planned') }}</span>
-              <b>{{ signedQuantityLabel(holdingCommandSummary.plannedSell) }}</b>
-              <small>{{ holdingCommandMetricLabel('executable') }} {{ signedQuantityLabel(holdingCommandSummary.executableSell) }}</small>
-            </div>
-          </div>
-          <ul v-if="activePortfolio?.warnings?.length" class="holding-command-warnings">
-            <li v-for="note in activePortfolio.warnings.slice(0, 3)" :key="note.key + JSON.stringify(note.params)" :class="note.severity">
-              {{ holdingNoteLabel(note) }}
-            </li>
-          </ul>
-          <div v-if="holdingActionItems.length" class="holding-action-list">
-            <strong>{{ holdingActionListTitle() }}</strong>
-            <article v-for="item in holdingActionItems" :key="item.symbol" :class="[item.action, item.executionStatus]">
-              <div>
-                <b>{{ item.symbol }}</b>
-                <span>{{ item.name }}</span>
-              </div>
-              <small>{{ holdingActionItemLabel(item) }}</small>
-              <em>{{ percentLabel(item.unrealizedPnlPct) }}</em>
-            </article>
           </div>
         </div>
 
